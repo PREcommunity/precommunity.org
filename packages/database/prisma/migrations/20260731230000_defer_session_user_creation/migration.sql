@@ -1,0 +1,2 @@
+ALTER TABLE "WalletSession"
+ALTER COLUMN "userId" DROP NOT NULL;

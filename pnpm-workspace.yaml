@@ -1,0 +1,45 @@
+packages:
+  - apps/*
+  - packages/*
+
+enableGlobalVirtualStore: false
+
+strictDepBuilds: true
+
+overrides:
+  qr: 0.5.5
+
+allowBuilds:
+  '@prisma/client': true
+  '@prisma/engines': true
+  '@scarf/scarf': true
+  bufferutil: true
+  esbuild: true
+  keccak: true
+  msgpackr-extract: true
+  prisma: true
+  secp256k1: true
+  sharp: true
+  unrs-resolver: true
+  utf-8-validate: true
+
+minimumReleaseAgeExclude:
+  - '@playwright/test@1.62.1'
+  - bullmq@5.81.3
+  - msgpackr@2.0.5
+  - ox@0.14.33
+  - playwright-core@1.62.1
+  - playwright@1.62.1
+  - viem@2.55.10
+  - '@next/env@16.3.3'
+  - '@next/eslint-plugin-next@16.3.3'
+  - '@next/swc-darwin-arm64@16.3.3'
+  - '@next/swc-darwin-x64@16.3.3'
+  - '@next/swc-linux-arm64-gnu@16.3.3'
+  - '@next/swc-linux-arm64-musl@16.3.3'
+  - '@next/swc-linux-x64-gnu@16.3.3'
+  - '@next/swc-linux-x64-musl@16.3.3'
+  - '@next/swc-win32-arm64-msvc@16.3.3'
+  - '@next/swc-win32-x64-msvc@16.3.3'
+  - eslint-config-next@16.3.3
+  - next@16.3.3

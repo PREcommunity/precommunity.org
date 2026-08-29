@@ -1,0 +1,46 @@
+{
+  "name": "precommunity-ledger",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@11.22.0+sha512.1ff870c4c6133dfd88fb2afc46dd13d47f09c9794b438c6fdb47ca98caf3bc16381ee0be93a091b8e3824cf01f889f46d7d9e20910fb0be1ab0fb5baa80dd621",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm build:packages && pnpm --parallel --filter @precommunity/web --filter @precommunity/api --filter @precommunity/worker dev",
+    "dev:testnet": "PRECOMMUNITY_NETWORK=base-sepolia NEXT_PUBLIC_PRECOMMUNITY_NETWORK=base-sepolia pnpm dev",
+    "dev:mainnet": "PRECOMMUNITY_NETWORK=base NEXT_PUBLIC_PRECOMMUNITY_NETWORK=base pnpm dev",
+    "build:packages": "pnpm --filter @precommunity/shared build && pnpm --filter @precommunity/database db:generate && pnpm --filter @precommunity/database build",
+    "build": "pnpm build:packages && pnpm --filter @precommunity/api build && pnpm --filter @precommunity/worker build && pnpm --filter @precommunity/web build",
+    "format": "prettier --write . --ignore-unknown",
+    "format:check": "prettier --check . --ignore-unknown",
+    "lint": "eslint apps packages --max-warnings=0",
+    "typecheck": "pnpm build:packages && pnpm -r --if-present typecheck",
+    "test": "bash ops/runtime-deployment-env.test.sh && pnpm build:packages && pnpm -r --if-present test",
+    "test:e2e:critical": "pnpm build:packages && pnpm --filter @precommunity/web test:e2e:critical",
+    "clean:web-cache": "pnpm --filter @precommunity/web clean:cache",
+    "abi:sync": "pnpm --filter @precommunity/shared abi:sync",
+    "worker:backfill": "pnpm --filter @precommunity/worker backfill",
+    "db:generate": "pnpm --filter @precommunity/database db:generate",
+    "db:validate": "pnpm --filter @precommunity/database exec prisma validate",
+    "db:migrate": "pnpm --filter @precommunity/database db:migrate",
+    "db:migrate:testnet": "PRECOMMUNITY_NETWORK=base-sepolia pnpm db:migrate",
+    "db:seed:testnet": "PRECOMMUNITY_NETWORK=base-sepolia pnpm db:seed",
+    "db:setup:testnet": "pnpm db:migrate:testnet && pnpm db:seed:testnet",
+    "db:deploy": "pnpm --filter @precommunity/database db:deploy",
+    "db:migrate:dev": "pnpm --filter @precommunity/database db:migrate:dev",
+    "db:cutover-escrow": "pnpm --filter @precommunity/database db:cutover-escrow",
+    "db:export-public-ledger": "pnpm --filter @precommunity/database db:export-public-ledger",
+    "db:seed": "pnpm --filter @precommunity/database db:seed"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "16.3.3",
+    "globals": "^16.5.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.66.0"
+  }
+}

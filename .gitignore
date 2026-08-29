@@ -1,0 +1,36 @@
+# Dependencies and package-manager state
+node_modules/
+.pnpm-store/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Framework and build output
+.next/
+.next-social/
+.next-e2e/
+dist/
+coverage/
+artifacts/
+cache/
+typechain-types/
+packages/database/src/generated/prisma/
+
+# Test output
+playwright-report/
+test-results/
+
+# Local databases and logs
+packages/database/prisma/dev.db
+*.log
+
+# Operating-system files
+.DS_Store
+
+# Private local agent configuration
+/AGENTS.md
+/.agents/
+/.codex/

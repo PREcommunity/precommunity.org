@@ -1,0 +1,919 @@
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  SUPER_ADMIN
+  CONTENT_ADMIN
+  FINANCE_ADMIN
+}
+
+enum ChainAuthorityKind {
+  OWNER
+  GOAL_MANAGER
+}
+
+enum GoalManagerAssignmentSource {
+  SAFE_OWNER
+  MANUAL
+}
+
+enum SponsorVisibility {
+  PUBLIC
+  ANONYMOUS
+}
+
+enum ExpenseCadence {
+  ONE_TIME
+  MONTHLY
+}
+
+enum FundingGoalType {
+  ONE_TIME
+  MONTHLY
+}
+
+enum MonthlySurplusPolicy {
+  PAYOUT_ALL
+  ROLL_OVER
+}
+
+enum ExpenseStatus {
+  DRAFT
+  PENDING_CHAIN
+  PUBLISHED
+  ARCHIVED
+}
+
+enum FundingAsset {
+  PRE
+  USDC
+}
+
+enum FundingGoalStatus {
+  DRAFT
+  OPEN
+  CLOSED
+  SETTLED
+  CANCELLED
+}
+
+enum MetadataStatus {
+  NOT_SET
+  AVAILABLE
+  UNAVAILABLE
+  INVALID
+}
+
+enum PayoutKind {
+  EXPENSE
+  CANCELLED_FUNDS
+}
+
+enum PayoutStatus {
+  PROPOSED
+  EXECUTED
+  FAILED
+}
+
+enum SafePayoutProposalStatus {
+  SUBMITTING
+  AWAITING_CONFIRMATIONS
+  READY_TO_EXECUTE
+  EXECUTED
+  STALE
+  FAILED
+}
+
+enum SafeGoalManagerProposalStatus {
+  SUBMITTING
+  AWAITING_CONFIRMATIONS
+  READY_TO_EXECUTE
+  EXECUTED
+  STALE
+  FAILED
+}
+
+enum SafeGoalActionKind {
+  CLOSE_ONE_TIME
+  CANCEL_ONE_TIME
+  SET_MONTHLY_SURPLUS_POLICY
+  REQUEST_MONTHLY_STOP
+  CANCEL_MONTHLY
+}
+
+enum SafeGoalActionProposalStatus {
+  SUBMITTING
+  AWAITING_CONFIRMATIONS
+  READY_TO_EXECUTE
+  EXECUTED
+  STALE
+  FAILED
+}
+
+enum CommunityProposalStatus {
+  PENDING_REVIEW
+  VOTING
+  PASSED
+  REJECTED
+  CONVERTED
+  DECLINED
+  REMOVED
+}
+
+enum ProposalVoteChoice {
+  FOR
+  AGAINST
+  ABSTAIN
+}
+
+enum ForumCategory {
+  GENERAL
+  IDEAS_FEEDBACK
+  TECHNICAL
+  HELP
+}
+
+enum ForumTopicStatus {
+  PENDING_REVIEW
+  PUBLISHED
+  LOCKED
+  DECLINED
+  REMOVED
+}
+
+enum AdCreativeStatus {
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  SUSPENDED
+  SUPERSEDED
+}
+
+enum AdReportReason {
+  SCAM_PHISHING
+  MISLEADING
+  INAPPROPRIATE
+  BROKEN_LINK
+  OTHER
+}
+
+enum AdReportStatus {
+  OPEN
+  DISMISSED
+  ACTIONED
+}
+
+model User {
+  id                         String               @id @default(uuid()) @db.Uuid
+  address                    String               @unique
+  roles                      Role[]               @default([])
+  createdAt                  DateTime             @default(now())
+  updatedAt                  DateTime             @updatedAt
+  profile                    SponsorProfile?
+  sessions                   WalletSession[]
+  contributions              CryptoContribution[]
+  proposals                  CommunityProposal[]
+  proposalVotes              ProposalVote[]
+  comments                   ProposalComment[]
+  forumTopics                ForumTopic[]
+  forumReplies               ForumReply[]
+  receivedForumNotifications ForumNotification[]  @relation("ForumNotificationRecipient")
+  sentForumNotifications     ForumNotification[]  @relation("ForumNotificationActor")
+  adCampaigns                AdCampaign[]
+}
+
+model SponsorProfile {
+  id            String         @id @default(uuid()) @db.Uuid
+  userId        String         @unique @db.Uuid
+  active        Boolean        @default(false)
+  revision      BigInt         @default(0)
+  displayName   String?
+  websiteUrl    String?
+  avatarUri     String?
+  avatarStatus  MetadataStatus @default(NOT_SET)
+  bio           String?
+  defaultPublic Boolean        @default(false)
+  hidden        Boolean        @default(false)
+  chainId       Int?
+  blockNumber   BigInt?
+  blockHash     String?
+  txHash        String?
+  logIndex      Int?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([chainId, blockNumber])
+  @@index([active, hidden])
+}
+
+model WalletSession {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String?   @db.Uuid
+  address          String
+  nonceHash        String
+  nonceExpiresAt   DateTime
+  nonceUsedAt      DateTime?
+  siweDomain       String?
+  siweUri          String?
+  sessionTokenHash String?   @unique
+  sessionExpiresAt DateTime?
+  createdAt        DateTime  @default(now())
+  user             User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([address, nonceExpiresAt])
+}
+
+/// Durable off-chain campaign owned by one wallet for one canonical keyword.
+model AdCampaign {
+  id               String               @id @default(uuid()) @db.Uuid
+  userId           String               @db.Uuid
+  canonicalKeyword String
+  activeRevisionId String?              @unique @db.Uuid
+  pausedAt         DateTime?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  user             User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+  revisions        AdCreativeRevision[] @relation("AdCampaignRevisions")
+  activeRevision   AdCreativeRevision?  @relation("ActiveAdRevision", fields: [activeRevisionId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, canonicalKeyword])
+  @@index([canonicalKeyword, pausedAt])
+  @@index([userId, updatedAt])
+}
+
+/// Immutable creative revision. Moderation switches the campaign's active revision.
+model AdCreativeRevision {
+  id                  String              @id @default(uuid()) @db.Uuid
+  campaignId          String              @db.Uuid
+  version             Int
+  headline            String
+  description         String
+  destinationUrl      String
+  displayDomain       String
+  status              AdCreativeStatus    @default(PENDING_REVIEW)
+  moderatedByAddress  String?
+  moderationNote      String?
+  moderatedAt         DateTime?
+  lifetimeResolutions BigInt              @default(0)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  campaign            AdCampaign          @relation("AdCampaignRevisions", fields: [campaignId], references: [id], onDelete: Cascade)
+  activeForCampaign   AdCampaign?         @relation("ActiveAdRevision")
+  reports             AdReport[]
+  reportAggregates    AdReportAggregate[]
+  dailyMetrics        AdDailyMetric[]
+
+  @@unique([campaignId, version])
+  @@index([status, createdAt])
+  @@index([campaignId, status, version])
+}
+
+/// Rebuildable, confirmation-aware projection of the ads staking contract.
+model AdStakePosition {
+  id                  String   @id @default(uuid()) @db.Uuid
+  chainId             Int
+  contractAddress     String
+  canonicalKeyword    String
+  stakerAddress       String
+  stakeRaw            String
+  amountSinceBlock    BigInt
+  amountSinceLogIndex Int
+  positionBlock       BigInt
+  positionBlockHash   String
+  positionTxHash      String
+  positionLogIndex    Int
+  active              Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([chainId, contractAddress, canonicalKeyword, stakerAddress])
+  @@index([chainId, contractAddress, canonicalKeyword, active])
+  @@index([stakerAddress, active])
+}
+
+model AdChainEvent {
+  id              String   @id @default(uuid()) @db.Uuid
+  chainId         Int
+  contractAddress String
+  txHash          String
+  logIndex        Int
+  blockNumber     BigInt
+  blockHash       String
+  eventName       String
+  payload         Json
+  createdAt       DateTime @default(now())
+
+  @@unique([chainId, contractAddress, txHash, logIndex])
+  @@index([chainId, contractAddress, blockNumber])
+}
+
+model AdIndexerState {
+  key             String   @id
+  chainId         Int
+  contractAddress String
+  lastBlockNumber BigInt
+  lastBlockHash   String
+  updatedAt       DateTime @updatedAt
+
+  @@index([chainId, contractAddress])
+}
+
+model AdReport {
+  id                  String             @id @default(uuid()) @db.Uuid
+  revisionId          String             @db.Uuid
+  reason              AdReportReason
+  comment             String?
+  reporterFingerprint String
+  fingerprintDay      DateTime           @db.Date
+  status              AdReportStatus     @default(OPEN)
+  resolvedByAddress   String?
+  resolutionNote      String?
+  resolvedAt          DateTime?
+  createdAt           DateTime           @default(now())
+  revision            AdCreativeRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+
+  @@unique([revisionId, reporterFingerprint, fingerprintDay])
+  @@index([status, createdAt])
+  @@index([revisionId, status, createdAt])
+}
+
+model AdReportAggregate {
+  id         String             @id @default(uuid()) @db.Uuid
+  revisionId String             @db.Uuid
+  reason     AdReportReason
+  total      BigInt             @default(0)
+  updatedAt  DateTime           @updatedAt
+  revision   AdCreativeRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+
+  @@unique([revisionId, reason])
+}
+
+model AdDailyMetric {
+  id          String             @id @default(uuid()) @db.Uuid
+  revisionId  String             @db.Uuid
+  day         DateTime           @db.Date
+  resolutions BigInt             @default(0)
+  updatedAt   DateTime           @updatedAt
+  revision    AdCreativeRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+
+  @@unique([revisionId, day])
+  @@index([day])
+}
+
+/// Idempotency receipt for a Redis analytics batch drained by the worker.
+model AdMetricFlush {
+  id        String   @id
+  bucketDay DateTime @db.Date
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+model Project {
+  id                String             @id @default(uuid()) @db.Uuid
+  slug              String             @unique
+  name              String
+  description       String
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  subprojects       Subproject[]
+  auditEvents       AuditEvent[]
+  communitySettings CommunitySettings?
+}
+
+model CommunitySettings {
+  projectId                   String   @id @db.Uuid
+  forumTopicModerationEnabled Boolean  @default(false)
+  proposalModerationEnabled   Boolean  @default(true)
+  keywordMarketEnabled        Boolean  @default(false)
+  updatedBy                   String?
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
+  project                     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model Subproject {
+  id          String    @id @default(uuid()) @db.Uuid
+  projectId   String    @db.Uuid
+  slug        String
+  name        String
+  description String?
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  expenses    Expense[]
+
+  @@unique([projectId, slug])
+}
+
+/// Administrative goal draft. It never becomes part of the public ledger by itself.
+model Expense {
+  id                   String                @id @default(uuid()) @db.Uuid
+  subprojectId         String                @db.Uuid
+  communityProposalId  String?               @unique @db.Uuid
+  slug                 String                @unique
+  name                 String
+  description          String
+  purpose              String
+  category             String?
+  cadence              ExpenseCadence        @default(ONE_TIME)
+  monthlySurplusPolicy MonthlySurplusPolicy?
+  firstSettlementAtOverride DateTime?
+  status               ExpenseStatus         @default(DRAFT)
+  recipientAddress     String
+  deadline             DateTime?
+  discussionUrl        String?
+  metadataUri          String?
+  metadataDocuments    Json?
+  pendingChainGoalId   String?               @unique
+  pendingChainTxHash   String?
+  activeFrom           DateTime?
+  activeUntil          DateTime?
+  archivedAt           DateTime?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  subproject           Subproject            @relation(fields: [subprojectId], references: [id], onDelete: Restrict)
+  communityProposal    CommunityProposal?    @relation(fields: [communityProposalId], references: [id], onDelete: SetNull)
+  targets              FundingTarget[]
+  goals                FundingGoal[]
+}
+
+/// Off-chain community idea. Only a converted Expense can enter the escrow publication flow.
+model CommunityProposal {
+  id               String                  @id @default(uuid()) @db.Uuid
+  slug             String                  @unique
+  authorId         String                  @db.Uuid
+  title            String
+  description      String
+  category         String
+  status           CommunityProposalStatus @default(PENDING_REVIEW)
+  snapshotBlock    BigInt?
+  votingStartsAt   DateTime?
+  votingEndsAt     DateTime?
+  closedAt         DateTime?
+  moderatedBy      String?
+  moderationNote   String?
+  removedAt        DateTime?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+  author           User                    @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  comments         ProposalComment[]
+  votes            ProposalVote[]
+  convertedExpense Expense?
+
+  @@index([status, createdAt])
+  @@index([authorId, createdAt])
+  @@index([category, status])
+}
+
+model ProposalComment {
+  id         String            @id @default(uuid()) @db.Uuid
+  proposalId String            @db.Uuid
+  authorId   String            @db.Uuid
+  body       String
+  editedAt   DateTime?
+  deletedAt  DateTime?
+  removedAt  DateTime?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  proposal   CommunityProposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  author     User              @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([proposalId, createdAt])
+  @@index([authorId, createdAt])
+}
+
+model ProposalVote {
+  id         String             @id @default(uuid()) @db.Uuid
+  proposalId String             @db.Uuid
+  userId     String             @db.Uuid
+  choice     ProposalVoteChoice
+  weightRaw  String
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+  proposal   CommunityProposal  @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  user       User               @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([proposalId, userId])
+  @@index([proposalId, choice])
+  @@index([userId, createdAt])
+}
+
+/// Public off-chain discussion. Topics never enter the funding flow directly.
+model ForumTopic {
+  id             String              @id @default(uuid()) @db.Uuid
+  slug           String              @unique
+  authorId       String              @db.Uuid
+  title          String
+  body           String
+  category       ForumCategory
+  status         ForumTopicStatus    @default(PUBLISHED)
+  replyCount     Int                 @default(0)
+  lastActivityAt DateTime            @default(now())
+  editedAt       DateTime?
+  deletedAt      DateTime?
+  lockedAt       DateTime?
+  removedAt      DateTime?
+  moderatedBy    String?
+  moderationNote String?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  author         User                @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  replies        ForumReply[]
+  notifications  ForumNotification[]
+
+  @@index([status, lastActivityAt])
+  @@index([category, status, lastActivityAt])
+  @@index([authorId, createdAt])
+}
+
+model ForumReply {
+  id            String              @id @default(uuid()) @db.Uuid
+  topicId       String              @db.Uuid
+  authorId      String              @db.Uuid
+  body          String
+  editedAt      DateTime?
+  deletedAt     DateTime?
+  removedAt     DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  topic         ForumTopic          @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  author        User                @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  parentReplyId String?             @db.Uuid
+  parentReply   ForumReply?         @relation("ForumReplyQuote", fields: [parentReplyId], references: [id], onDelete: SetNull)
+  quotedReplies ForumReply[]        @relation("ForumReplyQuote")
+  notifications ForumNotification[]
+
+  @@index([topicId, createdAt])
+  @@index([authorId, createdAt])
+  @@index([parentReplyId])
+}
+
+model ForumNotification {
+  id          String     @id @default(uuid()) @db.Uuid
+  recipientId String     @db.Uuid
+  actorId     String     @db.Uuid
+  topicId     String     @db.Uuid
+  replyId     String     @db.Uuid
+  readAt      DateTime?
+  createdAt   DateTime   @default(now())
+  recipient   User       @relation("ForumNotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  actor       User       @relation("ForumNotificationActor", fields: [actorId], references: [id], onDelete: Cascade)
+  topic       ForumTopic @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  reply       ForumReply @relation(fields: [replyId], references: [id], onDelete: Cascade)
+
+  @@unique([recipientId, replyId])
+  @@index([recipientId, readAt, createdAt])
+  @@index([topicId, createdAt])
+}
+
+model FundingTarget {
+  id        String       @id @default(uuid()) @db.Uuid
+  expenseId String       @db.Uuid
+  asset     FundingAsset
+  amount    Decimal      @db.Decimal(78, 18)
+  expense   Expense      @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+
+  @@unique([expenseId, asset])
+}
+
+/// Rebuildable public projection. Rows are created only from confirmed GoalCreated logs.
+model FundingGoal {
+  id                          String                 @id @default(uuid()) @db.Uuid
+  expenseId                   String?                @db.Uuid
+  chainId                     Int                    @default(84532)
+  chainGoalId                 String
+  creatorAddress              String
+  goalType                    FundingGoalType        @default(ONE_TIME)
+  monthlySurplusPolicy        MonthlySurplusPolicy?
+  monthlyFirstSettlementAt    DateTime?
+  monthlySettlementDay        Int?                   @db.SmallInt
+  monthlyStopRequestedAt      DateTime?
+  monthlyPeriodsSettled       Int                    @default(0)
+  slug                        String
+  monthStart                  DateTime
+  title                       String
+  description                 String
+  recipientAddress            String
+  deadline                    DateTime
+  metadataUri                 String?
+  metadataStatus              MetadataStatus         @default(NOT_SET)
+  metadata                    Json?
+  legacyCategory              String?
+  legacyDiscussionUrl         String?
+  preTargetRaw                String                 @default("0")
+  usdcTargetRaw               String                 @default("0")
+  preRecipientEntitlementRaw  String                 @default("0")
+  usdcRecipientEntitlementRaw String                 @default("0")
+  preCarryRaw                 String                 @default("0")
+  usdcCarryRaw                String                 @default("0")
+  preTreasuryEntitlementRaw   String                 @default("0")
+  usdcTreasuryEntitlementRaw  String                 @default("0")
+  status                      FundingGoalStatus      @default(OPEN)
+  creationTxHash              String?
+  creationBlock               BigInt?
+  creationBlockHash           String?
+  publishedAt                 DateTime?
+  closedAt                    DateTime?
+  createdAt                   DateTime               @default(now())
+  updatedAt                   DateTime               @updatedAt
+  expense                     Expense?               @relation(fields: [expenseId], references: [id], onDelete: SetNull)
+  contributions               CryptoContribution[]
+  payouts                     Payout[]
+  safePayoutIntents           SafePayoutIntent[]
+  periods                     FundingGoalPeriod[]
+  safeGoalActionIntents       SafeGoalActionIntent[]
+
+  @@unique([chainId, chainGoalId])
+  @@unique([chainId, slug])
+  @@index([monthStart, status])
+  @@index([chainId, creationBlock])
+  @@index([expenseId])
+}
+
+/// Rebuildable settlement projection for one UTC monthly funding period.
+model FundingGoalPeriod {
+  id                               String               @id @default(uuid()) @db.Uuid
+  goalId                           String               @db.Uuid
+  periodIndex                      Int
+  startsAt                         DateTime
+  endsAt                           DateTime
+  surplusPolicy                    MonthlySurplusPolicy
+  finalPeriod                      Boolean              @default(false)
+  preContributedRaw                String               @default("0")
+  usdcContributedRaw               String               @default("0")
+  preCarryInRaw                    String               @default("0")
+  usdcCarryInRaw                   String               @default("0")
+  preRecipientEntitlementAddedRaw  String               @default("0")
+  usdcRecipientEntitlementAddedRaw String               @default("0")
+  preCarryOutRaw                   String               @default("0")
+  usdcCarryOutRaw                  String               @default("0")
+  settlementTxHash                 String?
+  settlementBlock                  BigInt?
+  settlementBlockHash              String?
+  settlementLogIndex               Int?
+  settledAt                        DateTime?
+  createdAt                        DateTime             @default(now())
+  updatedAt                        DateTime             @updatedAt
+  goal                             FundingGoal          @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  @@unique([goalId, periodIndex])
+  @@index([goalId, startsAt])
+  @@index([startsAt, endsAt])
+  @@index([endsAt])
+}
+
+model CryptoContribution {
+  id          String            @id @default(uuid()) @db.Uuid
+  goalId      String            @db.Uuid
+  userId      String            @db.Uuid
+  chainId     Int
+  txHash      String
+  logIndex    Int
+  blockNumber BigInt
+  blockHash   String
+  contributor String
+  asset       FundingAsset
+  amountRaw   String
+  visibility  SponsorVisibility @default(ANONYMOUS)
+  confirmedAt DateTime
+  createdAt   DateTime          @default(now())
+  goal        FundingGoal       @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  user        User              @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([chainId, txHash, logIndex])
+  @@index([goalId, asset])
+  @@index([userId])
+}
+
+model Payout {
+  id               String            @id @default(uuid()) @db.Uuid
+  goalId           String            @db.Uuid
+  asset            FundingAsset
+  kind             PayoutKind
+  amountRaw        String
+  recipientAddress String
+  chainTxHash      String?
+  status           PayoutStatus      @default(PROPOSED)
+  createdAt        DateTime          @default(now())
+  executedAt       DateTime?
+  goal             FundingGoal       @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  safeIntent       SafePayoutIntent?
+
+  @@index([goalId, status])
+}
+
+model SafePayoutIntent {
+  id               String              @id @default(uuid()) @db.Uuid
+  payoutId         String              @unique @db.Uuid
+  goalId           String              @db.Uuid
+  chainId          Int
+  safeAddress      String
+  safeNonce        String
+  toAddress        String
+  valueRaw         String              @default("0")
+  data             String
+  createdByAddress String
+  expiresAt        DateTime
+  consumedAt       DateTime?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  payout           Payout              @relation(fields: [payoutId], references: [id], onDelete: Restrict)
+  goal             FundingGoal         @relation(fields: [goalId], references: [id], onDelete: Restrict)
+  proposal         SafePayoutProposal?
+
+  @@index([goalId, createdAt])
+  @@index([chainId, safeAddress, expiresAt])
+  @@index([chainId, safeAddress, safeNonce])
+  @@index([createdByAddress, createdAt])
+}
+
+model SafePayoutProposal {
+  id              String                   @id @default(uuid()) @db.Uuid
+  intentId        String                   @unique @db.Uuid
+  safeTxHash      String                   @unique
+  safeNonce       String
+  senderAddress   String
+  confirmations   Int                      @default(1)
+  threshold       Int
+  status          SafePayoutProposalStatus @default(AWAITING_CONFIRMATIONS)
+  executionTxHash String?
+  failureReason   String?
+  lastCheckedAt   DateTime?
+  executedAt      DateTime?
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+  intent          SafePayoutIntent         @relation(fields: [intentId], references: [id], onDelete: Cascade)
+
+  @@index([status, updatedAt])
+  @@index([safeNonce, status])
+}
+
+/// Durable desired-state source. Actual authority still comes only from confirmed chain events.
+model GoalManagerAssignment {
+  id              String                      @id @default(uuid()) @db.Uuid
+  chainId         Int
+  contractAddress String
+  address         String
+  source          GoalManagerAssignmentSource
+  desiredEnabled  Boolean                     @default(true)
+  createdAt       DateTime                    @default(now())
+  updatedAt       DateTime                    @updatedAt
+
+  @@unique([chainId, contractAddress, address, source])
+  @@index([chainId, contractAddress, source, desiredEnabled])
+  @@index([chainId, contractAddress, address])
+}
+
+model SafeGoalManagerIntent {
+  id               String                   @id @default(uuid()) @db.Uuid
+  chainId          Int
+  safeAddress      String
+  safeNonce        String
+  changes          Json
+  desiredStateHash String
+  createdByAddress String
+  expiresAt        DateTime
+  consumedAt       DateTime?
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+  proposal         SafeGoalManagerProposal?
+
+  @@index([chainId, safeAddress, expiresAt])
+  @@index([chainId, safeAddress, safeNonce])
+  @@index([createdByAddress, createdAt])
+}
+
+model SafeGoalManagerProposal {
+  id              String                        @id @default(uuid()) @db.Uuid
+  intentId        String                        @unique @db.Uuid
+  activeKey       String?                       @unique
+  safeTxHash      String                        @unique
+  safeNonce       String
+  senderAddress   String
+  confirmations   Int                           @default(1)
+  threshold       Int
+  status          SafeGoalManagerProposalStatus @default(AWAITING_CONFIRMATIONS)
+  executionTxHash String?
+  failureReason   String?
+  lastCheckedAt   DateTime?
+  executedAt      DateTime?
+  createdAt       DateTime                      @default(now())
+  updatedAt       DateTime                      @updatedAt
+  intent          SafeGoalManagerIntent         @relation(fields: [intentId], references: [id], onDelete: Cascade)
+
+  @@index([status, updatedAt])
+  @@index([safeNonce, status])
+}
+
+/// Exact lifecycle calldata prepared for a Safe-owned escrow.
+model SafeGoalActionIntent {
+  id               String                  @id @default(uuid()) @db.Uuid
+  goalId           String                  @db.Uuid
+  kind             SafeGoalActionKind
+  parameters       Json?
+  chainId          Int
+  safeAddress      String
+  safeNonce        String
+  toAddress        String
+  valueRaw         String                  @default("0")
+  data             String
+  createdByAddress String
+  expiresAt        DateTime
+  consumedAt       DateTime?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+  goal             FundingGoal             @relation(fields: [goalId], references: [id], onDelete: Restrict)
+  proposal         SafeGoalActionProposal?
+
+  @@index([goalId, createdAt])
+  @@index([chainId, safeAddress, expiresAt])
+  @@index([chainId, safeAddress, safeNonce])
+  @@index([createdByAddress, createdAt])
+}
+
+model SafeGoalActionProposal {
+  id              String                       @id @default(uuid()) @db.Uuid
+  intentId        String                       @unique @db.Uuid
+  safeTxHash      String                       @unique
+  safeNonce       String
+  senderAddress   String
+  confirmations   Int                          @default(1)
+  threshold       Int
+  status          SafeGoalActionProposalStatus @default(AWAITING_CONFIRMATIONS)
+  executionTxHash String?
+  failureReason   String?
+  lastCheckedAt   DateTime?
+  executedAt      DateTime?
+  createdAt       DateTime                     @default(now())
+  updatedAt       DateTime                     @updatedAt
+  intent          SafeGoalActionIntent         @relation(fields: [intentId], references: [id], onDelete: Cascade)
+
+  @@index([status, updatedAt])
+  @@index([safeNonce, status])
+}
+
+model AuditEvent {
+  id           String   @id @default(uuid()) @db.Uuid
+  projectId    String?  @db.Uuid
+  actorAddress String?
+  entityType   String
+  entityId     String
+  action       String
+  before       Json?
+  after        Json?
+  createdAt    DateTime @default(now())
+  project      Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+}
+
+model ChainEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  chainId     Int
+  txHash      String
+  logIndex    Int
+  blockNumber BigInt
+  blockHash   String
+  eventName   String
+  payload     Json
+  createdAt   DateTime @default(now())
+
+  @@unique([chainId, txHash, logIndex])
+  @@index([chainId, blockNumber])
+}
+
+/// Rebuildable authorization projection sourced exclusively from confirmed contract events.
+model ChainAuthority {
+  id              String             @id @default(uuid()) @db.Uuid
+  chainId         Int
+  contractAddress String
+  address         String
+  kind            ChainAuthorityKind
+  blockNumber     BigInt
+  txHash          String
+  logIndex        Int
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@unique([chainId, contractAddress, address, kind])
+  @@index([chainId, contractAddress, address])
+  @@index([chainId, contractAddress, kind])
+}
+
+model IndexerState {
+  key             String   @id
+  chainId         Int
+  lastBlockNumber BigInt
+  lastBlockHash   String
+  updatedAt       DateTime @updatedAt
+}

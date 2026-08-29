@@ -1,0 +1,13 @@
+**/node_modules/**
+**/dist/**
+**/.next/**
+**/.next-e2e/**
+**/coverage/**
+**/generated/**
+**/artifacts/**
+**/cache/**
+**/typechain-types/**
+**/next-env.d.ts
+pnpm-lock.yaml
+packages/database/prisma/schema.prisma
+packages/database/prisma/migrations/**

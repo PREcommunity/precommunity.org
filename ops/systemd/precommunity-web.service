@@ -1,0 +1,38 @@
+[Unit]
+Description=precommunity Next.js web application
+After=network-online.target precommunity-api.service
+Wants=network-online.target
+Requires=precommunity-api.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/srv/precommunity/current
+EnvironmentFile=/etc/precommunity/app.env
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=3000
+ExecStart=/home/ubuntu/.local/bin/precommunity-node apps/web/.next/standalone/apps/web/server.js
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
