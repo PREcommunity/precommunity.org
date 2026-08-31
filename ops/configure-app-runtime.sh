@@ -17,6 +17,7 @@ readonly TREASURY_ADDRESS="${PUBLIC_TREASURY_ADDRESS:-}"
 readonly CHAIN_CONFIRMATIONS="${PUBLIC_CHAIN_CONFIRMATIONS:-}"
 readonly ADS_CONTRACT_ADDRESS_VALUE="${ADS_CONTRACT_ADDRESS:-}"
 readonly ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE="${ADS_CONTRACT_DEPLOYMENT_BLOCK:-}"
+readonly SAFE_TRANSACTION_SERVICE_API_KEY_STDIN="${PRECOMMUNITY_SAFE_TRANSACTION_SERVICE_API_KEY_STDIN:-0}"
 readonly CONFIG_DIR=/etc/precommunity
 readonly SECRET_FILE="${CONFIG_DIR}/app.secrets"
 readonly ACTIVE_ENV_FILE="${CONFIG_DIR}/app.env"
@@ -42,6 +43,11 @@ if [[ "$ENV_FILE" != "$ACTIVE_ENV_FILE" &&
   "$ENV_FILE" != "${CONFIG_DIR}/app.env.mainnet-next" &&
   "$ENV_FILE" != "${CONFIG_DIR}/app.env.escrow-next" ]]; then
   echo "Refusing to write an unexpected application environment path: $ENV_FILE" >&2
+  exit 2
+fi
+if [[ "$SAFE_TRANSACTION_SERVICE_API_KEY_STDIN" != 0 &&
+  "$SAFE_TRANSACTION_SERVICE_API_KEY_STDIN" != 1 ]]; then
+  echo 'PRECOMMUNITY_SAFE_TRANSACTION_SERVICE_API_KEY_STDIN must be 0 or 1.' >&2
   exit 2
 fi
 if [[ -n "$SAFE_ADDRESS" && ! "$SAFE_ADDRESS" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
@@ -84,6 +90,14 @@ if [[ -n "$ADS_CONTRACT_ADDRESS_VALUE" && -z "$ADS_CONTRACT_DEPLOYMENT_BLOCK_VAL
   [[ -z "$ADS_CONTRACT_ADDRESS_VALUE" && -n "$ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE" ]]; then
   echo 'ADS_CONTRACT_ADDRESS and ADS_CONTRACT_DEPLOYMENT_BLOCK must be configured together.' >&2
   exit 2
+fi
+
+safe_transaction_service_api_key_input=''
+if [[ "$SAFE_TRANSACTION_SERVICE_API_KEY_STDIN" == 1 ]]; then
+  if ! IFS= read -r safe_transaction_service_api_key_input; then
+    echo 'Safe Transaction Service API key was not received.' >&2
+    exit 2
+  fi
 fi
 readonly APP_GROUP="$(id -gn "$APP_USER")"
 
@@ -128,17 +142,28 @@ fi
 existing_walletconnect_project_id=''
 existing_network=''
 existing_base_rpc_url=''
+existing_safe_transaction_service_api_key=''
+existing_safe_transaction_service_url=''
+existing_safe_transaction_service_url_testnet=''
 if run_root test -r "$ACTIVE_ENV_FILE"; then
   existing_walletconnect_project_id="$(run_root sed -n 's/^NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=//p' "$ACTIVE_ENV_FILE")"
   existing_network="$(run_root sed -n 's/^PRECOMMUNITY_NETWORK=//p' "$ACTIVE_ENV_FILE")"
   existing_base_rpc_url="$(run_root sed -n 's/^BASE_RPC_URL=//p' "$ACTIVE_ENV_FILE")"
+  existing_safe_transaction_service_api_key="$(run_root sed -n 's/^SAFE_TRANSACTION_SERVICE_API_KEY=//p' "$ACTIVE_ENV_FILE")"
+  existing_safe_transaction_service_url="$(run_root sed -n 's/^SAFE_TRANSACTION_SERVICE_URL=//p' "$ACTIVE_ENV_FILE")"
+  existing_safe_transaction_service_url_testnet="$(run_root sed -n 's/^SAFE_TRANSACTION_SERVICE_URL_TESTNET=//p' "$ACTIVE_ENV_FILE")"
 fi
 walletconnect_project_id="${PRECOMMUNITY_WALLETCONNECT_PROJECT_ID:-$existing_walletconnect_project_id}"
+safe_transaction_service_api_key="${safe_transaction_service_api_key_input:-$existing_safe_transaction_service_api_key}"
 if [[ -n "$walletconnect_project_id" && ! "$walletconnect_project_id" =~ ^[a-fA-F0-9]{32}$ ]]; then
   echo 'WalletConnect project ID must be a 32-character hexadecimal value.' >&2
   exit 2
 fi
-
+if [[ -n "$safe_transaction_service_api_key" &&
+  ! "$safe_transaction_service_api_key" =~ ^[A-Za-z0-9._~-]+$ ]]; then
+  echo 'SAFE_TRANSACTION_SERVICE_API_KEY contains unsupported characters.' >&2
+  exit 2
+fi
 if [[ -n "$BASE_RPC_URL_OVERRIDE" ]]; then
   base_rpc_url="$BASE_RPC_URL_OVERRIDE"
 elif [[ "$existing_network" == "$DEPLOYMENT_NETWORK" && -n "$existing_base_rpc_url" ]]; then
@@ -169,6 +194,10 @@ trap 'rm -f "${secret_tmp:-}" "${env_tmp:-}"' EXIT
     "$base_rpc_url" \
     "$ADS_CONTRACT_ADDRESS_VALUE" \
     "$ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE"
+  printf '%s\n' \
+    "SAFE_TRANSACTION_SERVICE_API_KEY=${safe_transaction_service_api_key}" \
+    "SAFE_TRANSACTION_SERVICE_URL=${existing_safe_transaction_service_url}" \
+    "SAFE_TRANSACTION_SERVICE_URL_TESTNET=${existing_safe_transaction_service_url_testnet}"
   printf '%s\n' \
     "WEB_ORIGIN=https://${DOMAIN}" \
     'NEXT_PUBLIC_API_URL=/api' \
