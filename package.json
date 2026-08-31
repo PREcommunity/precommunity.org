@@ -17,7 +17,7 @@
     "format:check": "prettier --check . --ignore-unknown",
     "lint": "eslint apps packages --max-warnings=0",
     "typecheck": "pnpm build:packages && pnpm -r --if-present typecheck",
-    "test": "bash ops/runtime-deployment-env.test.sh && pnpm build:packages && pnpm -r --if-present test",
+    "test": "bash ops/runtime-deployment-env.test.sh && bash ops/deploy-vps-env.test.sh && pnpm build:packages && pnpm -r --if-present test",
     "test:e2e:critical": "pnpm build:packages && pnpm --filter @precommunity/web test:e2e:critical",
     "clean:web-cache": "pnpm --filter @precommunity/web clean:cache",
     "abi:sync": "pnpm --filter @precommunity/shared abi:sync",

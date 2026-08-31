@@ -3,6 +3,70 @@
 set -Eeuo pipefail
 umask 027
 
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+readonly REPOSITORY_ENV_FILE="$REPO_ROOT/.env"
+
+load_repository_env() {
+  local env_file="$1"
+  if [[ ! -f "$env_file" ]]; then
+    return 0
+  fi
+
+  local -a deployment_variable_names=(
+    PRECOMMUNITY_SSH_HOST
+    PRECOMMUNITY_APP_USER
+    PRECOMMUNITY_NETWORK
+    PRECOMMUNITY_SAFE_ADDRESS
+    SAFE_ADDRESS
+    PRECOMMUNITY_BASE_RPC_URL
+    BASE_RPC_URL
+    PUBLIC_ESCROW_ADDRESS
+    PUBLIC_ESCROW_DEPLOYMENT_BLOCK
+    PUBLIC_PRE_ADDRESS
+    PUBLIC_USDC_ADDRESS
+    PUBLIC_INITIAL_OWNER_ADDRESS
+    PUBLIC_TREASURY_ADDRESS
+    PUBLIC_CHAIN_CONFIRMATIONS
+    ADS_CONTRACT_ADDRESS
+    ADS_CONTRACT_DEPLOYMENT_BLOCK
+    PRECOMMUNITY_ESCROW_CUTOVER
+    PRECOMMUNITY_RESET_DATABASE
+    PRECOMMUNITY_WALLETCONNECT_PROJECT_ID
+  )
+  local -a preserved_names=()
+  local -a preserved_values=()
+  local variable_name
+  for variable_name in "${deployment_variable_names[@]}"; do
+    if [[ "${!variable_name+x}" == x ]]; then
+      preserved_names+=("$variable_name")
+      preserved_values+=("${!variable_name}")
+    fi
+  done
+
+  local allexport_was_enabled=0
+  if [[ "$-" == *a* ]]; then
+    allexport_was_enabled=1
+  else
+    set -a
+  fi
+  # The repository .env is maintained as shell-compatible KEY=value assignments.
+  # shellcheck disable=SC1090
+  source "$env_file"
+  if [[ "$allexport_was_enabled" == 0 ]]; then
+    set +a
+  fi
+
+  local index
+  for ((index = 0; index < ${#preserved_names[@]}; index++)); do
+    printf -v "${preserved_names[$index]}" '%s' "${preserved_values[$index]}"
+    export "${preserved_names[$index]}"
+  done
+}
+
+load_repository_env "$REPOSITORY_ENV_FILE"
+unset -f load_repository_env
+
 readonly DOMAIN="${1:-}"
 readonly SSH_HOST="${PRECOMMUNITY_SSH_HOST:-precommunity}"
 readonly APP_USER="${PRECOMMUNITY_APP_USER:-ubuntu}"
@@ -21,8 +85,6 @@ readonly ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE="${ADS_CONTRACT_DEPLOYMENT_BLOCK:-}
 readonly ESCROW_CUTOVER="${PRECOMMUNITY_ESCROW_CUTOVER:-0}"
 readonly RESET_DATABASE="${PRECOMMUNITY_RESET_DATABASE:-0}"
 readonly WALLETCONNECT_PROJECT_ID="${PRECOMMUNITY_WALLETCONNECT_PROJECT_ID:-}"
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 readonly RELEASE_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 readonly RELEASE_DIR="/srv/precommunity/releases/$RELEASE_ID"
 
