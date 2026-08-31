@@ -1,5 +1,5 @@
 import { ForbiddenException, Injectable, ServiceUnavailableException } from '@nestjs/common';
-import { createPublicClient, getAddress, http, parseUnits } from 'viem';
+import { createPublicClient, formatUnits, getAddress, http, parseUnits } from 'viem';
 import { config } from '../config';
 
 const erc20BalanceAbi = [
@@ -20,14 +20,14 @@ export class TokenEligibilityService {
     chain: config.chain,
     transport: http(config.BASE_RPC_URL),
   });
-  private readonly minimumRaw = parseUnits(config.COMMUNITY_MIN_PRE, 18);
+  private readonly defaultMinimumRaw = parseUnits(config.COMMUNITY_MIN_PRE, 18);
   private readonly currentCache = new Map<string, { balance: bigint; expiresAt: number }>();
   private readonly snapshotCache = new Map<string, bigint>();
 
-  minimum() {
+  minimum(minimumRaw = this.defaultMinimumRaw) {
     return {
-      amount: config.COMMUNITY_MIN_PRE,
-      amountRaw: this.minimumRaw.toString(),
+      amount: formatUnits(minimumRaw, 18),
+      amountRaw: minimumRaw.toString(),
       asset: 'PRE' as const,
     };
   }
@@ -57,20 +57,27 @@ export class TokenEligibilityService {
     return balance;
   }
 
-  async status(address: string) {
+  async status(address: string, minimumRaw = this.defaultMinimumRaw) {
+    if (minimumRaw === 0n) {
+      return { eligible: true, balanceRaw: '0', required: this.minimum(minimumRaw) };
+    }
     const balance = await this.currentBalance(address);
     return {
-      eligible: balance >= this.minimumRaw,
+      eligible: balance >= minimumRaw,
       balanceRaw: balance.toString(),
-      required: this.minimum(),
+      required: this.minimum(minimumRaw),
     };
   }
 
-  async assertCurrent(address: string) {
-    const result = await this.status(address);
+  async assertCurrent(
+    address: string,
+    minimumRaw = this.defaultMinimumRaw,
+    purpose = 'participate',
+  ) {
+    const result = await this.status(address, minimumRaw);
     if (!result.eligible)
       throw new ForbiddenException(
-        `At least ${config.COMMUNITY_MIN_PRE} PRE is required to participate`,
+        `At least ${result.required.amount} PRE is required to ${purpose}`,
       );
     return BigInt(result.balanceRaw);
   }
@@ -97,7 +104,7 @@ export class TokenEligibilityService {
   }
 
   assertSnapshotEligible(balance: bigint) {
-    if (balance < this.minimumRaw)
+    if (balance < this.defaultMinimumRaw)
       throw new ForbiddenException(
         `This wallet held less than ${config.COMMUNITY_MIN_PRE} PRE at the voting snapshot`,
       );

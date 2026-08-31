@@ -45,6 +45,19 @@ describe('TokenEligibilityService', () => {
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
+  it('allows a zero threshold without calling the balance RPC', async () => {
+    const service = new TokenEligibilityService();
+    const readContract = vi.fn();
+    (service as unknown as { client: { readContract: typeof readContract } }).client = {
+      readContract,
+    };
+
+    await expect(
+      service.assertCurrent('0x0000000000000000000000000000000000000003', 0n),
+    ).resolves.toBe(0n);
+    expect(readContract).not.toHaveBeenCalled();
+  });
+
   it('rejects a wallet below one PRE at the snapshot', () => {
     const service = new TokenEligibilityService();
     expect(() => service.assertSnapshotEligible(999_999_999_999_999_999n)).toThrow(

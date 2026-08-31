@@ -15,6 +15,7 @@ import { ApiError, clientApiJson } from '@/lib/http';
 import { formatUtcTimestamp, forumTopicTitle } from '@/lib/format';
 import { ActionButton } from './action-button';
 import { FormFieldError, useFormValidation } from './form-validation';
+import { ForumMarkdownEditor } from './forum-markdown';
 import { StatusNotice } from './status-notice';
 
 function categoryLabel(category: ForumCategory) {
@@ -41,13 +42,15 @@ export function ForumIndex({
 
   async function createTopic(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+    const saveDraft = submitter?.value === 'draft';
     setPending(true);
     setError('');
     const form = event.currentTarget;
     const data = new FormData(form);
     try {
       const topic = await clientApiJson<ForumTopicDetail>(
-        '/v1/community/forum/topics',
+        saveDraft ? '/v1/community/forum/topics/drafts' : '/v1/community/forum/topics',
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -57,9 +60,11 @@ export function ForumIndex({
             category: data.get('category'),
           }),
         },
-        'Topic publication',
+        saveDraft ? 'Draft save' : 'Topic publication',
       );
-      if (topic.status === 'PENDING_REVIEW') router.push('/community/forum/mine?submitted=pending');
+      if (topic.status === 'DRAFT') router.push('/community/forum/mine?submitted=draft');
+      else if (topic.status === 'PENDING_REVIEW')
+        router.push('/community/forum/mine?submitted=pending');
       else router.push(`/community/forum/${topic.slug}`);
       router.refresh();
     } catch (error) {
@@ -68,7 +73,9 @@ export function ForumIndex({
           ? 'Connect and sign in with your wallet first.'
           : error instanceof Error
             ? error.message
-            : 'The topic could not be published.',
+            : saveDraft
+              ? 'The draft could not be saved.'
+              : 'The topic could not be published.',
       );
     } finally {
       setPending(false);
@@ -188,11 +195,13 @@ export function ForumIndex({
             </select>
             <FormFieldError {...validation.errorProps('category')} />
           </label>
-          <label className="col-span-full grid gap-1.5 max-sm:col-auto">
-            <span className="text-[10px] text-muted">Opening post</span>
-            <textarea
+          <div className="col-span-full grid gap-1.5 max-sm:col-auto">
+            <label className="text-[10px] text-muted" htmlFor="new-topic-body">
+              Opening post
+            </label>
+            <ForumMarkdownEditor
               {...validation.fieldProps('body')}
-              className="min-h-24 w-full resize-y rounded-[3px] border border-line bg-white px-2.5 py-2 text-navy"
+              id="new-topic-body"
               name="body"
               minLength={10}
               maxLength={5000}
@@ -200,26 +209,44 @@ export function ForumIndex({
               placeholder="Add the context others need to respond."
             />
             <FormFieldError {...validation.errorProps('body')} />
-          </label>
+          </div>
           <div className="col-span-full flex items-center justify-between gap-5 max-sm:col-auto max-sm:items-stretch max-sm:flex-col">
             <p className="max-w-[440px] text-[11px] text-muted">
               {config.topicModerationEnabled
                 ? 'New topics are reviewed before they appear publicly.'
                 : 'Your topic will appear immediately. Keep it useful and specific.'}
             </p>
-            <ActionButton
-              variant="primary"
-              icon={
-                pending ? <LoaderCircle className="animate-spin" size={16} /> : <Check size={16} />
-              }
-              disabled={pending}
-            >
-              {pending
-                ? 'Checking PRE…'
-                : config.topicModerationEnabled
-                  ? 'Submit for review'
-                  : 'Publish topic'}
-            </ActionButton>
+            <span className="flex gap-2 max-sm:grid max-sm:grid-cols-2">
+              <ActionButton
+                type="submit"
+                name="intent"
+                value="draft"
+                formNoValidate
+                disabled={pending}
+              >
+                Save draft
+              </ActionButton>
+              <ActionButton
+                type="submit"
+                name="intent"
+                value="publish"
+                variant="primary"
+                icon={
+                  pending ? (
+                    <LoaderCircle className="animate-spin" size={16} />
+                  ) : (
+                    <Check size={16} />
+                  )
+                }
+                disabled={pending}
+              >
+                {pending
+                  ? 'Checking PRE…'
+                  : config.topicModerationEnabled
+                    ? 'Submit for review'
+                    : 'Publish topic'}
+              </ActionButton>
+            </span>
           </div>
           <div className="col-span-full max-sm:col-auto">
             <StatusNotice notice={error ? { type: 'error', message: error } : null} />

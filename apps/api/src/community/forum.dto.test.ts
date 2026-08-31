@@ -2,7 +2,13 @@ import 'reflect-metadata';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { describe, expect, it } from 'vitest';
-import { CreateForumTopicDto, ForumReplyDto, ForumSettingsDto } from './forum.dto';
+import {
+  CreateForumTopicDto,
+  ForumDraftDto,
+  ForumMinimumPreDto,
+  ForumReplyDto,
+  ForumSettingsDto,
+} from './forum.dto';
 
 describe('forum validation', () => {
   it('trims topic text and accepts a fixed category', async () => {
@@ -48,5 +54,36 @@ describe('forum validation', () => {
     expect((await validate(dto)).map((error) => error.property)).toContain(
       'topicModerationEnabled',
     );
+  });
+
+  it('allows an incomplete draft while retaining topic length limits', async () => {
+    const empty = plainToInstance(ForumDraftDto, { title: '', body: '', category: 'GENERAL' });
+    const tooLong = plainToInstance(ForumDraftDto, { body: 'x'.repeat(5001) });
+    const nulls = plainToInstance(ForumDraftDto, {
+      title: null,
+      body: null,
+      category: null,
+    });
+
+    await expect(validate(empty)).resolves.toHaveLength(0);
+    expect((await validate(tooLong)).map((error) => error.property)).toContain('body');
+    expect((await validate(nulls)).map((error) => error.property)).toEqual(
+      expect.arrayContaining(['title', 'body', 'category']),
+    );
+  });
+
+  it('accepts exact PRE amounts and rejects exponent or excess precision', async () => {
+    for (const amount of ['0', '12', '12.5', '0.000000000000000001']) {
+      await expect(validate(plainToInstance(ForumMinimumPreDto, { amount }))).resolves.toHaveLength(
+        0,
+      );
+    }
+    for (const amount of ['1e3', '-1', '1.0000000000000000001']) {
+      expect(
+        (await validate(plainToInstance(ForumMinimumPreDto, { amount }))).map(
+          (error) => error.property,
+        ),
+      ).toContain('amount');
+    }
   });
 });

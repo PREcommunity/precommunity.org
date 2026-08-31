@@ -53,6 +53,12 @@ export class AdminController {
     return this.service.goalManagers(request.principal!);
   }
 
+  @Post('goal-managers/refresh')
+  @Roles(Role.SUPER_ADMIN, Role.CONTENT_ADMIN, Role.FINANCE_ADMIN)
+  refreshGoalManagers() {
+    return this.service.refreshGoalManagers();
+  }
+
   @Post('goal-managers/safe-sync/prepare')
   @Roles(Role.SUPER_ADMIN)
   prepareSafeGoalManagerSync(@Req() request: AuthenticatedRequest) {

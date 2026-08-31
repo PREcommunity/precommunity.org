@@ -1,14 +1,16 @@
 'use client';
 
-import { FormEvent, useEffect, useRef } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type { ForumReply } from '@precommunity/shared';
 import { ActionButton } from './action-button';
 import { FormFieldError, useFormValidation } from './form-validation';
+import { ForumMarkdownEditor } from './forum-markdown';
 
 interface ForumReplyComposerProps {
   replyingTo: ForumReply | null;
   pending: boolean;
+  minimumPre: string;
   onCancelReply: () => void;
   onSubmit: (body: string, parentReplyId?: string) => Promise<boolean>;
 }
@@ -16,10 +18,12 @@ interface ForumReplyComposerProps {
 export function ForumReplyComposer({
   replyingTo,
   pending,
+  minimumPre,
   onCancelReply,
   onSubmit,
 }: ForumReplyComposerProps) {
   const formRef = useRef<HTMLFormElement>(null);
+  const [editorKey, setEditorKey] = useState(0);
   const validation = useFormValidation();
 
   useEffect(() => {
@@ -32,7 +36,10 @@ export function ForumReplyComposer({
     event.preventDefault();
     const form = event.currentTarget;
     const body = String(new FormData(form).get('body') ?? '');
-    if (await onSubmit(body, replyingTo?.id)) form.reset();
+    if (await onSubmit(body, replyingTo?.id)) {
+      form.reset();
+      setEditorKey((value) => value + 1);
+    }
   }
 
   return (
@@ -63,10 +70,11 @@ export function ForumReplyComposer({
           </button>
         </div>
       ) : null}
-      <textarea
+      <ForumMarkdownEditor
+        key={editorKey}
         {...validation.fieldProps('body')}
-        className="min-h-24 w-full resize-y border-0 bg-transparent px-0 py-2 outline-none"
         name="body"
+        size="reply"
         minLength={2}
         maxLength={2000}
         required
@@ -75,7 +83,7 @@ export function ForumReplyComposer({
       <FormFieldError {...validation.errorProps('body')} />
       <div className="flex items-center justify-between gap-4 border-t border-line py-2 max-sm:flex-col max-sm:items-stretch">
         <span className="text-[10px] text-muted">
-          Requires a signed-in wallet with at least 1 PRE.
+          Requires a signed-in wallet with at least {minimumPre} PRE.
         </span>
         <ActionButton variant="primary" size="compact" disabled={pending}>
           Post response

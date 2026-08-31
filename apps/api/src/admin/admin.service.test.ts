@@ -1645,6 +1645,16 @@ describe('goal manager synchronization', () => {
     };
   }
 
+  it('runs the goal manager worker only when refresh is requested', async () => {
+    const refresh = vi.fn().mockResolvedValue({ status: 'SYNCED', checked: 1 });
+
+    await expect(
+      new AdminService({} as PrismaService, undefined, { refresh } as never).refreshGoalManagers(),
+    ).resolves.toEqual({ status: 'SYNCED', checked: 1 });
+
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
   it('merges Safe, manual and legacy sources and reports drift with open-goal counts', async () => {
     const assignments = [
       {

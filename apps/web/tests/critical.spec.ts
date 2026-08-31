@@ -234,6 +234,72 @@ test('forum submits a valid topic and navigates to the published discussion', as
   await page.waitForURL('**/community/forum/new-community-topic-112233');
 });
 
+test('forum saves, previews and publishes an account draft', async ({ page }) => {
+  let published = false;
+  let publishRequests = 0;
+  const draft = {
+    ...forumTopicForBrowser(),
+    id: '00000000-0000-4000-8000-000000000017',
+    slug: 'draft-a1b2c3',
+    title: 'Drafted topic',
+    body: '**Draft preview**',
+    status: 'DRAFT',
+  };
+  await page.route('**/v1/community/forum/topics/drafts', async (route) => {
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify(draft),
+    });
+  });
+  await page.route('**/v1/community/forum/topics/mine', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([published ? { ...draft, status: 'PUBLISHED' } : draft]),
+    });
+  });
+  await page.route(`**/v1/community/forum/topics/${draft.id}/publish`, async (route) => {
+    publishRequests += 1;
+    published = true;
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({ ...draft, status: 'PUBLISHED' }),
+    });
+  });
+
+  await page.goto('/community/forum');
+  await page.getByRole('button', { name: 'Start a topic' }).click();
+  await page.getByLabel('Title').fill(draft.title);
+  await page.getByLabel('Opening post').fill(draft.body);
+  await page.getByRole('button', { name: 'Save draft' }).click();
+
+  await expect(page).toHaveURL(/\/community\/forum\/mine\?submitted=draft/);
+  await expect(page.getByText('Draft saved to your account.')).toBeVisible();
+  await page.getByRole('button', { name: 'Edit' }).click();
+  await page.getByRole('tab', { name: 'Preview' }).click();
+  await expect(page.getByText('Draft preview')).toBeVisible();
+  await page.getByRole('button', { name: 'Publish topic' }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+  await expect.poll(() => publishRequests).toBe(1);
+  await expect(page.getByText('Draft published.')).toBeVisible();
+});
+
+test('forum renders Markdown without loading remote images', async ({ page }) => {
+  await page.goto('/community/forum/markdown-topic-a1b2c3');
+
+  await expect(page.getByRole('heading', { name: 'Rendered heading' })).toBeVisible();
+  await expect(page.getByText('Rendered response')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Architecture diagram' })).toHaveAttribute(
+    'href',
+    'https://example.com/architecture.png',
+  );
+  await expect(page.locator('img[src="https://example.com/architecture.png"]')).toHaveCount(0);
+});
+
 test('forum replaces topics and pagination state when the category changes', async ({ page }) => {
   await page.goto('/community/forum');
   await expect(page.getByText('Welcome to the community forum')).toBeVisible();
@@ -485,6 +551,7 @@ test('goal manager panel exposes policy sources and prepares direct owner synchr
   const newManualManager = `0x${'44'.repeat(20)}` as const;
   const existingManualManager = `0x${'66'.repeat(20)}` as const;
   const updates: Array<{ address: string; enabled: boolean }> = [];
+  let refreshes = 0;
   const managerWorkspace = {
     safeConfigured: true,
     safeAddress,
@@ -603,6 +670,14 @@ test('goal manager panel exposes policy sources and prepares direct owner synchr
       body: JSON.stringify(managerWorkspace),
     }),
   );
+  await page.route('**/v1/admin/goal-managers/refresh', async (route) => {
+    refreshes += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ status: 'SYNCED', checked: 0, updated: 0 }),
+    });
+  });
   await page.route('**/v1/admin/goal-managers/safe-sync/prepare', (route) =>
     route.fulfill({
       status: 200,
@@ -638,7 +713,11 @@ test('goal manager panel exposes policy sources and prepares direct owner synchr
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        config: { topicModerationEnabled: false, minimumPre: null, categories: [] },
+        config: {
+          topicModerationEnabled: false,
+          minimumPre: { amount: '1', amountRaw: '1000000000000000000', asset: 'PRE' },
+          categories: [],
+        },
         topics: [],
       }),
     }),
@@ -653,6 +732,10 @@ test('goal manager panel exposes policy sources and prepares direct owner synchr
   await expect(page.getByText(connectedAddress)).toBeVisible();
   await expect(page.getByText(formerOwner)).toBeVisible();
   await expect(page.getByText('Safe owners changed — do not execute this proposal')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await expect.poll(() => refreshes).toBe(1);
+  await expect(page.getByText('Admin data refreshed.')).toBeVisible();
 
   await page.getByRole('button', { name: 'Keep after Safe removal' }).click();
   await expect.poll(() => updates).toContainEqual({ address: connectedAddress, enabled: true });
@@ -732,6 +815,11 @@ test('forum moderator can open a pending discussion from its highlighted row', a
       }),
     }),
   );
+  let savedMinimum = '';
+  await page.route('**/v1/community/admin/forum/settings/minimum-pre', async (route) => {
+    savedMinimum = String((await route.request().postDataJSON()).amount);
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+  });
 
   await page.goto('/admin');
   const accountButton = page.getByRole('button', { name: /Signed-in session/ });
@@ -743,6 +831,9 @@ test('forum moderator can open a pending discussion from its highlighted row', a
     'href',
     '/community/forum/welcome-to-the-forum-a1b2c3',
   );
+  await page.getByLabel('Minimum PRE to write').fill('12.5');
+  await page.getByRole('button', { name: 'Save minimum' }).click();
+  await expect.poll(() => savedMinimum).toBe('12.5');
 });
 
 test('a connected wallet edits its profile without SIWE and awaits confirmation', async ({

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, UnlockKeyhole, X } from 'lucide-react';
 import { FORUM_CATEGORIES, type ForumConfig, type ForumTopicSummary } from '@precommunity/shared';
@@ -21,17 +21,18 @@ export function ForumModerationPanel() {
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<StatusNoticeState | null>(null);
   const [topicToRemove, setTopicToRemove] = useState<string | null>(null);
+  const [minimumPre, setMinimumPre] = useState('');
 
   async function load() {
     setLoading(true);
     try {
-      setWorkspace(
-        await clientApiJson<ForumWorkspace>(
-          '/v1/community/admin/forum',
-          undefined,
-          'Forum moderation',
-        ),
+      const next = await clientApiJson<ForumWorkspace>(
+        '/v1/community/admin/forum',
+        undefined,
+        'Forum moderation',
       );
+      setWorkspace(next);
+      setMinimumPre(next.config.minimumPre.amount);
     } catch (error) {
       setNotice({
         type: 'error',
@@ -39,6 +40,32 @@ export function ForumModerationPanel() {
       });
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function saveMinimum(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setPending(true);
+    setNotice(null);
+    try {
+      await clientApiRequest(
+        '/v1/community/admin/forum/settings/minimum-pre',
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ amount: minimumPre }),
+        },
+        'Forum PRE minimum',
+      );
+      setNotice({ type: 'success', message: `Forum writing now requires ${minimumPre} PRE.` });
+      await load();
+    } catch (error) {
+      setNotice({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'The PRE minimum could not be changed.',
+      });
+    } finally {
+      setPending(false);
     }
   }
 
@@ -160,84 +187,115 @@ export function ForumModerationPanel() {
           </div>
         )
       ) : (
-        <div className="border-t border-line">
-          {workspace.topics.length ? (
-            workspace.topics.map((topic) => (
-              <article
-                className="group grid min-h-16 grid-cols-[90px_minmax(200px,1fr)_auto] items-start gap-3 border-b border-line py-3 max-[900px]:grid-cols-[90px_minmax(180px,1fr)_auto] max-sm:grid-cols-1 max-sm:py-2.5"
-                key={topic.id}
-              >
-                <span className="font-mono text-[8px] uppercase transition-transform duration-180 group-hover:translate-x-1">
-                  {topic.status.replaceAll('_', ' ')}
-                </span>
-                <Link
-                  className="-mx-2 -my-1 flex flex-col rounded-md px-2 py-1 transition-transform duration-180 group-hover:translate-x-1"
-                  href={`/community/forum/${topic.slug}`}
+        <>
+          <form
+            className="mb-5 grid grid-cols-[minmax(180px,280px)_auto_minmax(220px,1fr)] items-end gap-3 border-y border-line bg-blue-soft px-3 py-3 max-sm:grid-cols-1"
+            onSubmit={(event) => void saveMinimum(event)}
+          >
+            <label className="grid gap-1.5">
+              <span className="text-[10px] font-bold text-muted uppercase">
+                Minimum PRE to write
+              </span>
+              <input
+                className="h-10 rounded-[3px] border border-line bg-white px-2.5 text-navy"
+                name="amount"
+                value={minimumPre}
+                inputMode="decimal"
+                pattern="(?:0|[1-9][0-9]*)(?:\.[0-9]{1,18})?"
+                maxLength={79}
+                required
+                onChange={(event) => setMinimumPre(event.currentTarget.value)}
+              />
+            </label>
+            <ActionButton variant="primary" disabled={pending}>
+              Save minimum
+            </ActionButton>
+            <p className="m-0 text-[10px] text-muted">
+              Applies to publishing and editing topics and responses. Set 0 to allow any signed-in
+              wallet to write.
+            </p>
+          </form>
+          <div className="border-t border-line">
+            {workspace.topics.length ? (
+              workspace.topics.map((topic) => (
+                <article
+                  className="group grid min-h-16 grid-cols-[90px_minmax(200px,1fr)_auto] items-start gap-3 border-b border-line py-3 max-[900px]:grid-cols-[90px_minmax(180px,1fr)_auto] max-sm:grid-cols-1 max-sm:py-2.5"
+                  key={topic.id}
                 >
-                  <small className="text-muted">
-                    {FORUM_CATEGORIES.find((item) => item.value === topic.category)?.label} ·{' '}
-                    {topic.replyCount} responses
-                  </small>
-                  <strong>{forumTopicTitle(topic.title, topic.state)}</strong>
-                </Link>
-                <span className="flex gap-[7px] max-[900px]:col-span-2 max-sm:col-auto max-sm:flex-wrap">
-                  {topic.status === 'PENDING_REVIEW' ? (
-                    <>
+                  <span className="font-mono text-[8px] uppercase transition-transform duration-180 group-hover:translate-x-1">
+                    {topic.status.replaceAll('_', ' ')}
+                  </span>
+                  <Link
+                    className="-mx-2 -my-1 flex flex-col rounded-md px-2 py-1 transition-transform duration-180 group-hover:translate-x-1"
+                    href={`/community/forum/${topic.slug}`}
+                  >
+                    <small className="text-muted">
+                      {FORUM_CATEGORIES.find((item) => item.value === topic.category)?.label} ·{' '}
+                      {topic.replyCount} responses
+                    </small>
+                    <strong>{forumTopicTitle(topic.title, topic.state)}</strong>
+                  </Link>
+                  <span className="flex gap-[7px] max-[900px]:col-span-2 max-sm:col-auto max-sm:flex-wrap">
+                    {topic.status === 'PENDING_REVIEW' ? (
+                      <>
+                        <ActionButton
+                          size="compact"
+                          icon={<ShieldCheck size={13} />}
+                          onClick={() => void moderate(topic.id, 'approve')}
+                          disabled={pending}
+                        >
+                          Approve
+                        </ActionButton>
+                        <ActionButton
+                          size="compact"
+                          icon={<X size={13} />}
+                          onClick={() => void moderate(topic.id, 'decline')}
+                          disabled={pending}
+                        >
+                          Decline
+                        </ActionButton>
+                      </>
+                    ) : null}
+                    {topic.status === 'PUBLISHED' ? (
                       <ActionButton
                         size="compact"
-                        icon={<ShieldCheck size={13} />}
-                        onClick={() => void moderate(topic.id, 'approve')}
+                        icon={<LockKeyhole size={13} />}
+                        onClick={() => void moderate(topic.id, 'lock')}
                         disabled={pending}
                       >
-                        Approve
+                        Lock
                       </ActionButton>
+                    ) : null}
+                    {topic.status === 'LOCKED' && topic.state === 'ACTIVE' ? (
                       <ActionButton
                         size="compact"
-                        icon={<X size={13} />}
-                        onClick={() => void moderate(topic.id, 'decline')}
+                        icon={<UnlockKeyhole size={13} />}
+                        onClick={() => void moderate(topic.id, 'unlock')}
                         disabled={pending}
                       >
-                        Decline
+                        Unlock
                       </ActionButton>
-                    </>
-                  ) : null}
-                  {topic.status === 'PUBLISHED' ? (
-                    <ActionButton
-                      size="compact"
-                      icon={<LockKeyhole size={13} />}
-                      onClick={() => void moderate(topic.id, 'lock')}
-                      disabled={pending}
-                    >
-                      Lock
-                    </ActionButton>
-                  ) : null}
-                  {topic.status === 'LOCKED' && topic.state === 'ACTIVE' ? (
-                    <ActionButton
-                      size="compact"
-                      icon={<UnlockKeyhole size={13} />}
-                      onClick={() => void moderate(topic.id, 'unlock')}
-                      disabled={pending}
-                    >
-                      Unlock
-                    </ActionButton>
-                  ) : null}
-                  {topic.state === 'ACTIVE' ? (
-                    <ActionButton
-                      variant="danger"
-                      size="compact"
-                      onClick={() => setTopicToRemove(topic.id)}
-                      disabled={pending}
-                    >
-                      Remove
-                    </ActionButton>
-                  ) : null}
-                </span>
-              </article>
-            ))
-          ) : (
-            <p className="m-0 border-y border-line py-6 text-muted">No forum topics to moderate.</p>
-          )}
-        </div>
+                    ) : null}
+                    {topic.state === 'ACTIVE' ? (
+                      <ActionButton
+                        variant="danger"
+                        size="compact"
+                        onClick={() => setTopicToRemove(topic.id)}
+                        disabled={pending}
+                      >
+                        Remove
+                      </ActionButton>
+                    ) : null}
+                  </span>
+                </article>
+              ))
+            ) : (
+              <p className="m-0 border-y border-line py-6 text-muted">
+                No forum topics to moderate.
+              </p>
+            )}
+          </div>
+        </>
       )}
       <ConfirmationDialog
         open={Boolean(topicToRemove)}

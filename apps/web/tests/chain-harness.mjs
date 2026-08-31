@@ -127,6 +127,29 @@ const technicalForumTopic = {
   body: 'A technical discussion returned only by the Technical category filter.',
   category: 'TECHNICAL',
 };
+const markdownForumTopic = {
+  ...forumTopic,
+  id: '00000000-0000-4000-8000-000000000015',
+  slug: 'markdown-topic-a1b2c3',
+  title: 'Markdown discussion',
+  body: `## Rendered heading
+First line
+Second line
+
+![Architecture diagram](https://example.com/architecture.png)`,
+  replyCount: 1,
+  replies: [
+    {
+      id: '00000000-0000-4000-8000-000000000016',
+      body: '**Rendered response**',
+      state: 'ACTIVE',
+      editedAt: null,
+      createdAt: '2099-08-15T12:30:00.000Z',
+      author: communityAuthor,
+      parentReply: null,
+    },
+  ],
+};
 const paginatedForumTopic = {
   ...forumTopic,
   id: '00000000-0000-4000-8000-000000000011',
@@ -408,6 +431,11 @@ createServer((request, response) => {
   if (request.url === '/v1/community/forum/topics/paginated-topic-a1b2c3') {
     response.setHeader('content-type', 'application/json');
     response.end(JSON.stringify(paginatedForumTopic));
+    return;
+  }
+  if (request.url === '/v1/community/forum/topics/markdown-topic-a1b2c3') {
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify(markdownForumTopic));
     return;
   }
   if (request.url?.startsWith('/v1/community/forum/topics/')) {

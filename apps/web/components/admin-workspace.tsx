@@ -42,8 +42,18 @@ export function AdminWorkspace() {
             Administrative tools are available only to authorized administrators.
           </p>
         </div>
-        <ActionButton icon={<RefreshCw size={15} />} onClick={() => void admin.load()}>
-          Refresh
+        <ActionButton
+          icon={
+            admin.state === 'loading' ? (
+              <LoaderCircle className="animate-spin" size={15} />
+            ) : (
+              <RefreshCw size={15} />
+            )
+          }
+          disabled={admin.state === 'loading'}
+          onClick={() => void admin.refreshData()}
+        >
+          {admin.state === 'loading' ? 'Refreshing…' : 'Refresh data'}
         </ActionButton>
       </section>
 

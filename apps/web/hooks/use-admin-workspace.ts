@@ -160,8 +160,7 @@ export function useAdminWorkspace() {
         proposal.status === 'SUBMITTING' ||
         proposal.status === 'AWAITING_CONFIRMATIONS' ||
         proposal.status === 'READY_TO_EXECUTE',
-    ) ||
-    Boolean(goalManagers?.activeProposal);
+    );
 
   useEffect(() => {
     if (!hasPendingSafeProposal || !principal) return;
@@ -435,6 +434,30 @@ export function useAdminWorkspace() {
       });
     } finally {
       setTransactionPending(false);
+    }
+  }
+
+  async function refreshData() {
+    if (!principal || !hasAdminWorkspaceRole(principal)) {
+      await load();
+      return;
+    }
+
+    setState('loading');
+    try {
+      await clientApiRequest(
+        '/v1/admin/goal-managers/refresh',
+        { method: 'POST' },
+        'Goal manager data refresh',
+      );
+      await load();
+      setNotice({ type: 'success', message: 'Admin data refreshed.' });
+    } catch (error) {
+      await load().catch(() => undefined);
+      setNotice({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Could not refresh the admin data.',
+      });
     }
   }
 
@@ -904,6 +927,7 @@ export function useAdminWorkspace() {
     proofHash,
     proposeOwnershipAcceptance,
     publish,
+    refreshData,
     release,
     safeProposals,
     safeGoalActions,

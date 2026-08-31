@@ -32,7 +32,8 @@ export type CommunityProposalStatus =
   'PENDING_REVIEW' | 'VOTING' | 'PASSED' | 'REJECTED' | 'CONVERTED' | 'DECLINED' | 'REMOVED';
 export type ProposalVoteChoice = 'FOR' | 'AGAINST' | 'ABSTAIN';
 export type ForumCategory = 'GENERAL' | 'IDEAS_FEEDBACK' | 'TECHNICAL' | 'HELP';
-export type ForumTopicStatus = 'PENDING_REVIEW' | 'PUBLISHED' | 'LOCKED' | 'DECLINED' | 'REMOVED';
+export type ForumTopicStatus =
+  'DRAFT' | 'PENDING_REVIEW' | 'PUBLISHED' | 'LOCKED' | 'DECLINED' | 'REMOVED';
 
 export const FORUM_CATEGORIES: ReadonlyArray<{ value: ForumCategory; label: string }> = [
   { value: 'GENERAL', label: 'General' },

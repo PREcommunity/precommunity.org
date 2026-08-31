@@ -53,6 +53,7 @@ import {
 import { OperationType, type SafeTransactionData } from '@safe-global/types-kit';
 import type { AuthenticatedPrincipal } from '../common/request-context';
 import { writeAuditEvent } from '../common/audit';
+import { GoalManagerSyncQueue } from './goal-manager-sync-queue.service';
 import { deploymentTransactionRequest } from '../common/deployment-transaction';
 import { PrismaService } from '../common/prisma.service';
 import { config } from '../config';
@@ -349,6 +350,9 @@ export class AdminService {
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Optional() @Inject(SafeService) private readonly safe?: SafeService,
+    @Optional()
+    @Inject(GoalManagerSyncQueue)
+    private readonly goalManagerSyncQueue?: GoalManagerSyncQueue,
   ) {}
 
   private safeClient() {
@@ -1461,6 +1465,13 @@ export class AdminService {
           ? this.mapGoalManagerProposal(latestProposal, safeInfo.queueUrl)
           : null,
     };
+  }
+
+  async refreshGoalManagers() {
+    if (!this.goalManagerSyncQueue) {
+      throw new ServiceUnavailableException('Goal manager refresh queue is unavailable');
+    }
+    return this.goalManagerSyncQueue.refresh();
   }
 
   private async prepareGoalManagerChanges(

@@ -1,7 +1,13 @@
+'use client';
+
+import { type FormEvent, useState } from 'react';
 import Link from 'next/link';
 import { CornerUpLeft, Pencil, ShieldX, Trash2 } from 'lucide-react';
 import type { ForumReply } from '@precommunity/shared';
 import { formatUtcTimestamp } from '@/lib/format';
+import { ActionButton } from './action-button';
+import { FormFieldError, useFormValidation } from './form-validation';
+import { ForumMarkdown, ForumMarkdownEditor } from './forum-markdown';
 
 interface ForumReplyListProps {
   replies: ForumReply[];
@@ -10,7 +16,7 @@ interface ForumReplyListProps {
   sessionAddress: string;
   canModerate: boolean;
   onReply: (reply: ForumReply) => void;
-  onEdit: (reply: ForumReply) => void;
+  onEdit: (reply: ForumReply, body: string) => Promise<boolean>;
   onDelete: (reply: ForumReply) => void;
   onRemove: (reply: ForumReply) => void;
 }
@@ -33,6 +39,21 @@ export function ForumReplyList({
   onDelete,
   onRemove,
 }: ForumReplyListProps) {
+  const [editing, setEditing] = useState<string>();
+  const [saving, setSaving] = useState(false);
+  const validation = useFormValidation();
+
+  async function save(event: FormEvent<HTMLFormElement>, reply: ForumReply) {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      const body = String(new FormData(event.currentTarget).get('body') ?? '');
+      if (await onEdit(reply, body)) setEditing(undefined);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return replies.map((reply, index) => {
     const own = sessionAddress.toLowerCase() === reply.author.address.toLowerCase();
     const position = Math.max(totalCount - replies.length, 0) + index + 1;
@@ -62,11 +83,42 @@ export function ForumReplyList({
               </span>
             </a>
           ) : null}
-          <p className={`mb-0 whitespace-pre-wrap ${reply.state !== 'ACTIVE' ? 'text-muted' : ''}`}>
-            {reply.body ??
-              (reply.state === 'REMOVED' ? 'Removed by a moderator.' : 'Deleted by the author.')}
-          </p>
-          {reply.state === 'ACTIVE' && reply.body ? (
+          {editing === reply.id && reply.body ? (
+            <form
+              className="mt-2 grid gap-2"
+              onSubmit={(event) => void save(event, reply)}
+              onInvalid={validation.onInvalid}
+              onInput={validation.onInput}
+            >
+              <ForumMarkdownEditor
+                {...validation.fieldProps('body')}
+                name="body"
+                size="reply"
+                defaultValue={reply.body}
+                minLength={2}
+                maxLength={2000}
+                required
+              />
+              <FormFieldError {...validation.errorProps('body')} />
+              <span className="flex justify-end gap-2">
+                <ActionButton type="button" size="compact" onClick={() => setEditing(undefined)}>
+                  Cancel
+                </ActionButton>
+                <ActionButton variant="primary" size="compact" disabled={saving}>
+                  {saving ? 'Saving…' : 'Save response'}
+                </ActionButton>
+              </span>
+            </form>
+          ) : reply.body ? (
+            <div className={`mt-2 ${reply.state !== 'ACTIVE' ? 'text-muted' : ''}`}>
+              <ForumMarkdown>{reply.body}</ForumMarkdown>
+            </div>
+          ) : (
+            <p className="mb-0 text-muted">
+              {reply.state === 'REMOVED' ? 'Removed by a moderator.' : 'Deleted by the author.'}
+            </p>
+          )}
+          {reply.state === 'ACTIVE' && reply.body && editing !== reply.id ? (
             <div className="mt-1.5 flex gap-2">
               {open ? (
                 <button
@@ -79,7 +131,7 @@ export function ForumReplyList({
               {own && open ? (
                 <button
                   className="inline-flex cursor-pointer items-center gap-1 border-0 bg-transparent text-[10px] text-blue transition-transform duration-150 hover:translate-x-0.5"
-                  onClick={() => onEdit(reply)}
+                  onClick={() => setEditing(reply.id)}
                 >
                   <Pencil size={12} /> Edit
                 </button>

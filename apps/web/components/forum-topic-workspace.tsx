@@ -4,7 +4,7 @@ import { FormEvent, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, LoaderCircle, LockKeyhole, Pencil, Trash2, UserRound } from 'lucide-react';
-import { FORUM_CATEGORIES, type ForumTopicDetail } from '@precommunity/shared';
+import { FORUM_CATEGORIES, type ForumConfig, type ForumTopicDetail } from '@precommunity/shared';
 import { clientApiJson, clientApiRequest } from '@/lib/http';
 import { useForumReplies } from '@/hooks/use-forum-replies';
 import { formatUtcTimestamp, forumTopicTitle } from '@/lib/format';
@@ -13,11 +13,18 @@ import { ConfirmationDialog } from './confirmation-dialog';
 import { FormFieldError, useFormValidation } from './form-validation';
 import { ForumReplyComposer } from './forum-reply-composer';
 import { ForumReplyList } from './forum-reply-list';
+import { ForumMarkdown, ForumMarkdownEditor } from './forum-markdown';
 import { ShareLinks } from './share-links';
 import { StatusNotice, type StatusNoticeState } from './status-notice';
 import { FORUM_NOTIFICATIONS_CHANGED_EVENT } from '@/lib/auth-events';
 
-export function ForumTopicWorkspace({ topic }: { topic: ForumTopicDetail }) {
+export function ForumTopicWorkspace({
+  topic,
+  config,
+}: {
+  topic: ForumTopicDetail;
+  config: ForumConfig;
+}) {
   const router = useRouter();
   const [sessionAddress, setSessionAddress] = useState('');
   const [sessionRoles, setSessionRoles] = useState<string[]>([]);
@@ -117,10 +124,8 @@ export function ForumTopicWorkspace({ topic }: { topic: ForumTopicDetail }) {
       router.push('/community/forum/mine');
   }
 
-  async function editReply(id: string, current: string) {
-    const body = window.prompt('Edit your response', current)?.trim();
-    if (!body || body === current) return;
-    await mutate(
+  async function editReply(id: string, body: string) {
+    return mutate(
       `/v1/community/forum/replies/${id}`,
       { method: 'PUT', body: JSON.stringify({ body }) },
       'Response updated.',
@@ -185,9 +190,8 @@ export function ForumTopicWorkspace({ topic }: { topic: ForumTopicDetail }) {
                   </option>
                 ))}
               </select>
-              <textarea
+              <ForumMarkdownEditor
                 {...validation.fieldProps('body')}
-                className="min-h-24 w-full resize-y rounded-[3px] border border-line bg-white px-2.5 py-2 text-navy"
                 name="body"
                 defaultValue={topic.body ?? ''}
                 minLength={10}
@@ -209,9 +213,13 @@ export function ForumTopicWorkspace({ topic }: { topic: ForumTopicDetail }) {
               <h1 className="mt-[11px] mb-2 text-[clamp(34px,5vw,54px)] leading-[1.02] tracking-[-.048em] max-sm:text-4xl">
                 {forumTopicTitle(topic.title, topic.state)}
               </h1>
-              <p className="max-w-[790px] whitespace-pre-wrap text-[15px] text-muted">
-                {topic.body ?? 'The opening post is no longer available.'}
-              </p>
+              <div className="max-w-[790px] text-[15px] text-muted">
+                {topic.body ? (
+                  <ForumMarkdown>{topic.body}</ForumMarkdown>
+                ) : (
+                  'The opening post is no longer available.'
+                )}
+              </div>
             </>
           )}
           <div className="mt-4 flex items-center gap-2 text-[11px] text-muted">
@@ -279,7 +287,7 @@ export function ForumTopicWorkspace({ topic }: { topic: ForumTopicDetail }) {
           sessionAddress={sessionAddress}
           canModerate={canModerate}
           onReply={setReplyingTo}
-          onEdit={(reply) => void editReply(reply.id, reply.body!)}
+          onEdit={(reply, body) => editReply(reply.id, body)}
           onDelete={(reply) =>
             setConfirmation({
               title: 'Delete response?',
@@ -304,6 +312,7 @@ export function ForumTopicWorkspace({ topic }: { topic: ForumTopicDetail }) {
             pending={pending}
             onCancelReply={() => setReplyingTo(null)}
             onSubmit={addReply}
+            minimumPre={config.minimumPre.amount}
           />
         ) : (
           <div className="my-5 flex items-center gap-2 border-y border-line py-[13px] text-muted">

@@ -141,6 +141,7 @@ enum ForumCategory {
 }
 
 enum ForumTopicStatus {
+  DRAFT
   PENDING_REVIEW
   PUBLISHED
   LOCKED
@@ -392,6 +393,7 @@ model Project {
 model CommunitySettings {
   projectId                   String   @id @db.Uuid
   forumTopicModerationEnabled Boolean  @default(false)
+  forumMinimumPreRaw          String?
   proposalModerationEnabled   Boolean  @default(true)
   keywordMarketEnabled        Boolean  @default(false)
   updatedBy                   String?

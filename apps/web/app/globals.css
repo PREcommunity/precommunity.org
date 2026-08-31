@@ -2109,6 +2109,84 @@ html[data-theme='dark'] .border-y.border-navy {
   }
 }
 
+.forum-markdown {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--color-ink);
+}
+.forum-markdown > :first-child {
+  margin-top: 0;
+}
+.forum-markdown > :last-child {
+  margin-bottom: 0;
+}
+.forum-markdown h1,
+.forum-markdown h2,
+.forum-markdown h3,
+.forum-markdown h4 {
+  margin: 1.15em 0 0.45em;
+  line-height: 1.15;
+}
+.forum-markdown p,
+.forum-markdown ul,
+.forum-markdown ol,
+.forum-markdown blockquote,
+.forum-markdown pre,
+.forum-markdown table {
+  margin: 0.75em 0;
+}
+.forum-markdown ul,
+.forum-markdown ol {
+  padding-left: 1.5rem;
+}
+.forum-markdown ul {
+  list-style: disc;
+}
+.forum-markdown ol {
+  list-style: decimal;
+}
+.forum-markdown a {
+  color: var(--color-blue);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.forum-markdown blockquote {
+  border-left: 3px solid var(--color-blue);
+  padding-left: 0.8rem;
+  color: var(--color-muted);
+}
+.forum-markdown code {
+  border-radius: 3px;
+  background: var(--color-blue-soft);
+  padding: 0.1em 0.3em;
+  font-size: 0.9em;
+}
+.forum-markdown pre {
+  overflow-x: auto;
+  border: 1px solid var(--color-line);
+  background: var(--color-surface);
+  padding: 0.75rem;
+}
+.forum-markdown pre code {
+  background: transparent;
+  padding: 0;
+}
+.forum-markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.forum-markdown th,
+.forum-markdown td {
+  border: 1px solid var(--color-line);
+  padding: 0.4rem 0.55rem;
+  text-align: left;
+}
+.forum-markdown input[type='checkbox'] {
+  margin-right: 0.35rem;
+}
+
 @keyframes hero-in {
   from {
     opacity: 0;

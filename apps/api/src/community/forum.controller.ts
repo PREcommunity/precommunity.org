@@ -22,6 +22,8 @@ import { RolesGuard } from '../common/roles.guard';
 import { ModerationDto } from './community.dto';
 import {
   CreateForumTopicDto,
+  ForumDraftDto,
+  ForumMinimumPreDto,
   ForumReplyDto,
   ForumSettingsDto,
   UpdateForumTopicDto,
@@ -94,6 +96,32 @@ export class ForumController {
     return this.service.create(body, request.principal!);
   }
 
+  @Post('topics/drafts')
+  @UseGuards(SessionGuard)
+  createDraft(@Body() body: ForumDraftDto, @Req() request: AuthenticatedRequest) {
+    return this.service.createDraft(body, request.principal!);
+  }
+
+  @Patch('topics/:id/draft')
+  @UseGuards(SessionGuard)
+  updateDraft(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: ForumDraftDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.service.updateDraft(id, body, request.principal!);
+  }
+
+  @Post('topics/:id/publish')
+  @UseGuards(SessionGuard)
+  publishDraft(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: CreateForumTopicDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.service.publishDraft(id, body, request.principal!);
+  }
+
   @Patch('topics/:id')
   @UseGuards(SessionGuard)
   update(
@@ -151,6 +179,11 @@ export class ForumAdminController {
   @Put('settings')
   settings(@Body() body: ForumSettingsDto, @Req() request: AuthenticatedRequest) {
     return this.service.updateSettings(body, request.principal!);
+  }
+
+  @Put('settings/minimum-pre')
+  minimumPre(@Body() body: ForumMinimumPreDto, @Req() request: AuthenticatedRequest) {
+    return this.service.updateMinimumPre(body, request.principal!);
   }
 
   @Post('topics/:id/approve')

@@ -1,18 +1,19 @@
 'use client';
 
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft, CircleAlert, LoaderCircle, Pencil, Trash2 } from 'lucide-react';
-import { FORUM_CATEGORIES, type ForumTopicDetail } from '@precommunity/shared';
+import { FORUM_CATEGORIES, type ForumConfig, type ForumTopicDetail } from '@precommunity/shared';
 import { ApiError, clientApiJson, clientApiRequest } from '@/lib/http';
 import { forumTopicTitle } from '@/lib/format';
 import { ActionButton } from './action-button';
 import { ConfirmationDialog } from './confirmation-dialog';
 import { FormFieldError, useFormValidation } from './form-validation';
-import { selectClass, textInputClass, textareaClass } from './form-control-classes';
+import { selectClass, textInputClass } from './form-control-classes';
 import { StatusNotice, type StatusNoticeState } from './status-notice';
+import { ForumMarkdownEditor } from './forum-markdown';
 
-export function ForumMine({ submitted }: { submitted?: string }) {
+export function ForumMine({ submitted, config }: { submitted?: string; config: ForumConfig }) {
   const [items, setItems] = useState<ForumTopicDetail[]>([]);
   const [state, setState] = useState<'loading' | 'signed-out' | 'ready' | 'error'>('loading');
   const [loadError, setLoadError] = useState('');
@@ -20,10 +21,14 @@ export function ForumMine({ submitted }: { submitted?: string }) {
   const [notice, setNotice] = useState<StatusNoticeState | null>(
     submitted === 'pending'
       ? { type: 'success', message: 'Topic submitted for moderator review.' }
-      : null,
+      : submitted === 'draft'
+        ? { type: 'success', message: 'Draft saved to your account.' }
+        : null,
   );
   const [topicToDelete, setTopicToDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const validation = useFormValidation();
 
   async function load() {
@@ -54,12 +59,21 @@ export function ForumMine({ submitted }: { submitted?: string }) {
 
   async function save(event: FormEvent<HTMLFormElement>, topic: ForumTopicDetail) {
     event.preventDefault();
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+    const publish = topic.status === 'DRAFT' && submitter?.value === 'publish';
     const data = new FormData(event.currentTarget);
     try {
-      await clientApiRequest(
-        `/v1/community/forum/topics/${topic.id}`,
+      const updated = await clientApiJson<ForumTopicDetail>(
+        publish
+          ? `/v1/community/forum/topics/${topic.id}/publish`
+          : topic.status === 'DRAFT'
+            ? `/v1/community/forum/topics/${topic.id}/draft`
+            : `/v1/community/forum/topics/${topic.id}`,
         {
-          method: 'PATCH',
+          method: publish ? 'POST' : 'PATCH',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
             title: data.get('title'),
@@ -67,9 +81,18 @@ export function ForumMine({ submitted }: { submitted?: string }) {
             category: data.get('category'),
           }),
         },
-        'Topic update',
+        publish ? 'Draft publication' : 'Topic update',
       );
-      setNotice({ type: 'success', message: 'Topic updated.' });
+      setNotice({
+        type: 'success',
+        message: publish
+          ? updated.status === 'PENDING_REVIEW'
+            ? 'Draft submitted for moderator review.'
+            : 'Draft published.'
+          : topic.status === 'DRAFT'
+            ? 'Draft saved.'
+            : 'Topic updated.',
+      });
       setEditing(undefined);
       await load();
     } catch (error) {
@@ -77,6 +100,9 @@ export function ForumMine({ submitted }: { submitted?: string }) {
         type: 'error',
         message: error instanceof Error ? error.message : 'Topic could not be updated.',
       });
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
     }
   }
 
@@ -155,7 +181,9 @@ export function ForumMine({ submitted }: { submitted?: string }) {
                     {topic.status.replaceAll('_', ' ')}
                   </small>
                   <h2 className="my-[3px] text-[17px]">
-                    {forumTopicTitle(topic.title, topic.state)}
+                    {topic.status === 'DRAFT' && !topic.title
+                      ? 'Untitled draft'
+                      : forumTopicTitle(topic.title, topic.state)}
                   </h2>
                   <p className="m-0 text-muted">
                     {FORUM_CATEGORIES.find((item) => item.value === topic.category)?.label}
@@ -173,7 +201,9 @@ export function ForumMine({ submitted }: { submitted?: string }) {
                       View discussion
                     </Link>
                   ) : null}
-                  {topic.status === 'PENDING_REVIEW' || topic.status === 'PUBLISHED' ? (
+                  {topic.status === 'DRAFT' ||
+                  topic.status === 'PENDING_REVIEW' ||
+                  topic.status === 'PUBLISHED' ? (
                     <ActionButton
                       size="compact"
                       icon={<Pencil size={13} />}
@@ -217,9 +247,8 @@ export function ForumMine({ submitted }: { submitted?: string }) {
                         </option>
                       ))}
                     </select>
-                    <textarea
+                    <ForumMarkdownEditor
                       {...validation.fieldProps('body')}
-                      className={textareaClass}
                       name="body"
                       defaultValue={topic.body ?? ''}
                       minLength={10}
@@ -227,7 +256,37 @@ export function ForumMine({ submitted }: { submitted?: string }) {
                       required
                     />
                     <FormFieldError {...validation.errorProps('body')} />
-                    <ActionButton variant="primary">Save changes</ActionButton>
+                    {topic.status === 'DRAFT' ? (
+                      <>
+                        <p className="m-0 text-[10px] text-muted">
+                          Publishing requires at least {config.minimumPre.amount} PRE.
+                        </p>
+                        <span className="flex justify-end gap-2">
+                          <ActionButton
+                            type="submit"
+                            name="intent"
+                            value="save"
+                            formNoValidate
+                            disabled={saving}
+                          >
+                            Save draft
+                          </ActionButton>
+                          <ActionButton
+                            type="submit"
+                            name="intent"
+                            value="publish"
+                            variant="primary"
+                            disabled={saving}
+                          >
+                            {config.topicModerationEnabled ? 'Submit for review' : 'Publish topic'}
+                          </ActionButton>
+                        </span>
+                      </>
+                    ) : (
+                      <ActionButton variant="primary" disabled={saving}>
+                        Save changes
+                      </ActionButton>
+                    )}
                   </form>
                 ) : null}
               </article>

@@ -15,7 +15,12 @@ function routePipes(controller: object, method: string) {
 describe('ForumController access boundaries', () => {
   it.each([
     'create',
+    'createDraft',
+    'updateDraft',
+    'publishDraft',
     'update',
+    'updateDraft',
+    'publishDraft',
     'delete',
     'reply',
     'editReply',

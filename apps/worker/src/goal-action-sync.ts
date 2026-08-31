@@ -66,10 +66,6 @@ export async function syncSafeGoalActionProposals(prisma: PrismaClient) {
     return { status: 'DISABLED' as const, checked: 0 };
   }
 
-  const safe = service();
-  const info = await safe.getSafeInfo(getAddress(config.SAFE_ADDRESS));
-  const currentNonce = BigInt(info.nonce);
-  const now = new Date();
   const pending = await prisma.safeGoalActionProposal.findMany({
     where: {
       status: { in: pendingStatuses },
@@ -82,6 +78,12 @@ export async function syncSafeGoalActionProposals(prisma: PrismaClient) {
     orderBy: { updatedAt: 'asc' },
     take: 100,
   });
+  if (!pending.length) return { status: 'SYNCED' as const, checked: 0, updated: 0 };
+
+  const safe = service();
+  const info = await safe.getSafeInfo(getAddress(config.SAFE_ADDRESS));
+  const currentNonce = BigInt(info.nonce);
+  const now = new Date();
   let updated = 0;
 
   for (const proposal of pending) {

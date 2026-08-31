@@ -1,6 +1,7 @@
 import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { ForumCategory, ForumTopicStatus } from '@precommunity/database';
 import { describe, expect, it, vi } from 'vitest';
+import { formatUnits, maxUint256 } from 'viem';
 import { ForumService } from './forum.service';
 
 const principal = {
@@ -63,7 +64,10 @@ function setup() {
         .mockResolvedValue({ id: '00000000-0000-4000-8000-000000000099', slug: 'precommunity' }),
     },
     communitySettings: {
-      findUnique: vi.fn().mockResolvedValue({ forumTopicModerationEnabled: false }),
+      findUnique: vi.fn().mockResolvedValue({
+        forumTopicModerationEnabled: false,
+        forumMinimumPreRaw: null,
+      }),
       upsert: vi.fn(),
     },
     forumTopic: {
@@ -96,9 +100,11 @@ function setup() {
   prisma.$transaction = vi.fn(async (callback: (tx: typeof prisma) => unknown) => callback(prisma));
   const eligibility = {
     assertCurrent: vi.fn().mockResolvedValue(2n),
-    minimum: vi
-      .fn()
-      .mockReturnValue({ amount: '1', amountRaw: '1000000000000000000', asset: 'PRE' }),
+    minimum: vi.fn((amountRaw = 1_000_000_000_000_000_000n) => ({
+      amount: formatUnits(amountRaw, 18),
+      amountRaw: amountRaw.toString(),
+      asset: 'PRE',
+    })),
   };
   return { prisma, eligibility, service: new ForumService(prisma as never, eligibility as never) };
 }
@@ -117,7 +123,11 @@ describe('ForumService publishing', () => {
       },
       principal,
     );
-    expect(eligibility.assertCurrent).toHaveBeenCalledWith(principal.address);
+    expect(eligibility.assertCurrent).toHaveBeenCalledWith(
+      principal.address,
+      1_000_000_000_000_000_000n,
+      'write in the forum',
+    );
     expect(result.status).toBe(ForumTopicStatus.PUBLISHED);
   });
 
@@ -142,7 +152,10 @@ describe('ForumService publishing', () => {
 
   it('sends only newly created topics to review when moderation is enabled', async () => {
     const { prisma, service } = setup();
-    prisma.communitySettings.findUnique.mockResolvedValue({ forumTopicModerationEnabled: true });
+    prisma.communitySettings.findUnique.mockResolvedValue({
+      forumTopicModerationEnabled: true,
+      forumMinimumPreRaw: null,
+    });
     prisma.forumTopic.create.mockImplementation(({ data }: { data: Record<string, unknown> }) =>
       topic(data),
     );
@@ -156,11 +169,113 @@ describe('ForumService publishing', () => {
     );
     expect(result.status).toBe(ForumTopicStatus.PENDING_REVIEW);
     expect(prisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
-      prisma.communitySettings.findUnique.mock.invocationCallOrder[0]!,
+      prisma.communitySettings.findUnique.mock.invocationCallOrder.at(-1)!,
     );
-    expect(prisma.communitySettings.findUnique.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(prisma.communitySettings.findUnique.mock.invocationCallOrder.at(-1)).toBeLessThan(
       prisma.forumTopic.create.mock.invocationCallOrder[0]!,
     );
+  });
+
+  it('saves an incomplete private draft without checking PRE eligibility', async () => {
+    const { prisma, eligibility, service } = setup();
+    prisma.forumTopic.create.mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+      topic(data),
+    );
+
+    const result = await service.createDraft({ title: '' }, principal);
+
+    expect(result.status).toBe(ForumTopicStatus.DRAFT);
+    expect(result.body).toBe('');
+    expect(eligibility.assertCurrent).not.toHaveBeenCalled();
+    expect(prisma.forumTopic.count).toHaveBeenCalledWith({
+      where: expect.objectContaining({ status: ForumTopicStatus.DRAFT }),
+    });
+  });
+
+  it('limits each account to twenty active drafts', async () => {
+    const { prisma, service } = setup();
+    prisma.forumTopic.count.mockResolvedValue(20);
+
+    await expect(service.createDraft({}, principal)).rejects.toThrow(
+      'Delete an existing draft before creating more than 20',
+    );
+    expect(prisma.forumTopic.create).not.toHaveBeenCalled();
+  });
+
+  it('publishes an owned draft with the current threshold and moderation setting', async () => {
+    const { prisma, eligibility, service } = setup();
+    prisma.communitySettings.findUnique.mockResolvedValue({
+      forumTopicModerationEnabled: true,
+      forumMinimumPreRaw: '12500000000000000000',
+    });
+    prisma.forumTopic.findUnique.mockResolvedValue(topic({ status: ForumTopicStatus.DRAFT }));
+    prisma.forumTopic.update.mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+      topic({ ...data, replies: [] }),
+    );
+
+    const result = await service.publishDraft(
+      '00000000-0000-4000-8000-000000000010',
+      {
+        title: 'Published from a draft',
+        body: 'This draft now contains enough context to publish.',
+        category: ForumCategory.IDEAS_FEEDBACK,
+      },
+      principal,
+    );
+
+    expect(eligibility.assertCurrent).toHaveBeenCalledWith(
+      principal.address,
+      12_500_000_000_000_000_000n,
+      'write in the forum',
+    );
+    expect(result.status).toBe(ForumTopicStatus.PENDING_REVIEW);
+    expect(prisma.forumTopic.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          createdAt: expect.any(Date),
+          lastActivityAt: expect.any(Date),
+          status: ForumTopicStatus.PENDING_REVIEW,
+        }),
+      }),
+    );
+  });
+
+  it('does not let another account save an owned draft', async () => {
+    const { prisma, service } = setup();
+    prisma.forumTopic.findUnique.mockResolvedValue(
+      topic({
+        authorId: '00000000-0000-4000-8000-000000000002',
+        status: ForumTopicStatus.DRAFT,
+      }),
+    );
+
+    await expect(
+      service.updateDraft(
+        '00000000-0000-4000-8000-000000000010',
+        { title: 'Private draft' },
+        principal,
+      ),
+    ).rejects.toThrow('Only the author can edit this draft');
+    expect(prisma.forumTopic.update).not.toHaveBeenCalled();
+  });
+
+  it('applies the hourly topic limit when publishing a draft', async () => {
+    const { prisma, service } = setup();
+    prisma.forumTopic.findUnique.mockResolvedValue(topic({ status: ForumTopicStatus.DRAFT }));
+    prisma.forumTopic.count.mockResolvedValue(3);
+
+    await expect(
+      service.publishDraft(
+        '00000000-0000-4000-8000-000000000010',
+        {
+          title: 'Fourth published topic',
+          body: 'This completed draft exceeds the hourly publication limit.',
+          category: ForumCategory.GENERAL,
+        },
+        principal,
+      ),
+    ).rejects.toThrow('Topic limit reached');
+    expect(prisma.forumTopic.update).not.toHaveBeenCalled();
   });
 
   it('rejects an invalid activity cursor before querying topics', async () => {
@@ -171,14 +286,18 @@ describe('ForumService publishing', () => {
     expect(prisma.forumTopic.findMany).not.toHaveBeenCalled();
   });
 
-  it('filters soft-deleted and moderator-removed topics from the public list', async () => {
+  it('filters drafts, soft-deleted and moderator-removed topics from the public list', async () => {
     const { prisma, service } = setup();
 
     await service.list();
 
     expect(prisma.forumTopic.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ deletedAt: null, removedAt: null }),
+        where: expect.objectContaining({
+          status: { in: [ForumTopicStatus.PUBLISHED, ForumTopicStatus.LOCKED] },
+          deletedAt: null,
+          removedAt: null,
+        }),
       }),
     );
   });
@@ -435,6 +554,39 @@ describe('ForumService moderation', () => {
     );
   });
 
+  it('persists and audits an exact forum PRE minimum', async () => {
+    const { prisma, service } = setup();
+    prisma.communitySettings.upsert.mockResolvedValue({
+      forumTopicModerationEnabled: false,
+      forumMinimumPreRaw: '12500000000000000000',
+    });
+
+    const result = await service.updateMinimumPre({ amount: '12.5' }, principal);
+
+    expect(result.minimumPre).toEqual({
+      amount: '12.5',
+      amountRaw: '12500000000000000000',
+      asset: 'PRE',
+    });
+    expect(prisma.communitySettings.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ forumMinimumPreRaw: '12500000000000000000' }),
+      }),
+    );
+    expect(prisma.auditEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'UPDATE_FORUM_MINIMUM_PRE' }),
+      }),
+    );
+  });
+
+  it('rejects a forum PRE minimum outside the token range', async () => {
+    const { service } = setup();
+    await expect(
+      service.updateMinimumPre({ amount: (maxUint256 + 1n).toString() }, principal),
+    ).rejects.toThrow('exceeds the token range');
+  });
+
   it('approves a pending topic and records the moderator action', async () => {
     const { prisma, service } = setup();
     prisma.forumTopic.findUnique.mockResolvedValue(
@@ -476,5 +628,16 @@ describe('ForumService moderation', () => {
         },
       }),
     );
+  });
+
+  it('does not expose a private draft through moderator removal', async () => {
+    const { prisma, service } = setup();
+    prisma.forumTopic.findUnique.mockResolvedValue(topic({ status: ForumTopicStatus.DRAFT }));
+
+    await expect(
+      service.moderateTopic('00000000-0000-4000-8000-000000000010', 'REMOVE', undefined, principal),
+    ).rejects.toThrow('Topic cannot be changed with remove');
+    expect(prisma.forumTopic.update).not.toHaveBeenCalled();
+    expect(prisma.auditEvent.create).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,5 @@
 import { ForumMine } from '@/components/forum-mine';
+import { getForumConfig } from '@/lib/api';
 
 export const metadata = { title: 'Your forum topics' };
 
@@ -8,5 +9,6 @@ export default async function ForumMinePage({
   searchParams: Promise<{ submitted?: string }>;
 }) {
   const query = await searchParams;
-  return <ForumMine submitted={query.submitted} />;
+  const config = await getForumConfig();
+  return <ForumMine submitted={query.submitted} config={config} />;
 }

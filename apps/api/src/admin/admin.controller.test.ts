@@ -50,4 +50,12 @@ describe('AdminController Safe ownership authorization', () => {
     expect(routeRoles('updateGoalManager')).toEqual([Role.SUPER_ADMIN]);
     expect(routeRoles('submitSafeGoalManagerIntent')).toEqual([Role.SUPER_ADMIN]);
   });
+
+  it('lets every workspace administrator request a goal manager data refresh', () => {
+    expect(routeRoles('refreshGoalManagers')).toEqual([
+      Role.SUPER_ADMIN,
+      Role.CONTENT_ADMIN,
+      Role.FINANCE_ADMIN,
+    ]);
+  });
 });

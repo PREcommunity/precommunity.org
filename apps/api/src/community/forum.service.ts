@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { ForumCategory, ForumTopicStatus, Prisma } from '@precommunity/database';
 import { FORUM_CATEGORIES, PROJECT_SLUG } from '@precommunity/shared';
+import { maxUint256, parseUnits } from 'viem';
 import type { AuthenticatedPrincipal } from '../common/request-context';
 import { PrismaService } from '../common/prisma.service';
 import { createSlug } from '../common/slug';
@@ -17,6 +18,8 @@ import { writeAuditEvent } from '../common/audit';
 import {
   ForumReplyDto,
   ForumSettingsDto,
+  ForumDraftDto,
+  ForumMinimumPreDto,
   CreateForumTopicDto,
   UpdateForumTopicDto,
 } from './forum.dto';
@@ -42,6 +45,7 @@ const PUBLIC_STATUSES = [ForumTopicStatus.PUBLISHED, ForumTopicStatus.LOCKED] as
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 const MAX_REPLY_LIMIT = 100;
+const MAX_DRAFTS = 20;
 
 @Injectable()
 export class ForumService {
@@ -59,20 +63,24 @@ export class ForumService {
     return project;
   }
 
-  private async moderationEnabled() {
+  private async settings() {
     const project = await this.project();
-    const settings = await this.prisma.communitySettings.findUnique({
+    return this.prisma.communitySettings.findUnique({
       where: { projectId: project.id },
     });
-    return settings?.forumTopicModerationEnabled ?? false;
+  }
+
+  private minimumRaw(settings?: { forumMinimumPreRaw?: string | null } | null) {
+    return BigInt(settings?.forumMinimumPreRaw ?? this.eligibility.minimum().amountRaw);
+  }
+
+  private async assertForumEligible(address: string) {
+    const settings = await this.settings();
+    return this.eligibility.assertCurrent(address, this.minimumRaw(settings), 'write in the forum');
   }
 
   async config() {
-    return {
-      topicModerationEnabled: await this.moderationEnabled(),
-      minimumPre: this.eligibility.minimum(),
-      categories: FORUM_CATEGORIES,
-    };
+    return this.configFrom(await this.settings());
   }
 
   async list(category?: ForumCategory, cursorValue?: string, rawLimit?: string) {
@@ -167,14 +175,120 @@ export class ForumService {
     const topics = await this.prisma.forumTopic.findMany({
       where: { authorId: actor.userId, deletedAt: null, removedAt: null },
       include: topicSummaryInclude,
-      orderBy: { createdAt: 'desc' },
+      orderBy: { updatedAt: 'desc' },
       take: 100,
     });
     return topics.map(serializeForumMineDetail);
   }
 
+  async createDraft(dto: ForumDraftDto, actor: AuthenticatedPrincipal) {
+    const draft = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT "id" FROM "User" WHERE "id" = ${actor.userId}::uuid FOR UPDATE`;
+      const draftCount = await tx.forumTopic.count({
+        where: {
+          authorId: actor.userId,
+          status: ForumTopicStatus.DRAFT,
+          deletedAt: null,
+          removedAt: null,
+        },
+      });
+      if (draftCount >= MAX_DRAFTS) {
+        throw new ConflictException(
+          `Delete an existing draft before creating more than ${MAX_DRAFTS}`,
+        );
+      }
+      return tx.forumTopic.create({
+        data: {
+          authorId: actor.userId,
+          slug: createSlug(dto.title ?? '', 'draft'),
+          title: dto.title ?? '',
+          body: dto.body ?? '',
+          category: dto.category ?? ForumCategory.GENERAL,
+          status: ForumTopicStatus.DRAFT,
+        },
+        include: topicSummaryInclude,
+      });
+    });
+    return serializeForumMineDetail(draft);
+  }
+
+  async updateDraft(id: string, dto: ForumDraftDto, actor: AuthenticatedPrincipal) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT "id" FROM "ForumTopic" WHERE "id" = ${id}::uuid FOR UPDATE`;
+      const draft = await tx.forumTopic.findUnique({ where: { id } });
+      if (!draft) throw new NotFoundException('Forum draft not found');
+      if (draft.authorId !== actor.userId)
+        throw new ForbiddenException('Only the author can edit this draft');
+      if (draft.status !== ForumTopicStatus.DRAFT || draft.deletedAt || draft.removedAt)
+        throw new ConflictException('Only an active draft can be saved');
+      const updated = await tx.forumTopic.update({
+        where: { id },
+        data: { title: dto.title, body: dto.body, category: dto.category },
+        include: topicSummaryInclude,
+      });
+      return serializeForumMineDetail(updated);
+    });
+  }
+
+  async publishDraft(id: string, dto: CreateForumTopicDto, actor: AuthenticatedPrincipal) {
+    await this.assertForumEligible(actor.address);
+    const project = await this.project();
+    const topic = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT "id" FROM "Project" WHERE "id" = ${project.id}::uuid FOR SHARE`;
+      await tx.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT "id" FROM "User" WHERE "id" = ${actor.userId}::uuid FOR UPDATE`;
+      const draft = await tx.forumTopic.findUnique({ where: { id } });
+      if (!draft) throw new NotFoundException('Forum draft not found');
+      if (draft.authorId !== actor.userId)
+        throw new ForbiddenException('Only the author can publish this draft');
+      if (draft.status !== ForumTopicStatus.DRAFT || draft.deletedAt || draft.removedAt)
+        throw new ConflictException('Only an active draft can be published');
+      const since = new Date(Date.now() - 60 * 60 * 1000);
+      if (
+        (await tx.forumTopic.count({
+          where: {
+            authorId: actor.userId,
+            status: { not: ForumTopicStatus.DRAFT },
+            createdAt: { gte: since },
+          },
+        })) >= 3
+      ) {
+        throw new HttpException(
+          'Topic limit reached; try again later',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+      const settings = await tx.communitySettings.findUnique({ where: { projectId: project.id } });
+      const now = new Date();
+      return tx.forumTopic.update({
+        where: { id },
+        data: {
+          slug: createSlug(dto.title, 'topic'),
+          title: dto.title,
+          body: dto.body,
+          category: dto.category,
+          status: settings?.forumTopicModerationEnabled
+            ? ForumTopicStatus.PENDING_REVIEW
+            : ForumTopicStatus.PUBLISHED,
+          createdAt: now,
+          lastActivityAt: now,
+          editedAt: null,
+        },
+        include: topicInclude,
+      });
+    });
+    return serializeForumDetail(topic);
+  }
+
   async create(dto: CreateForumTopicDto, actor: AuthenticatedPrincipal) {
-    await this.eligibility.assertCurrent(actor.address);
+    await this.assertForumEligible(actor.address);
     const project = await this.project();
     const topic = await this.prisma.$transaction(async (tx) => {
       // Topic creation and moderation changes share this project-row lock. This
@@ -192,7 +306,11 @@ export class ForumService {
       const since = new Date(Date.now() - 60 * 60 * 1000);
       if (
         (await tx.forumTopic.count({
-          where: { authorId: actor.userId, createdAt: { gte: since } },
+          where: {
+            authorId: actor.userId,
+            status: { not: ForumTopicStatus.DRAFT },
+            createdAt: { gte: since },
+          },
         })) >= 3
       ) {
         throw new HttpException(
@@ -216,7 +334,7 @@ export class ForumService {
   }
 
   async update(id: string, dto: UpdateForumTopicDto, actor: AuthenticatedPrincipal) {
-    await this.eligibility.assertCurrent(actor.address);
+    await this.assertForumEligible(actor.address);
     return this.prisma.$transaction(async (tx) => {
       const topic = await tx.forumTopic.findUnique({ where: { id } });
       if (!topic) throw new NotFoundException('Forum topic not found');
@@ -262,7 +380,7 @@ export class ForumService {
   }
 
   async reply(topicId: string, dto: ForumReplyDto, actor: AuthenticatedPrincipal) {
-    await this.eligibility.assertCurrent(actor.address);
+    await this.assertForumEligible(actor.address);
     const topic = await this.prisma.forumTopic.findUnique({ where: { id: topicId } });
     if (!topic) throw new NotFoundException('Forum topic not found');
     if (topic.status !== ForumTopicStatus.PUBLISHED || topic.deletedAt || topic.removedAt)
@@ -393,7 +511,7 @@ export class ForumService {
   }
 
   async editReply(id: string, dto: ForumReplyDto, actor: AuthenticatedPrincipal) {
-    await this.eligibility.assertCurrent(actor.address);
+    await this.assertForumEligible(actor.address);
     const reply = await this.prisma.forumReply.findUnique({
       where: { id },
       include: { topic: true },
@@ -485,14 +603,51 @@ export class ForumService {
         before: { forumTopicModerationEnabled: before?.forumTopicModerationEnabled ?? false },
         after: { forumTopicModerationEnabled: settings.forumTopicModerationEnabled },
       });
-      return this.configFrom(settings.forumTopicModerationEnabled);
+      return this.configFrom(settings);
     });
   }
 
-  private configFrom(topicModerationEnabled: boolean) {
+  async updateMinimumPre(dto: ForumMinimumPreDto, actor: AuthenticatedPrincipal) {
+    const minimumRaw = parseUnits(dto.amount, 18);
+    if (minimumRaw > maxUint256)
+      throw new BadRequestException('The forum PRE minimum exceeds the token range');
+    const project = await this.project();
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT "id" FROM "Project" WHERE "id" = ${project.id}::uuid FOR UPDATE`;
+      const before = await tx.communitySettings.findUnique({ where: { projectId: project.id } });
+      const settings = await tx.communitySettings.upsert({
+        where: { projectId: project.id },
+        update: { forumMinimumPreRaw: minimumRaw.toString(), updatedBy: actor.address },
+        create: {
+          projectId: project.id,
+          forumMinimumPreRaw: minimumRaw.toString(),
+          updatedBy: actor.address,
+        },
+      });
+      await writeAuditEvent(tx, {
+        projectId: project.id,
+        actor,
+        entityType: 'CommunitySettings',
+        entityId: project.id,
+        action: 'UPDATE_FORUM_MINIMUM_PRE',
+        before: { forumMinimumPreRaw: this.minimumRaw(before).toString() },
+        after: { forumMinimumPreRaw: settings.forumMinimumPreRaw },
+      });
+      return this.configFrom(settings);
+    });
+  }
+
+  private configFrom(
+    settings?: {
+      forumTopicModerationEnabled?: boolean;
+      forumMinimumPreRaw?: string | null;
+    } | null,
+  ) {
     return {
-      topicModerationEnabled,
-      minimumPre: this.eligibility.minimum(),
+      topicModerationEnabled: settings?.forumTopicModerationEnabled ?? false,
+      minimumPre: this.eligibility.minimum(this.minimumRaw(settings)),
       categories: FORUM_CATEGORIES,
     };
   }
@@ -558,7 +713,12 @@ export class ForumService {
           moderatedBy: actor.address,
           moderationNote: note ?? null,
         };
-      else if (action === 'REMOVE' && !topic.deletedAt && !topic.removedAt)
+      else if (
+        action === 'REMOVE' &&
+        topic.status !== ForumTopicStatus.DRAFT &&
+        !topic.deletedAt &&
+        !topic.removedAt
+      )
         data = {
           removedAt: now,
           moderatedBy: actor.address,

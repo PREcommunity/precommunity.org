@@ -18,6 +18,11 @@ const queue = new Queue(queueName, { connection });
 const safeQueue = new Queue(safeQueueName, { connection });
 
 async function schedule() {
+  await safeQueue.removeRepeatable(
+    'sync-safe-goal-managers',
+    { every: 30_000 },
+    'sync-safe-goal-managers',
+  );
   await queue.add(
     'index-escrow',
     {},
@@ -84,16 +89,6 @@ async function schedule() {
     {
       repeat: { every: 30_000 },
       jobId: 'sync-safe-goal-actions',
-      removeOnComplete: 20,
-      removeOnFail: 100,
-    },
-  );
-  await safeQueue.add(
-    'sync-safe-goal-managers',
-    {},
-    {
-      repeat: { every: 30_000 },
-      jobId: 'sync-safe-goal-managers',
       removeOnComplete: 20,
       removeOnFail: 100,
     },
