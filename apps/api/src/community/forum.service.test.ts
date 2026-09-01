@@ -1,5 +1,5 @@
 import { ConflictException, ForbiddenException } from '@nestjs/common';
-import { ForumTopicStatus } from '@precommunity/database';
+import { ForumTopicStatus, Role } from '@precommunity/database';
 import { describe, expect, it, vi } from 'vitest';
 import { formatUnits, maxUint256 } from 'viem';
 import { ForumService } from './forum.service';
@@ -742,6 +742,106 @@ describe('ForumService categories', () => {
       ),
     ).rejects.toThrow('Forum category is archived');
     expect(moved.prisma.forumTopic.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('ForumService administrator editing', () => {
+  function moderator(role: Role) {
+    return {
+      ...principal,
+      userId: '00000000-0000-4000-8000-000000000002',
+      address: '0x0000000000000000000000000000000000000002',
+      roles: [role],
+    };
+  }
+
+  it.each([Role.SUPER_ADMIN, Role.CONTENT_ADMIN])(
+    'lets %s edit another locked topic and records the change',
+    async (role) => {
+      const { prisma, service } = setup();
+      const actor = moderator(role);
+      const original = topic({ status: ForumTopicStatus.LOCKED });
+      const updated = topic({
+        status: ForumTopicStatus.LOCKED,
+        title: 'Corrected topic title',
+        body: 'Corrected opening post with useful context.',
+        editedAt: now,
+      });
+      prisma.forumTopic.findUnique.mockResolvedValueOnce(original).mockResolvedValueOnce(updated);
+
+      await service.update(original.id, { title: updated.title, body: updated.body }, actor);
+
+      const update = prisma.forumTopic.updateMany.mock.calls[0]![0];
+      expect(update.where).toMatchObject({
+        status: { in: [ForumTopicStatus.PUBLISHED, ForumTopicStatus.LOCKED] },
+      });
+      expect(update.where).not.toHaveProperty('authorId');
+      expect(prisma.auditEvent.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            actorAddress: actor.address,
+            entityType: 'ForumTopic',
+            entityId: original.id,
+            action: 'EDIT_FORUM_TOPIC',
+            before: { title: original.title, body: original.body, category: original.category },
+            after: { title: updated.title, body: updated.body, category: updated.category },
+          }),
+        }),
+      );
+    },
+  );
+
+  it('lets a content administrator edit another response in a locked topic', async () => {
+    const { prisma, service } = setup();
+    const actor = moderator(Role.CONTENT_ADMIN);
+    const original = { ...forumReply(1), topic: topic({ status: ForumTopicStatus.LOCKED }) };
+    const updated = { ...original, body: 'Corrected response', editedAt: now };
+    prisma.forumReply.findUnique.mockResolvedValueOnce(original).mockResolvedValueOnce(updated);
+
+    await service.editReply(original.id, { body: updated.body }, actor);
+
+    const update = prisma.forumReply.updateMany.mock.calls[0]![0];
+    expect(update.where).toMatchObject({
+      topic: { is: { status: { in: [ForumTopicStatus.PUBLISHED, ForumTopicStatus.LOCKED] } } },
+    });
+    expect(update.where).not.toHaveProperty('authorId');
+    expect(prisma.auditEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          actorAddress: actor.address,
+          entityType: 'ForumReply',
+          entityId: original.id,
+          action: 'EDIT_FORUM_REPLY',
+          before: { body: original.body },
+          after: { body: updated.body },
+        }),
+      }),
+    );
+  });
+
+  it('keeps unmoderated users and inactive topics out of administrator editing', async () => {
+    const outsider = { ...principal, userId: '00000000-0000-4000-8000-000000000002' };
+    const regular = setup();
+    regular.prisma.forumTopic.findUnique.mockResolvedValue(topic());
+    await expect(
+      regular.service.update(
+        '00000000-0000-4000-8000-000000000010',
+        { body: 'Changed.' },
+        outsider,
+      ),
+    ).rejects.toThrow('Only the author can edit this topic');
+
+    const pending = setup();
+    pending.prisma.forumTopic.findUnique.mockResolvedValue(
+      topic({ status: ForumTopicStatus.PENDING_REVIEW }),
+    );
+    await expect(
+      pending.service.update(
+        '00000000-0000-4000-8000-000000000010',
+        { body: 'Changed.' },
+        moderator(Role.CONTENT_ADMIN),
+      ),
+    ).rejects.toThrow('Only active published or locked topics can be edited by an administrator');
   });
 });
 

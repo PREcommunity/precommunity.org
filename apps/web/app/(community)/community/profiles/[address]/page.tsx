@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { notFound } from 'next/navigation';
 import { getCommunityProfile } from '@/lib/api';
+import { activeExplorerAddress } from '@/lib/deployment';
 
 export default async function CommunityProfilePage({
   params,
@@ -41,7 +42,20 @@ export default async function CommunityProfilePage({
           <h1 className="mt-2.5 mb-2 text-[clamp(30px,4vw,42px)] leading-[1.05] tracking-[-.04em]">
             {name}
           </h1>
-          <code className="break-all text-[9px] text-muted">{data.address}</code>
+          {data.profile ? (
+            <code className="break-all text-[9px] text-muted">{data.address}</code>
+          ) : (
+            <a
+              className="inline-flex items-center gap-1 font-mono text-[9px] text-blue transition-transform duration-150 hover:translate-x-0.5"
+              href={activeExplorerAddress(data.address)}
+              target="_blank"
+              rel="noreferrer"
+              title="Open wallet in explorer"
+            >
+              <span className="break-all">{data.address}</span>
+              <ExternalLink className="shrink-0" size={12} />
+            </a>
+          )}
           <p className="max-w-[680px]">
             {data.profile?.bio || (data.profile ? 'No public bio yet.' : 'No public profile yet.')}
           </p>

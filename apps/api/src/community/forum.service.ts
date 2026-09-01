@@ -8,7 +8,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { ForumTopicStatus, Prisma } from '@precommunity/database';
+import { ForumTopicStatus, Prisma, Role } from '@precommunity/database';
 import { PROJECT_SLUG } from '@precommunity/shared';
 import { maxUint256, parseUnits } from 'viem';
 import type { AuthenticatedPrincipal } from '../common/request-context';
@@ -403,7 +403,9 @@ export class ForumService {
 
   async update(id: string, dto: UpdateForumTopicDto, actor: AuthenticatedPrincipal) {
     await this.assertForumEligible(actor.address);
-    const project = dto.category ? await this.project() : null;
+    const canModerate =
+      actor.roles.includes(Role.SUPER_ADMIN) || actor.roles.includes(Role.CONTENT_ADMIN);
+    const project = dto.category || canModerate ? await this.project() : null;
     return this.prisma.$transaction(async (tx) => {
       if (project) {
         await tx.$queryRaw<
@@ -412,18 +414,32 @@ export class ForumService {
       }
       const topic = await tx.forumTopic.findUnique({ where: { id } });
       if (!topic) throw new NotFoundException('Forum topic not found');
-      if (topic.authorId !== actor.userId)
+      const editingAsModerator =
+        canModerate &&
+        !topic.deletedAt &&
+        !topic.removedAt &&
+        (topic.status === ForumTopicStatus.PUBLISHED || topic.status === ForumTopicStatus.LOCKED);
+      if (topic.authorId !== actor.userId && !editingAsModerator) {
+        if (canModerate)
+          throw new ConflictException(
+            'Only active published or locked topics can be edited by an administrator',
+          );
         throw new ForbiddenException('Only the author can edit this topic');
+      }
       if (dto.category && dto.category !== topic.category) {
         await this.category(tx, dto.category, true);
       }
       const changed = await tx.forumTopic.updateMany({
         where: {
           id,
-          authorId: actor.userId,
+          ...(editingAsModerator ? {} : { authorId: actor.userId }),
           deletedAt: null,
           removedAt: null,
-          status: { in: [ForumTopicStatus.PENDING_REVIEW, ForumTopicStatus.PUBLISHED] },
+          status: {
+            in: editingAsModerator
+              ? [ForumTopicStatus.PUBLISHED, ForumTopicStatus.LOCKED]
+              : [ForumTopicStatus.PENDING_REVIEW, ForumTopicStatus.PUBLISHED],
+          },
         },
         data: {
           title: dto.title?.trim(),
@@ -436,6 +452,17 @@ export class ForumService {
         throw new ConflictException('A locked, removed or declined topic cannot be edited');
       const updated = await tx.forumTopic.findUnique({ where: { id }, include: topicInclude });
       if (!updated) throw new NotFoundException('Forum topic not found');
+      if (editingAsModerator) {
+        await writeAuditEvent(tx, {
+          projectId: project!.id,
+          actor,
+          entityType: 'ForumTopic',
+          entityId: id,
+          action: 'EDIT_FORUM_TOPIC',
+          before: { title: topic.title, body: topic.body, category: topic.category },
+          after: { title: updated.title, body: updated.body, category: updated.category },
+        });
+      }
       return serializeForumDetail(updated);
     });
   }
@@ -589,28 +616,67 @@ export class ForumService {
 
   async editReply(id: string, dto: ForumReplyDto, actor: AuthenticatedPrincipal) {
     await this.assertForumEligible(actor.address);
-    const reply = await this.prisma.forumReply.findUnique({
-      where: { id },
-      include: { topic: true },
+    const canModerate =
+      actor.roles.includes(Role.SUPER_ADMIN) || actor.roles.includes(Role.CONTENT_ADMIN);
+    const project = canModerate ? await this.project() : null;
+    return this.prisma.$transaction(async (tx) => {
+      const reply = await tx.forumReply.findUnique({
+        where: { id },
+        include: { topic: true },
+      });
+      if (!reply) throw new NotFoundException('Forum reply not found');
+      const editingAsModerator =
+        canModerate &&
+        !reply.deletedAt &&
+        !reply.removedAt &&
+        !reply.topic.deletedAt &&
+        !reply.topic.removedAt &&
+        (reply.topic.status === ForumTopicStatus.PUBLISHED ||
+          reply.topic.status === ForumTopicStatus.LOCKED);
+      if (reply.authorId !== actor.userId && !editingAsModerator) {
+        if (canModerate)
+          throw new ConflictException(
+            'Only active responses in published or locked topics can be edited by an administrator',
+          );
+        throw new ForbiddenException('Only the author can edit this reply');
+      }
+      const changed = await tx.forumReply.updateMany({
+        where: {
+          id,
+          ...(editingAsModerator ? {} : { authorId: actor.userId }),
+          deletedAt: null,
+          removedAt: null,
+          topic: {
+            is: {
+              status: {
+                in: editingAsModerator
+                  ? [ForumTopicStatus.PUBLISHED, ForumTopicStatus.LOCKED]
+                  : [ForumTopicStatus.PUBLISHED],
+              },
+              deletedAt: null,
+              removedAt: null,
+            },
+          },
+        },
+        data: { body: dto.body.trim(), editedAt: new Date() },
+      });
+      if (changed.count !== 1)
+        throw new ConflictException('A reply in a locked or removed topic cannot be edited');
+      const updated = await tx.forumReply.findUnique({ where: { id } });
+      if (!updated) throw new NotFoundException('Forum reply not found');
+      if (editingAsModerator) {
+        await writeAuditEvent(tx, {
+          projectId: project!.id,
+          actor,
+          entityType: 'ForumReply',
+          entityId: id,
+          action: 'EDIT_FORUM_REPLY',
+          before: { body: reply.body },
+          after: { body: updated.body },
+        });
+      }
+      return updated;
     });
-    if (!reply) throw new NotFoundException('Forum reply not found');
-    if (reply.authorId !== actor.userId)
-      throw new ForbiddenException('Only the author can edit this reply');
-    const changed = await this.prisma.forumReply.updateMany({
-      where: {
-        id,
-        authorId: actor.userId,
-        deletedAt: null,
-        removedAt: null,
-        topic: { is: { status: ForumTopicStatus.PUBLISHED, deletedAt: null, removedAt: null } },
-      },
-      data: { body: dto.body.trim(), editedAt: new Date() },
-    });
-    if (changed.count !== 1)
-      throw new ConflictException('A reply in a locked or removed topic cannot be edited');
-    const updated = await this.prisma.forumReply.findUnique({ where: { id } });
-    if (!updated) throw new NotFoundException('Forum reply not found');
-    return updated;
   }
 
   async deleteReply(id: string, actor: AuthenticatedPrincipal) {

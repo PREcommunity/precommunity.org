@@ -15,6 +15,7 @@ interface ForumReplyListProps {
   open: boolean;
   sessionAddress: string;
   canModerate: boolean;
+  canEditAsModerator: boolean;
   onReply: (reply: ForumReply) => void;
   onEdit: (reply: ForumReply, body: string) => Promise<boolean>;
   onDelete: (reply: ForumReply) => void;
@@ -34,6 +35,7 @@ export function ForumReplyList({
   open,
   sessionAddress,
   canModerate,
+  canEditAsModerator,
   onReply,
   onEdit,
   onDelete,
@@ -56,6 +58,7 @@ export function ForumReplyList({
 
   return replies.map((reply, index) => {
     const own = sessionAddress.toLowerCase() === reply.author.address.toLowerCase();
+    const canEdit = (own && open) || canEditAsModerator;
     const position = Math.max(totalCount - replies.length, 0) + index + 1;
     return (
       <article
@@ -128,7 +131,7 @@ export function ForumReplyList({
                   <CornerUpLeft size={12} /> Reply
                 </button>
               ) : null}
-              {own && open ? (
+              {canEdit ? (
                 <button
                   className="inline-flex cursor-pointer items-center gap-1 border-0 bg-transparent text-[10px] text-blue transition-transform duration-150 hover:translate-x-0.5"
                   onClick={() => setEditing(reply.id)}

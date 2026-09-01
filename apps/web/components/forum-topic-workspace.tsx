@@ -50,6 +50,14 @@ export function ForumTopicWorkspace({
   const canModerate =
     sessionRoles.includes('SUPER_ADMIN') || sessionRoles.includes('CONTENT_ADMIN');
   const open = topic.status === 'PUBLISHED' && topic.state === 'ACTIVE';
+  const canEditTopic =
+    topic.state === 'ACTIVE' &&
+    ((isAuthor && topic.status === 'PUBLISHED') ||
+      (canModerate && (topic.status === 'PUBLISHED' || topic.status === 'LOCKED')));
+  const canEditRepliesAsModerator =
+    canModerate &&
+    topic.state === 'ACTIVE' &&
+    (topic.status === 'PUBLISHED' || topic.status === 'LOCKED');
   const category =
     config.categories.find((item) => item.value === topic.category)?.label ?? topic.category;
 
@@ -241,29 +249,29 @@ export function ForumTopicWorkspace({
               </Link>{' '}
               · {formatUtcTimestamp(topic.createdAt)}
             </span>
+            {canEditTopic && !editing ? (
+              <button
+                className="inline-flex cursor-pointer items-center gap-1 border-0 bg-transparent text-[10px] text-blue transition-transform duration-150 hover:translate-x-0.5"
+                onClick={() => setEditing(true)}
+              >
+                <Pencil size={13} /> Edit
+              </button>
+            ) : null}
             {isAuthor && open && !editing ? (
-              <>
-                <button
-                  className="inline-flex cursor-pointer items-center gap-1 border-0 bg-transparent text-[10px] text-blue transition-transform duration-150 hover:translate-x-0.5"
-                  onClick={() => setEditing(true)}
-                >
-                  <Pencil size={13} /> Edit
-                </button>
-                <button
-                  className="inline-flex cursor-pointer items-center gap-1 border-0 bg-transparent text-[10px] text-danger transition-transform duration-150 hover:translate-x-0.5"
-                  onClick={() =>
-                    setConfirmation({
-                      title: 'Delete opening post?',
-                      description:
-                        'The opening post will be removed. Existing responses will remain in a locked thread.',
-                      confirmLabel: 'Delete post',
-                      action: deleteTopic,
-                    })
-                  }
-                >
-                  <Trash2 size={13} /> Delete
-                </button>
-              </>
+              <button
+                className="inline-flex cursor-pointer items-center gap-1 border-0 bg-transparent text-[10px] text-danger transition-transform duration-150 hover:translate-x-0.5"
+                onClick={() =>
+                  setConfirmation({
+                    title: 'Delete opening post?',
+                    description:
+                      'The opening post will be removed. Existing responses will remain in a locked thread.',
+                    confirmLabel: 'Delete post',
+                    action: deleteTopic,
+                  })
+                }
+              >
+                <Trash2 size={13} /> Delete
+              </button>
             ) : null}
           </div>
           <ShareLinks kind="forum topic" title={forumTopicTitle(topic.title, topic.state)} />
@@ -289,6 +297,7 @@ export function ForumTopicWorkspace({
           open={open}
           sessionAddress={sessionAddress}
           canModerate={canModerate}
+          canEditAsModerator={canEditRepliesAsModerator}
           onReply={setReplyingTo}
           onEdit={(reply, body) => editReply(reply.id, body)}
           onDelete={(reply) =>
