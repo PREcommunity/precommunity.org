@@ -5,8 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ArrowUpRight, Check, LoaderCircle, MessageSquareText, Plus, X } from 'lucide-react';
 import {
-  FORUM_CATEGORIES,
-  type ForumCategory,
+  type ForumCategoryValue,
   type ForumConfig,
   type ForumTopicDetail,
   type ForumTopicsPage,
@@ -18,8 +17,8 @@ import { FormFieldError, useFormValidation } from './form-validation';
 import { ForumMarkdownEditor } from './forum-markdown';
 import { StatusNotice } from './status-notice';
 
-function categoryLabel(category: ForumCategory) {
-  return FORUM_CATEGORIES.find((item) => item.value === category)?.label ?? category;
+function categoryLabel(categories: ForumConfig['categories'], category: ForumCategoryValue) {
+  return categories.find((item) => item.value === category)?.label ?? category;
 }
 
 export function ForumIndex({
@@ -29,7 +28,7 @@ export function ForumIndex({
 }: {
   initialPage: ForumTopicsPage;
   config: ForumConfig;
-  activeCategory?: ForumCategory;
+  activeCategory?: ForumCategoryValue;
 }) {
   const router = useRouter();
   const [topics, setTopics] = useState(initialPage.items);
@@ -39,6 +38,7 @@ export function ForumIndex({
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
   const validation = useFormValidation();
+  const activeCategories = config.categories.filter((category) => !category.archived);
 
   async function createTopic(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -185,9 +185,9 @@ export function ForumIndex({
               className="min-h-10 w-full rounded-[3px] border border-line bg-white px-2.5 py-2 text-navy"
               name="category"
               required
-              defaultValue="GENERAL"
+              defaultValue={activeCategories[0]?.value}
             >
-              {FORUM_CATEGORIES.map((category) => (
+              {activeCategories.map((category) => (
                 <option value={category.value} key={category.value}>
                   {category.label}
                 </option>
@@ -264,7 +264,7 @@ export function ForumIndex({
         >
           All topics
         </Link>
-        {FORUM_CATEGORIES.map((category) => (
+        {config.categories.map((category) => (
           <Link
             className={`shrink-0 px-2 py-1.5 text-[9px] font-bold text-muted uppercase hover:bg-navy hover:text-white ${activeCategory === category.value ? 'bg-navy text-white' : ''}`}
             href={`/community/forum?category=${category.value}`}
@@ -297,7 +297,7 @@ export function ForumIndex({
               </span>
               <span className="flex min-w-0 flex-col">
                 <small className="font-mono text-[9px] text-blue uppercase">
-                  {categoryLabel(topic.category)}
+                  {categoryLabel(config.categories, topic.category)}
                   {topic.status === 'LOCKED' ? ' · locked' : ''}
                 </small>
                 <strong className="my-1 text-[17px]">

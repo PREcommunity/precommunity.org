@@ -19,6 +19,7 @@ import {
   SafeGoalActionKind,
   SafeGoalActionProposalStatus,
   SafeGoalManagerProposalStatus,
+  SafePayoutDelivery,
   SafePayoutProposalStatus,
 } from '@precommunity/database';
 import { DEFAULT_SUBPROJECT_NAME, DEFAULT_SUBPROJECT_SLUG } from '@precommunity/shared';
@@ -297,6 +298,46 @@ describe('monthly goal lifecycle authorization', () => {
         data: result.transactionRequest.data.toLowerCase(),
       }),
     });
+  });
+
+  it('exports exact monthly lifecycle calldata without calling Transaction Service', async () => {
+    const safeAddress = getAddress('0x2222222222222222222222222222222222222222');
+    const transactionServiceReady = vi.fn();
+    const nextNonce = vi.fn();
+    const prisma = {
+      ...directPrisma(),
+      safeGoalActionIntent: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      safeGoalActionProposal: { findFirst: vi.fn().mockResolvedValue(null) },
+    } as unknown as PrismaService;
+    const safe = {
+      assertSafeEscrowOwner: vi.fn().mockResolvedValue({
+        address: safeAddress,
+        queueUrl: 'https://app.safe.global/transactions/queue?safe=basesep:test',
+      }),
+      transactionServiceReady,
+      nextNonce,
+    } as unknown as SafeService;
+
+    const result = await new AdminService(prisma, safe).prepareGoalLifecycle(
+      monthlyGoal.id,
+      {
+        kind: SafeGoalActionKind.SET_MONTHLY_SURPLUS_POLICY,
+        monthlySurplusPolicy: MonthlySurplusPolicy.PAYOUT_ALL,
+        delivery: 'MANUAL',
+      },
+      { ...actor, chainAuthorities: [], chainOwnerAddress: null, safeOwner: true, safeAddress },
+    );
+
+    expect(result).toMatchObject({ mode: 'MANUAL' });
+    if (result.mode !== 'MANUAL') throw new Error('Expected a manual export');
+    expect(result.transactions).toHaveLength(1);
+    expect(result.transactions[0]!.operation).toBe(OperationType.Call);
+    expect(decodeFunctionData({ abi: escrowAbi, data: result.transactions[0]!.data })).toEqual({
+      functionName: 'setMonthlySurplusPolicy',
+      args: [chainGoalId, 0],
+    });
+    expect(transactionServiceReady).not.toHaveBeenCalled();
+    expect(nextNonce).not.toHaveBeenCalled();
   });
 });
 
@@ -1170,6 +1211,291 @@ describe('Safe payout preparation', () => {
     });
   });
 
+  it('creates and idempotently re-exports a durable manual payout without Safe API calls', async () => {
+    const chainGoalId = `0x${'44'.repeat(32)}`;
+    const safeAddress = getAddress('0x2222222222222222222222222222222222222222');
+    const goal = {
+      id: 'goal-id',
+      title: 'Public infrastructure',
+      chainGoalId,
+      status: FundingGoalStatus.CLOSED,
+      goalType: FundingGoalType.ONE_TIME,
+      recipientAddress: '0x1111111111111111111111111111111111111111',
+      preRecipientEntitlementRaw: '700',
+      usdcRecipientEntitlementRaw: '0',
+      preTreasuryEntitlementRaw: '0',
+      usdcTreasuryEntitlementRaw: '0',
+      payouts: [],
+    };
+    const payout = {
+      id: 'payout-id',
+      asset: FundingAsset.PRE,
+      kind: PayoutKind.EXPENSE,
+      amountRaw: '700',
+      status: PayoutStatus.PROPOSED,
+    };
+    let activeIntent: Record<string, unknown> | null = null;
+    const transaction = {
+      payout: { create: vi.fn().mockResolvedValue(payout) },
+      safePayoutIntent: {
+        create: vi.fn().mockImplementation(({ data }) => {
+          activeIntent = {
+            id: 'intent-id',
+            ...data,
+            payout,
+            goal,
+            proposal: null,
+          };
+          return activeIntent;
+        }),
+      },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      project: { findUnique: vi.fn().mockResolvedValue({ id: 'project-id' }) },
+      fundingGoal: { findUnique: vi.fn().mockResolvedValue(goal) },
+      safePayoutIntent: {
+        findMany: vi.fn().mockResolvedValue([]),
+        findFirst: vi.fn().mockImplementation(() => activeIntent),
+      },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => unknown) =>
+        callback(transaction),
+      ),
+    } as unknown as PrismaService;
+    const transactionServiceReady = vi.fn();
+    const nextNonce = vi.fn();
+    const propose = vi.fn();
+    const safe = {
+      assertSafeEscrowOwner: vi.fn().mockResolvedValue({
+        address: safeAddress,
+        queueUrl: 'https://app.safe.global/transactions/queue?safe=basesep:test',
+      }),
+      transactionServiceReady,
+      nextNonce,
+      propose,
+    } as unknown as SafeService;
+    const service = new AdminService(prisma, safe);
+    const dto = {
+      asset: FundingAsset.PRE,
+      kind: 'EXPENSE' as const,
+      amountRaw: '700',
+      delivery: 'MANUAL' as const,
+    };
+
+    const first = await service.createSafePayoutIntent('goal-id', dto, actor);
+    const second = await service.createSafePayoutIntent('goal-id', dto, actor);
+
+    expect(first).toEqual(second);
+    expect(first).toMatchObject({ mode: 'MANUAL' });
+    if (!('mode' in first)) throw new Error('Expected a manual export');
+    expect(decodeFunctionData({ abi: escrowAbi, data: first.transactions[0]!.data })).toEqual({
+      functionName: 'releaseExpense',
+      args: [chainGoalId, getAddress(config.deployment.preAddress), 700n],
+    });
+    expect(transaction.safePayoutIntent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        delivery: SafePayoutDelivery.MANUAL,
+        safeNonce: null,
+        expiresAt: null,
+      }),
+    });
+    expect(transaction.payout.create).toHaveBeenCalledOnce();
+    expect(transactionServiceReady).not.toHaveBeenCalled();
+    expect(nextNonce).not.toHaveBeenCalled();
+    expect(propose).not.toHaveBeenCalled();
+  });
+
+  it('requires an explicit queue check before replacing an uncertain API proposal', async () => {
+    const safeAddress = getAddress('0x2222222222222222222222222222222222222222');
+    const proposal: {
+      id: string;
+      safeTxHash: string;
+      status: SafePayoutProposalStatus;
+      failureReason: string;
+    } = {
+      id: 'proposal-id',
+      safeTxHash: `0x${'77'.repeat(32)}`,
+      status: SafePayoutProposalStatus.SUBMITTING,
+      failureReason: 'Safe submission has not been confirmed.',
+    };
+    const activeIntent = {
+      id: 'intent-id',
+      goalId: 'goal-id',
+      delivery: SafePayoutDelivery.SERVICE,
+      safeNonce: '7',
+      expiresAt: new Date('2099-01-01T00:10:00.000Z'),
+      consumedAt: new Date(),
+      toAddress: config.deployment.escrowAddress,
+      valueRaw: '0',
+      data: '0x1234',
+      proposal,
+      payout: {
+        asset: FundingAsset.PRE,
+        kind: PayoutKind.EXPENSE,
+        amountRaw: '100',
+        status: PayoutStatus.PROPOSED,
+      },
+      goal: { title: 'Public infrastructure' },
+    };
+    const transaction = {
+      safePayoutProposal: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      safePayoutIntent: { update: vi.fn().mockResolvedValue({}) },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      project: { findUnique: vi.fn().mockResolvedValue({ id: 'project-id' }) },
+      safePayoutIntent: {
+        findMany: vi.fn().mockResolvedValue([]),
+        findFirst: vi.fn().mockResolvedValue(activeIntent),
+      },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => unknown) =>
+        callback(transaction),
+      ),
+    } as unknown as PrismaService;
+    const nextNonce = vi.fn();
+    const safe = {
+      assertSafeEscrowOwner: vi.fn().mockResolvedValue({
+        address: safeAddress,
+        queueUrl: 'https://app.safe.global/transactions/queue?safe=basesep:test',
+      }),
+      nextNonce,
+    } as unknown as SafeService;
+    const service = new AdminService(prisma, safe);
+    const dto = {
+      asset: FundingAsset.PRE,
+      kind: 'EXPENSE' as const,
+      amountRaw: '100',
+      delivery: 'MANUAL' as const,
+    };
+
+    await expect(service.createSafePayoutIntent('goal-id', dto, actor)).rejects.toThrow(
+      'CONFIRM_SAFE_QUEUE_ABSENT',
+    );
+    proposal.status = SafePayoutProposalStatus.AWAITING_CONFIRMATIONS;
+    await expect(
+      service.createSafePayoutIntent('goal-id', { ...dto, confirmedAbsentFromSafe: true }, actor),
+    ).rejects.toThrow('cannot be duplicated');
+    proposal.status = SafePayoutProposalStatus.SUBMITTING;
+    await expect(
+      service.createSafePayoutIntent('goal-id', { ...dto, confirmedAbsentFromSafe: true }, actor),
+    ).resolves.toMatchObject({ mode: 'MANUAL', reservationId: 'intent-id' });
+    expect(transaction.safePayoutProposal.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: SafePayoutProposalStatus.STALE }),
+      }),
+    );
+    expect(transaction.safePayoutIntent.update).toHaveBeenCalledWith({
+      where: { id: 'intent-id' },
+      data: {
+        delivery: SafePayoutDelivery.MANUAL,
+        safeNonce: null,
+        expiresAt: null,
+        consumedAt: null,
+      },
+    });
+    expect(nextNonce).not.toHaveBeenCalled();
+  });
+
+  it('cancels only an unexecuted manual reservation and audits the release', async () => {
+    const safeAddress = getAddress('0x2222222222222222222222222222222222222222');
+    const intent = {
+      id: 'intent-id',
+      payoutId: 'payout-id',
+      chainId: config.deployment.chainId,
+      safeAddress: safeAddress.toLowerCase(),
+      delivery: SafePayoutDelivery.MANUAL,
+      payout: {
+        status: PayoutStatus.PROPOSED,
+        amountRaw: '100',
+        asset: FundingAsset.PRE,
+      },
+    };
+    const transaction = {
+      payout: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      safePayoutIntent: { update: vi.fn().mockResolvedValue({}) },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      project: { findUnique: vi.fn().mockResolvedValue({ id: 'project-id' }) },
+      safePayoutIntent: { findUnique: vi.fn().mockResolvedValue(intent) },
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => unknown) =>
+        callback(transaction),
+      ),
+    } as unknown as PrismaService;
+    const safe = {
+      assertOwner: vi.fn().mockResolvedValue({ address: safeAddress }),
+    } as unknown as SafeService;
+
+    await expect(
+      new AdminService(prisma, safe).cancelManualSafePayout(intent.id, actor),
+    ).resolves.toEqual({ id: intent.id, status: 'CANCELLED' });
+    expect(transaction.payout.updateMany).toHaveBeenCalledWith({
+      where: { id: 'payout-id', status: PayoutStatus.PROPOSED },
+      data: { status: PayoutStatus.FAILED },
+    });
+    expect(transaction.auditEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'CANCEL_MANUAL_SAFE_PAYOUT_RESERVATION' }),
+      }),
+    );
+  });
+
+  it('lists a manual reservation with nullable Safe fields and reusable calldata', async () => {
+    const safeAddress = getAddress('0x2222222222222222222222222222222222222222');
+    const intent = {
+      id: 'intent-id',
+      goalId: 'goal-id',
+      chainId: config.deployment.chainId,
+      safeAddress: safeAddress.toLowerCase(),
+      delivery: SafePayoutDelivery.MANUAL,
+      safeNonce: null,
+      toAddress: config.deployment.escrowAddress.toLowerCase(),
+      valueRaw: '0',
+      data: '0x1234',
+      createdAt: new Date('2026-08-15T12:00:00.000Z'),
+      updatedAt: new Date('2026-08-15T12:00:00.000Z'),
+      proposal: null,
+      goal: { title: 'Public infrastructure' },
+      payout: {
+        asset: FundingAsset.PRE,
+        kind: PayoutKind.EXPENSE,
+        amountRaw: '100',
+        recipientAddress: '0x1111111111111111111111111111111111111111',
+        status: PayoutStatus.PROPOSED,
+        chainTxHash: null,
+        executedAt: null,
+      },
+    };
+    const prisma = {
+      safePayoutIntent: {
+        findMany: vi.fn().mockResolvedValueOnce([]).mockResolvedValueOnce([intent]),
+      },
+    } as unknown as PrismaService;
+    const safe = {
+      configuredAddress: vi.fn().mockReturnValue(safeAddress),
+    } as unknown as SafeService;
+
+    await expect(new AdminService(prisma, safe).safePayoutProposals()).resolves.toEqual([
+      expect.objectContaining({
+        id: intent.id,
+        delivery: 'MANUAL',
+        safeTxHash: null,
+        safeNonce: null,
+        status: 'AWAITING_EXECUTION',
+        confirmations: null,
+        threshold: null,
+        transactionRequest: {
+          chainId: config.deployment.chainId,
+          to: getAddress(config.deployment.escrowAddress),
+          value: '0',
+          data: '0x1234',
+        },
+      }),
+    ]);
+  });
+
   it('does not create a treasury payout for a closed goal', async () => {
     const prisma = {
       project: { findUnique: vi.fn().mockResolvedValue({ id: 'project-id' }) },
@@ -1277,6 +1603,32 @@ describe('Safe payout preparation', () => {
     expect(safe.ownershipTransferRequest).not.toHaveBeenCalled();
   });
 
+  it('prepares direct ownership transfer without Transaction Service availability', async () => {
+    const safeAddress = getAddress('0x2222222222222222222222222222222222222222');
+    const transactionRequest = {
+      chainId: config.deployment.chainId,
+      to: getAddress(config.deployment.escrowAddress),
+      value: '0',
+      data: '0x1234' as const,
+    };
+    const prisma = {
+      project: { findUnique: vi.fn().mockResolvedValue({ id: 'project-id' }) },
+      chainAuthority: { count: vi.fn().mockResolvedValue(1) },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    } as unknown as PrismaService;
+    const transactionServiceReady = vi.fn();
+    const safe = {
+      configuredAddress: vi.fn().mockReturnValue(safeAddress),
+      transactionServiceReady,
+      ownershipTransferRequest: vi.fn().mockResolvedValue(transactionRequest),
+    } as unknown as SafeService;
+
+    await expect(
+      new AdminService(prisma, safe).prepareSafeOwnershipTransfer(actor),
+    ).resolves.toEqual({ transactionRequest });
+    expect(transactionServiceReady).not.toHaveBeenCalled();
+  });
+
   it('reports the pending Safe owner and its acceptance proposal', async () => {
     const safeAddress = getAddress('0x2222222222222222222222222222222222222222');
     const proposal = {
@@ -1292,6 +1644,7 @@ describe('Safe payout preparation', () => {
     } as unknown as PrismaService;
     const safe = {
       configuredAddress: vi.fn().mockReturnValue(safeAddress),
+      isConfigured: vi.fn().mockReturnValue(true),
       runtimeInfo: vi.fn().mockResolvedValue({
         address: safeAddress,
         owners: [getAddress(actor.address)],
@@ -1316,6 +1669,10 @@ describe('Safe payout preparation', () => {
       ownershipAcceptance: proposal,
       safeOwner: true,
     });
+    expect(safe.transactionServiceReady).not.toHaveBeenCalled();
+    expect(safe.ownershipAcceptanceStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ address: safeAddress }),
+    );
   });
 
   it('prepares and audits the Safe ownership acceptance request', async () => {
@@ -1336,7 +1693,7 @@ describe('Safe payout preparation', () => {
     const audit = vi.fn().mockResolvedValue({});
     const prisma = {
       project: { findUnique: vi.fn().mockResolvedValue({ id: 'project-id' }) },
-      auditEvent: { create: audit },
+      auditEvent: { findFirst: vi.fn().mockResolvedValue(null), create: audit },
     } as unknown as PrismaService;
     const safe = {
       ownershipAcceptanceRequest: vi.fn().mockResolvedValue(acceptance),
@@ -1350,6 +1707,99 @@ describe('Safe payout preparation', () => {
         data: expect.objectContaining({
           action: 'PREPARE_SAFE_OWNERSHIP_ACCEPTANCE',
           after: expect.objectContaining({ safeNonce: 7 }),
+        }),
+      }),
+    );
+  });
+
+  it('exports acceptOwnership without querying or signing through Transaction Service', async () => {
+    const safeAddress = getAddress('0x2222222222222222222222222222222222222222');
+    const transactionServiceReady = vi.fn();
+    const nextNonce = vi.fn();
+    const audit = vi.fn().mockResolvedValue({});
+    const prisma = {
+      project: { findUnique: vi.fn().mockResolvedValue({ id: 'project-id' }) },
+      auditEvent: { findFirst: vi.fn().mockResolvedValue(null), create: audit },
+    } as unknown as PrismaService;
+    const safe = {
+      manualOwnershipAcceptanceRequest: vi.fn().mockResolvedValue({
+        safeAddress,
+        threshold: 2,
+        queueUrl: 'https://app.safe.global/transactions/queue?safe=basesep:test',
+        transactionRequest: {
+          chainId: config.deployment.chainId,
+          to: getAddress(config.deployment.escrowAddress),
+          value: '0',
+          data: '0x79ba5097',
+        },
+      }),
+      transactionServiceReady,
+      nextNonce,
+    } as unknown as SafeService;
+
+    const result = await new AdminService(prisma, safe).prepareSafeOwnershipAcceptance(actor, {
+      delivery: 'MANUAL',
+    });
+
+    expect(result).toMatchObject({ mode: 'MANUAL' });
+    if (!('mode' in result)) throw new Error('Expected a manual export');
+    expect(result.transactions).toEqual([
+      expect.objectContaining({
+        chainId: config.deployment.chainId,
+        to: getAddress(config.deployment.escrowAddress),
+        data: '0x79ba5097',
+        operation: OperationType.Call,
+      }),
+    ]);
+    expect(transactionServiceReady).not.toHaveBeenCalled();
+    expect(nextNonce).not.toHaveBeenCalled();
+    expect(audit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'EXPORT_MANUAL_SAFE_OWNERSHIP_ACCEPTANCE' }),
+      }),
+    );
+  });
+
+  it('persists the queue-check requirement for an uncertain ownership submission', async () => {
+    const safeAddress = getAddress('0x2222222222222222222222222222222222222222');
+    const audit = vi.fn().mockResolvedValue({});
+    const prisma = {
+      project: { findUnique: vi.fn().mockResolvedValue({ id: 'project-id' }) },
+      auditEvent: {
+        findFirst: vi.fn().mockResolvedValue({
+          action: 'SAFE_OWNERSHIP_ACCEPTANCE_UNCONFIRMED',
+        }),
+        create: audit,
+      },
+    } as unknown as PrismaService;
+    const safe = {
+      manualOwnershipAcceptanceRequest: vi.fn().mockResolvedValue({
+        safeAddress,
+        threshold: 2,
+        queueUrl: 'https://app.safe.global/transactions/queue?safe=basesep:test',
+        transactionRequest: {
+          chainId: config.deployment.chainId,
+          to: getAddress(config.deployment.escrowAddress),
+          value: '0',
+          data: '0x79ba5097',
+        },
+      }),
+    } as unknown as SafeService;
+    const service = new AdminService(prisma, safe);
+
+    await expect(
+      service.prepareSafeOwnershipAcceptance(actor, { delivery: 'MANUAL' }),
+    ).rejects.toThrow('CONFIRM_SAFE_QUEUE_ABSENT');
+    await expect(
+      service.prepareSafeOwnershipAcceptance(actor, {
+        delivery: 'MANUAL',
+        confirmedAbsentFromSafe: true,
+      }),
+    ).resolves.toMatchObject({ mode: 'MANUAL' });
+    expect(audit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: 'SUPERSEDE_UNCERTAIN_SAFE_OWNERSHIP_ACCEPTANCE',
         }),
       }),
     );
@@ -1371,6 +1821,11 @@ describe('Safe payout preparation', () => {
     };
     const validateTransactionData = vi.fn();
     const propose = vi.fn().mockResolvedValue(undefined);
+    const audit = vi.fn().mockResolvedValue({});
+    const prisma = {
+      project: { findUnique: vi.fn().mockResolvedValue({ id: 'project-id' }) },
+      auditEvent: { create: audit },
+    } as unknown as PrismaService;
     const safe = {
       ownershipAcceptanceRequest: vi.fn().mockResolvedValue({
         safeAddress: getAddress('0x2222222222222222222222222222222222222222'),
@@ -1389,9 +1844,10 @@ describe('Safe payout preparation', () => {
       transactionHash: vi.fn().mockResolvedValue(safeTxHash),
       propose,
     } as unknown as SafeService;
+    const service = new AdminService(prisma, safe);
 
     await expect(
-      new AdminService({} as PrismaService, safe).submitSafeOwnershipAcceptance(
+      service.submitSafeOwnershipAcceptance(
         {
           transaction,
           safeTxHash,
@@ -1418,6 +1874,30 @@ describe('Safe payout preparation', () => {
         safeTxHash,
         senderAddress: actor.address,
         senderSignature: '0x1234',
+      }),
+    );
+    expect(audit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'SUBMIT_SAFE_OWNERSHIP_ACCEPTANCE' }),
+      }),
+    );
+    propose.mockRejectedValueOnce(new Error('Safe unavailable'));
+    await expect(
+      service.submitSafeOwnershipAcceptance(
+        {
+          transaction,
+          safeTxHash,
+          senderAddress: actor.address,
+          senderSignature: '0x1234',
+        },
+        actor,
+      ),
+    ).rejects.toThrow('Safe unavailable');
+    expect(audit).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: 'SAFE_OWNERSHIP_ACCEPTANCE_UNCONFIRMED',
+        }),
       }),
     );
   });
@@ -1769,6 +2249,46 @@ describe('goal manager synchronization', () => {
     expect(prisma.safeGoalManagerProposal.updateMany).not.toHaveBeenCalled();
   });
 
+  it('requires manual replacement confirmation before changing desired manager policy', async () => {
+    const upsert = vi.fn();
+    const updatePendingProposal = vi.fn();
+    const prisma = {
+      chainAuthority: { findMany: vi.fn() },
+      goalManagerAssignment: {
+        findMany: vi.fn(),
+        updateMany: vi.fn(),
+        upsert,
+      },
+      safeGoalManagerProposal: {
+        findFirst: vi.fn().mockResolvedValue({
+          status: SafeGoalManagerProposalStatus.SUBMITTING,
+          failureReason: 'Safe submission has not been confirmed.',
+        }),
+        updateMany: updatePendingProposal,
+      },
+    } as unknown as PrismaService;
+    const safe = {
+      runtimeInfo: vi.fn().mockResolvedValue(
+        safeInfo({
+          owners: [getAddress(actor.address)],
+          escrowOwner: safeAddress,
+          isEscrowOwner: true,
+        }),
+      ),
+    } as unknown as SafeService;
+
+    await expect(
+      new AdminService(prisma, safe).updateGoalManager(
+        manualManager,
+        { enabled: true, delivery: 'MANUAL' },
+        actor,
+      ),
+    ).rejects.toThrow('CONFIRM_SAFE_QUEUE_ABSENT');
+
+    expect(upsert).not.toHaveBeenCalled();
+    expect(updatePendingProposal).not.toHaveBeenCalled();
+  });
+
   it('prepares one direct setGoalManager call per missing Safe owner before migration', async () => {
     const findAssignments = vi
       .fn()
@@ -1806,6 +2326,59 @@ describe('goal manager synchronization', () => {
       functionName: 'setGoalManager',
       args: [currentOwner, true],
     });
+  });
+
+  it('exports exact goal manager calldata without reserving a nonce or calling Safe API', async () => {
+    const actorAddress = getAddress(actor.address);
+    const assignments = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          address: actorAddress.toLowerCase(),
+          source: GoalManagerAssignmentSource.SAFE_OWNER,
+          desiredEnabled: true,
+        },
+      ]);
+    const prisma = {
+      project: { findUnique: vi.fn().mockResolvedValue({ id: 'project-id' }) },
+      chainAuthority: { findMany: vi.fn().mockResolvedValue([]) },
+      goalManagerAssignment: {
+        findMany: assignments,
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+        upsert: vi.fn().mockResolvedValue({}),
+      },
+      safeGoalManagerProposal: { findFirst: vi.fn().mockResolvedValue(null) },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    } as unknown as PrismaService;
+    const transactionServiceReady = vi.fn();
+    const nextNonce = vi.fn();
+    const safe = {
+      runtimeInfo: vi.fn().mockResolvedValue(
+        safeInfo({
+          owners: [actorAddress],
+          escrowOwner: safeAddress,
+          isEscrowOwner: true,
+        }),
+      ),
+      transactionServiceReady,
+      nextNonce,
+    } as unknown as SafeService;
+
+    const result = await new AdminService(prisma, safe).prepareSafeGoalManagerSync(actor, {
+      delivery: 'MANUAL',
+    });
+
+    expect(result.mode).toBe('MANUAL');
+    if (result.mode !== 'MANUAL') throw new Error('Expected a manual export');
+    expect(result.transactions).toHaveLength(1);
+    expect(decodeFunctionData({ abi: escrowAbi, data: result.transactions[0]!.data })).toEqual({
+      functionName: 'setGoalManager',
+      args: [actorAddress, true],
+    });
+    expect(result.transactions[0]!.operation).toBe(OperationType.Call);
+    expect(transactionServiceReady).not.toHaveBeenCalled();
+    expect(nextNonce).not.toHaveBeenCalled();
   });
 
   it('lets a current Safe owner remove only its manual pin, not its effective role', async () => {

@@ -34,13 +34,17 @@ export default async function CommunityProfilePage({
         </div>
         <div>
           <span className="font-mono text-[11px] tracking-[.05em] text-blue uppercase">
-            Community profile · revision {data.profile.revision}
+            {data.profile
+              ? `Community profile · revision ${data.profile.revision}`
+              : 'Community member'}
           </span>
           <h1 className="mt-2.5 mb-2 text-[clamp(30px,4vw,42px)] leading-[1.05] tracking-[-.04em]">
             {name}
           </h1>
           <code className="break-all text-[9px] text-muted">{data.address}</code>
-          <p className="max-w-[680px]">{data.profile?.bio || 'No public bio yet.'}</p>
+          <p className="max-w-[680px]">
+            {data.profile?.bio || (data.profile ? 'No public bio yet.' : 'No public profile yet.')}
+          </p>
           <div className="mt-4 flex flex-wrap gap-3.5">
             {data.profile?.websiteUrl ? (
               <a

@@ -8,6 +8,7 @@ import type {
   AdminGoalDraft,
   AdminGoalDraftUpdateInput,
   AdminSafePayoutProposal,
+  AdminSafeDelivery,
   AdminSubproject,
 } from '@/lib/admin-workspace-types';
 import { ActionButton } from './action-button';
@@ -19,6 +20,7 @@ interface AdminGoalListProps {
   transactionPending: boolean;
   safeProposals: AdminSafePayoutProposal[];
   canProposeSafePayout: boolean;
+  safeDelivery: AdminSafeDelivery;
   canManageGoals: boolean;
   currentAddress?: string;
   chainAuthorities: Array<'OWNER' | 'GOAL_MANAGER'>;
@@ -116,6 +118,7 @@ export function AdminGoalList({
   transactionPending,
   safeProposals,
   canProposeSafePayout,
+  safeDelivery,
   canManageGoals,
   currentAddress,
   chainAuthorities,
@@ -331,7 +334,12 @@ export function AdminGoalList({
                                   )
                                 }
                               >
-                                Change policy {canDirectlyControlGoal ? 'directly' : 'via Safe'}
+                                Change policy{' '}
+                                {canDirectlyControlGoal
+                                  ? 'directly'
+                                  : safeDelivery === 'MANUAL'
+                                    ? 'via JSON'
+                                    : 'via Safe'}
                               </ActionButton>
                             ) : null}
                             {!goal.monthlyStopRequestedAt ? (
@@ -343,7 +351,12 @@ export function AdminGoalList({
                                 }
                                 onClick={() => void onLifecycle(goal.id, 'REQUEST_MONTHLY_STOP')}
                               >
-                                Graceful stop {canDirectlyControlGoal ? 'directly' : 'via Safe'}
+                                Graceful stop{' '}
+                                {canDirectlyControlGoal
+                                  ? 'directly'
+                                  : safeDelivery === 'MANUAL'
+                                    ? 'via JSON'
+                                    : 'via Safe'}
                               </ActionButton>
                             ) : (
                               <span className="text-[10px] text-warning">Stop requested</span>
@@ -354,7 +367,7 @@ export function AdminGoalList({
                               disabled={transactionPending || !canProposeSafePayout}
                               onClick={() => void onLifecycle(goal.id, 'CANCEL_MONTHLY')}
                             >
-                              Emergency cancel via Safe
+                              Emergency cancel via {safeDelivery === 'MANUAL' ? 'JSON' : 'Safe'}
                             </ActionButton>
                           </div>
                         ) : null}
@@ -389,11 +402,17 @@ export function AdminGoalList({
                                 onClick={() => void onRelease(goal.id, asset, kind, amount)}
                               >
                                 {submitting
-                                  ? 'Retry Safe submission'
+                                  ? safeDelivery === 'MANUAL'
+                                    ? 'Replace with manual JSON'
+                                    : 'Retry Safe submission'
                                   : canProposeSafePayout
                                     ? kind === 'EXPENSE'
-                                      ? 'Send recipient payout to Safe'
-                                      : 'Send cancelled funds to treasury Safe'
+                                      ? safeDelivery === 'MANUAL'
+                                        ? 'Prepare recipient payout JSON'
+                                        : 'Send recipient payout to Safe'
+                                      : safeDelivery === 'MANUAL'
+                                        ? 'Prepare treasury payout JSON'
+                                        : 'Send cancelled funds to treasury Safe'
                                     : 'Safe setup required'}{' '}
                                 · {formatUnits(amount, asset === 'PRE' ? 18 : 6)} {asset}
                               </ActionButton>

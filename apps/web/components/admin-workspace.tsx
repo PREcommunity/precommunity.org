@@ -9,11 +9,13 @@ import { ActionButton } from './action-button';
 import { AdminCreationForms } from './admin-creation-forms';
 import { AdminGoalList } from './admin-goal-list';
 import { CommunityModerationPanel } from './community-moderation-panel';
+import { ConfirmationDialog } from './confirmation-dialog';
 import { ForumModerationPanel } from './forum-moderation-panel';
 import { GoalManagerPanel } from './goal-manager-panel';
 import { KeywordMarketFeaturePanel } from './keyword-market-feature-panel';
 import { SafePayoutPanel } from './safe-payout-panel';
 import { SafeLifecyclePanel } from './safe-lifecycle-panel';
+import { SafeManualTransactionDialog } from './safe-manual-transaction-dialog';
 import { StatusNotice } from './status-notice';
 
 const accessStateClass =
@@ -53,7 +55,7 @@ export function AdminWorkspace() {
           disabled={admin.state === 'loading'}
           onClick={() => void admin.refreshData()}
         >
-          {admin.state === 'loading' ? 'Refreshing…' : 'Refresh data'}
+          {admin.state === 'loading' ? 'Refreshing Safe data…' : 'Refresh Safe data'}
         </ActionButton>
       </section>
 
@@ -125,8 +127,12 @@ export function AdminWorkspace() {
               status={admin.safeStatus}
               proposals={admin.safeProposals}
               pending={admin.transactionPending}
+              delivery={admin.safeDelivery}
+              onDeliveryChange={admin.setSafeDelivery}
               onTransferOwnership={admin.transferOwnershipToSafe}
               onProposeOwnershipAcceptance={admin.proposeOwnershipAcceptance}
+              onReopenManualPayout={admin.reopenManualPayout}
+              onCancelManualPayout={admin.cancelManualPayout}
             />
           ) : null}
           {admin.goalManagers && hasWorkspaceAccess ? (
@@ -134,6 +140,7 @@ export function AdminWorkspace() {
               workspace={admin.goalManagers}
               canManage={Boolean(admin.principal?.roles.some((role) => role === 'SUPER_ADMIN'))}
               pending={admin.transactionPending}
+              delivery={admin.safeDelivery}
               onSync={admin.syncGoalManagers}
               onUpdate={admin.updateGoalManager}
             />
@@ -179,13 +186,30 @@ export function AdminWorkspace() {
                   admin.principal?.safeOwner &&
                   admin.safeStatus?.safeOwner &&
                   admin.safeStatus?.isEscrowOwner &&
-                  admin.safeStatus?.serviceConfigured,
+                  (admin.safeDelivery === 'MANUAL' || admin.safeStatus?.serviceConfigured),
                 )}
+                safeDelivery={admin.safeDelivery}
               />
             </>
           ) : null}
         </>
       ) : null}
+      {admin.principal ? (
+        <SafeManualTransactionDialog
+          request={admin.manualSafeExport}
+          ownerAddress={admin.principal.address}
+          onClose={admin.closeManualSafeExport}
+        />
+      ) : null}
+      <ConfirmationDialog
+        open={Boolean(admin.manualReplacement)}
+        title="Confirm the proposal is absent from Safe"
+        description="Open the Safe queue and check the exact transaction before continuing. Confirm only if the earlier API submission is not waiting for signatures and is not ready to execute; otherwise exporting a replacement could duplicate it."
+        confirmLabel="I checked — export JSON"
+        pending={admin.manualReplacementPending}
+        onCancel={admin.cancelManualReplacement}
+        onConfirm={() => void admin.confirmManualReplacement()}
+      />
     </div>
   );
 }

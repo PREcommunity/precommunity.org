@@ -1,0 +1,6 @@
+CREATE TYPE "SafePayoutDelivery" AS ENUM ('SERVICE', 'MANUAL');
+
+ALTER TABLE "SafePayoutIntent"
+ADD COLUMN "delivery" "SafePayoutDelivery" NOT NULL DEFAULT 'SERVICE',
+ALTER COLUMN "safeNonce" DROP NOT NULL,
+ALTER COLUMN "expiresAt" DROP NOT NULL;

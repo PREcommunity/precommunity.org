@@ -3,15 +3,17 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { describe, expect, it } from 'vitest';
 import {
+  CreateForumCategoryDto,
   CreateForumTopicDto,
   ForumDraftDto,
   ForumMinimumPreDto,
   ForumReplyDto,
   ForumSettingsDto,
+  UpdateForumCategoryDto,
 } from './forum.dto';
 
 describe('forum validation', () => {
-  it('trims topic text and accepts a fixed category', async () => {
+  it('trims topic text and accepts a stable category identifier', async () => {
     const dto = plainToInstance(CreateForumTopicDto, {
       title: '  Better community search  ',
       body: '  How should the community organize research links?  ',
@@ -25,15 +27,26 @@ describe('forum validation', () => {
     });
   });
 
-  it('rejects unknown categories and whitespace-only replies', async () => {
+  it('rejects malformed category identifiers and whitespace-only replies', async () => {
     const topic = plainToInstance(CreateForumTopicDto, {
       title: 'Valid title',
       body: 'A sufficiently long opening post.',
-      category: 'RANDOM',
+      category: 'random category!',
     });
     const reply = plainToInstance(ForumReplyDto, { body: '  ' });
     expect((await validate(topic)).map((error) => error.property)).toContain('category');
     expect((await validate(reply)).map((error) => error.property)).toContain('body');
+  });
+
+  it('validates category names and archive updates', async () => {
+    const created = plainToInstance(CreateForumCategoryDto, { label: '  Product Updates  ' });
+    const archived = plainToInstance(UpdateForumCategoryDto, { archived: true });
+    const invalid = plainToInstance(UpdateForumCategoryDto, { archived: 'yes' });
+
+    await expect(validate(created)).resolves.toHaveLength(0);
+    expect(created.label).toBe('Product Updates');
+    await expect(validate(archived)).resolves.toHaveLength(0);
+    expect((await validate(invalid)).map((error) => error.property)).toContain('archived');
   });
 
   it('accepts an optional quoted reply UUID and rejects malformed values', async () => {

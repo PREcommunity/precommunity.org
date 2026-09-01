@@ -9,6 +9,7 @@ import {
   PayoutKind,
   PayoutStatus,
   Prisma,
+  SafePayoutDelivery,
   SafePayoutProposalStatus,
   SafeGoalActionKind,
   SafeGoalActionProposalStatus,
@@ -115,6 +116,7 @@ type EventDatabase = Pick<
   | 'fundingGoalPeriod'
   | 'cryptoContribution'
   | 'payout'
+  | 'safePayoutIntent'
   | 'safePayoutProposal'
   | 'safeGoalActionProposal'
 >;
@@ -800,7 +802,10 @@ export async function handleDecodedEscrowEvent(
           executedAt: occurredAt,
         },
       });
-      if (proposed.safeIntent?.proposal) {
+      if (
+        proposed.safeIntent?.delivery === SafePayoutDelivery.SERVICE &&
+        proposed.safeIntent.proposal
+      ) {
         await database.safePayoutProposal.update({
           where: { id: proposed.safeIntent.proposal.id },
           data: {
@@ -811,6 +816,13 @@ export async function handleDecodedEscrowEvent(
             lastCheckedAt: occurredAt,
             executedAt: occurredAt,
           },
+        });
+      }
+      const manualIntent = proposed.safeIntent;
+      if (manualIntent?.delivery === SafePayoutDelivery.MANUAL) {
+        await database.safePayoutIntent.update({
+          where: { id: manualIntent.id },
+          data: { consumedAt: occurredAt },
         });
       }
     } else {

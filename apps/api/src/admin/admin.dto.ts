@@ -114,13 +114,20 @@ export class UpdateExpenseDto {
   targets?: FundingTargetDto[];
 }
 
-export class ReleaseProposalDto {
+export type SafeDelivery = 'SERVICE' | 'MANUAL';
+
+export class PrepareSafeDeliveryDto {
+  @IsOptional() @IsIn(['SERVICE', 'MANUAL']) delivery?: SafeDelivery;
+  @IsOptional() @IsBoolean() confirmedAbsentFromSafe?: boolean;
+}
+
+export class ReleaseProposalDto extends PrepareSafeDeliveryDto {
   @IsEnum(FundingAsset) asset!: FundingAsset;
   @IsIn(['EXPENSE', 'CANCELLED_FUNDS']) kind!: 'EXPENSE' | 'CANCELLED_FUNDS';
   @Matches(/^[1-9]\d*$/) amountRaw!: string;
 }
 
-export class PrepareGoalLifecycleDto {
+export class PrepareGoalLifecycleDto extends PrepareSafeDeliveryDto {
   @IsIn([
     SafeGoalActionKind.SET_MONTHLY_SURPLUS_POLICY,
     SafeGoalActionKind.REQUEST_MONTHLY_STOP,
@@ -143,7 +150,7 @@ export class ChainSubmissionDto {
   @Matches(/^0x[a-fA-F0-9]{64}$/) txHash!: string;
 }
 
-export class UpdateGoalManagerDto {
+export class UpdateGoalManagerDto extends PrepareSafeDeliveryDto {
   @IsBoolean() enabled!: boolean;
 }
 

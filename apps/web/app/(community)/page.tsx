@@ -1,9 +1,13 @@
 import Link from 'next/link';
 import { ArrowUpRight, MessageSquareText, Vote } from 'lucide-react';
 import { redirect } from 'next/navigation';
-import { FORUM_CATEGORIES } from '@precommunity/shared';
 import { GoalList } from '@/components/goal-list';
-import { getCommunityProposals, getDashboardAvailability, getForumTopics } from '@/lib/api';
+import {
+  getCommunityProposals,
+  getDashboardAvailability,
+  getForumConfig,
+  getForumTopics,
+} from '@/lib/api';
 import { formatAmount, formatUtcTimestamp, forumTopicTitle, shortAddress } from '@/lib/format';
 import { activeDeployment, activeExplorerAddress } from '@/lib/deployment';
 
@@ -14,9 +18,10 @@ export default async function Home({
 }) {
   const query = await searchParams;
   if (query.month) redirect(`/funding?month=${encodeURIComponent(query.month)}`);
-  const [dashboardAvailability, forum, proposalResults] = await Promise.all([
+  const [dashboardAvailability, forum, forumConfig, proposalResults] = await Promise.all([
     getDashboardAvailability(),
     getForumTopics({ limit: 3 }),
+    getForumConfig(),
     getCommunityProposals(),
   ]);
   const dashboard = dashboardAvailability.dashboard;
@@ -116,7 +121,8 @@ export default async function Home({
                   </span>
                   <div className="flex min-w-0 flex-col">
                     <small className="font-mono text-[9px] text-blue uppercase">
-                      {FORUM_CATEGORIES.find((item) => item.value === topic.category)?.label}
+                      {forumConfig.categories.find((item) => item.value === topic.category)
+                        ?.label ?? topic.category}
                     </small>
                     <strong className="my-1 overflow-hidden text-[15px] text-ellipsis whitespace-nowrap">
                       {forumTopicTitle(topic.title, topic.state)}

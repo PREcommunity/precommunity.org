@@ -1,7 +1,6 @@
 import { Transform } from 'class-transformer';
 import {
   IsBoolean,
-  IsEnum,
   IsOptional,
   IsString,
   IsUUID,
@@ -10,21 +9,26 @@ import {
   MinLength,
   ValidateIf,
 } from 'class-validator';
-import { ForumCategory } from '@precommunity/database';
 
 const Trimmed = () =>
   Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value));
+const CATEGORY_VALUE_PATTERN = /^[\p{L}\p{N}]+(?:_[\p{L}\p{N}]+)*$/u;
 
 export class CreateForumTopicDto {
   @Trimmed() @IsString() @MinLength(4) @MaxLength(120) title!: string;
   @Trimmed() @IsString() @MinLength(10) @MaxLength(5000) body!: string;
-  @IsEnum(ForumCategory) category!: ForumCategory;
+  @Trimmed() @IsString() @MaxLength(64) @Matches(CATEGORY_VALUE_PATTERN) category!: string;
 }
 
 export class UpdateForumTopicDto {
   @Trimmed() @IsOptional() @IsString() @MinLength(4) @MaxLength(120) title?: string;
   @Trimmed() @IsOptional() @IsString() @MinLength(10) @MaxLength(5000) body?: string;
-  @IsOptional() @IsEnum(ForumCategory) category?: ForumCategory;
+  @Trimmed()
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  @Matches(CATEGORY_VALUE_PATTERN)
+  category?: string;
 }
 
 export class ForumDraftDto {
@@ -38,7 +42,21 @@ export class ForumDraftDto {
   @IsString()
   @MaxLength(5000)
   body?: string;
-  @ValidateIf((_, value) => value !== undefined) @IsEnum(ForumCategory) category?: ForumCategory;
+  @Trimmed()
+  @ValidateIf((_, value) => value !== undefined)
+  @IsString()
+  @MaxLength(64)
+  @Matches(CATEGORY_VALUE_PATTERN)
+  category?: string;
+}
+
+export class CreateForumCategoryDto {
+  @Trimmed() @IsString() @MinLength(1) @MaxLength(80) label!: string;
+}
+
+export class UpdateForumCategoryDto {
+  @Trimmed() @IsOptional() @IsString() @MinLength(1) @MaxLength(80) label?: string;
+  @IsOptional() @IsBoolean() archived?: boolean;
 }
 
 export class ForumReplyDto {

@@ -8,8 +8,8 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { ForumCategory, ForumTopicStatus, Prisma } from '@precommunity/database';
-import { FORUM_CATEGORIES, PROJECT_SLUG } from '@precommunity/shared';
+import { ForumTopicStatus, Prisma } from '@precommunity/database';
+import { PROJECT_SLUG } from '@precommunity/shared';
 import { maxUint256, parseUnits } from 'viem';
 import type { AuthenticatedPrincipal } from '../common/request-context';
 import { PrismaService } from '../common/prisma.service';
@@ -20,7 +20,9 @@ import {
   ForumSettingsDto,
   ForumDraftDto,
   ForumMinimumPreDto,
+  CreateForumCategoryDto,
   CreateForumTopicDto,
+  UpdateForumCategoryDto,
   UpdateForumTopicDto,
 } from './forum.dto';
 import {
@@ -46,6 +48,21 @@ const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 const MAX_REPLY_LIMIT = 100;
 const MAX_DRAFTS = 20;
+const CATEGORY_VALUE_PATTERN = /^[\p{L}\p{N}]+(?:_[\p{L}\p{N}]+)*$/u;
+
+function normalizeCategoryLabel(label: string) {
+  return label.trim().replace(/\s+/g, ' ');
+}
+
+function categoryValueFromLabel(label: string) {
+  const value = normalizeCategoryLabel(label)
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
+    .toUpperCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '_')
+    .replace(/^_+|_+$/g, '');
+  return Array.from(value).slice(0, 64).join('').replace(/_+$/g, '');
+}
 
 @Injectable()
 export class ForumService {
@@ -79,11 +96,44 @@ export class ForumService {
     return this.eligibility.assertCurrent(address, this.minimumRaw(settings), 'write in the forum');
   }
 
-  async config() {
-    return this.configFrom(await this.settings());
+  private categoryOption(category: { value: string; label: string; archivedAt: Date | null }) {
+    return { value: category.value, label: category.label, archived: Boolean(category.archivedAt) };
   }
 
-  async list(category?: ForumCategory, cursorValue?: string, rawLimit?: string) {
+  private async category(
+    database: Pick<Prisma.TransactionClient, 'forumCategory'>,
+    value: string,
+    activeOnly = false,
+  ) {
+    if (value.length > 64 || !CATEGORY_VALUE_PATTERN.test(value)) {
+      throw new BadRequestException('Forum category is invalid');
+    }
+    const category = await database.forumCategory.findUnique({ where: { value } });
+    if (!category) throw new BadRequestException('Forum category does not exist');
+    if (activeOnly && category.archivedAt)
+      throw new ConflictException('Forum category is archived');
+    return category;
+  }
+
+  private async defaultCategory(database: Pick<Prisma.TransactionClient, 'forumCategory'>) {
+    const category = await database.forumCategory.findFirst({
+      where: { archivedAt: null },
+      orderBy: [{ position: 'asc' }, { value: 'asc' }],
+    });
+    if (!category) throw new ConflictException('The forum needs at least one active category');
+    return category;
+  }
+
+  async config() {
+    const [settings, categories] = await Promise.all([
+      this.settings(),
+      this.prisma.forumCategory.findMany({ orderBy: [{ position: 'asc' }, { value: 'asc' }] }),
+    ]);
+    return this.configFrom(settings, categories);
+  }
+
+  async list(category?: string, cursorValue?: string, rawLimit?: string) {
+    if (category) await this.category(this.prisma, category);
     const cursor = decodeForumCursor(cursorValue);
     const parsedLimit = rawLimit === undefined ? DEFAULT_LIMIT : Number(rawLimit);
     if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > MAX_LIMIT) {
@@ -182,10 +232,17 @@ export class ForumService {
   }
 
   async createDraft(dto: ForumDraftDto, actor: AuthenticatedPrincipal) {
+    const project = await this.project();
     const draft = await this.prisma.$transaction(async (tx) => {
       await tx.$queryRaw<
         Array<{ id: string }>
+      >`SELECT "id" FROM "Project" WHERE "id" = ${project.id}::uuid FOR SHARE`;
+      await tx.$queryRaw<
+        Array<{ id: string }>
       >`SELECT "id" FROM "User" WHERE "id" = ${actor.userId}::uuid FOR UPDATE`;
+      const category = dto.category
+        ? await this.category(tx, dto.category, true)
+        : await this.defaultCategory(tx);
       const draftCount = await tx.forumTopic.count({
         where: {
           authorId: actor.userId,
@@ -205,7 +262,7 @@ export class ForumService {
           slug: createSlug(dto.title ?? '', 'draft'),
           title: dto.title ?? '',
           body: dto.body ?? '',
-          category: dto.category ?? ForumCategory.GENERAL,
+          category: category.value,
           status: ForumTopicStatus.DRAFT,
         },
         include: topicSummaryInclude,
@@ -215,7 +272,13 @@ export class ForumService {
   }
 
   async updateDraft(id: string, dto: ForumDraftDto, actor: AuthenticatedPrincipal) {
+    const project = dto.category ? await this.project() : null;
     return this.prisma.$transaction(async (tx) => {
+      if (project) {
+        await tx.$queryRaw<
+          Array<{ id: string }>
+        >`SELECT "id" FROM "Project" WHERE "id" = ${project.id}::uuid FOR SHARE`;
+      }
       await tx.$queryRaw<
         Array<{ id: string }>
       >`SELECT "id" FROM "ForumTopic" WHERE "id" = ${id}::uuid FOR UPDATE`;
@@ -225,6 +288,9 @@ export class ForumService {
         throw new ForbiddenException('Only the author can edit this draft');
       if (draft.status !== ForumTopicStatus.DRAFT || draft.deletedAt || draft.removedAt)
         throw new ConflictException('Only an active draft can be saved');
+      if (dto.category && dto.category !== draft.category) {
+        await this.category(tx, dto.category, true);
+      }
       const updated = await tx.forumTopic.update({
         where: { id },
         data: { title: dto.title, body: dto.body, category: dto.category },
@@ -241,6 +307,7 @@ export class ForumService {
       await tx.$queryRaw<
         Array<{ id: string }>
       >`SELECT "id" FROM "Project" WHERE "id" = ${project.id}::uuid FOR SHARE`;
+      const category = await this.category(tx, dto.category, true);
       await tx.$queryRaw<
         Array<{ id: string }>
       >`SELECT "id" FROM "User" WHERE "id" = ${actor.userId}::uuid FOR UPDATE`;
@@ -273,7 +340,7 @@ export class ForumService {
           slug: createSlug(dto.title, 'topic'),
           title: dto.title,
           body: dto.body,
-          category: dto.category,
+          category: category.value,
           status: settings?.forumTopicModerationEnabled
             ? ForumTopicStatus.PENDING_REVIEW
             : ForumTopicStatus.PUBLISHED,
@@ -296,6 +363,7 @@ export class ForumService {
       await tx.$queryRaw<
         Array<{ id: string }>
       >`SELECT "id" FROM "Project" WHERE "id" = ${project.id}::uuid FOR SHARE`;
+      const category = await this.category(tx, dto.category, true);
       const settings = await tx.communitySettings.findUnique({ where: { projectId: project.id } });
       const status = settings?.forumTopicModerationEnabled
         ? ForumTopicStatus.PENDING_REVIEW
@@ -324,7 +392,7 @@ export class ForumService {
           slug: createSlug(dto.title, 'topic'),
           title: dto.title.trim(),
           body: dto.body.trim(),
-          category: dto.category,
+          category: category.value,
           status,
         },
         include: topicInclude,
@@ -335,11 +403,20 @@ export class ForumService {
 
   async update(id: string, dto: UpdateForumTopicDto, actor: AuthenticatedPrincipal) {
     await this.assertForumEligible(actor.address);
+    const project = dto.category ? await this.project() : null;
     return this.prisma.$transaction(async (tx) => {
+      if (project) {
+        await tx.$queryRaw<
+          Array<{ id: string }>
+        >`SELECT "id" FROM "Project" WHERE "id" = ${project.id}::uuid FOR SHARE`;
+      }
       const topic = await tx.forumTopic.findUnique({ where: { id } });
       if (!topic) throw new NotFoundException('Forum topic not found');
       if (topic.authorId !== actor.userId)
         throw new ForbiddenException('Only the author can edit this topic');
+      if (dto.category && dto.category !== topic.category) {
+        await this.category(tx, dto.category, true);
+      }
       const changed = await tx.forumTopic.updateMany({
         where: {
           id,
@@ -575,6 +652,102 @@ export class ForumService {
     };
   }
 
+  async createCategory(dto: CreateForumCategoryDto, actor: AuthenticatedPrincipal) {
+    const project = await this.project();
+    const label = normalizeCategoryLabel(dto.label);
+    const value = categoryValueFromLabel(label);
+    if (!value) throw new BadRequestException('Forum category needs a usable name');
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT "id" FROM "Project" WHERE "id" = ${project.id}::uuid FOR UPDATE`;
+      const duplicate = await tx.forumCategory.findFirst({
+        where: {
+          OR: [{ value }, { label: { equals: label, mode: 'insensitive' } }],
+        },
+      });
+      if (duplicate) throw new ConflictException('Forum category already exists');
+      const last = await tx.forumCategory.findFirst({
+        orderBy: [{ position: 'desc' }, { value: 'desc' }],
+        select: { position: true },
+      });
+      const created = await tx.forumCategory.create({
+        data: { value, label, position: (last?.position ?? -1) + 1 },
+      });
+      await writeAuditEvent(tx, {
+        projectId: project.id,
+        actor,
+        entityType: 'ForumCategory',
+        entityId: created.value,
+        action: 'CREATE_FORUM_CATEGORY',
+        after: this.categoryOption(created),
+      });
+      return this.categoryOption(created);
+    });
+  }
+
+  async updateCategory(value: string, dto: UpdateForumCategoryDto, actor: AuthenticatedPrincipal) {
+    if (dto.label === undefined && dto.archived === undefined) {
+      throw new BadRequestException('Provide a category name or archive state');
+    }
+    const project = await this.project();
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT "id" FROM "Project" WHERE "id" = ${project.id}::uuid FOR UPDATE`;
+      const current = await this.category(tx, value);
+      const label = dto.label === undefined ? current.label : normalizeCategoryLabel(dto.label);
+      const labelChanged = label !== current.label;
+      const archived = Boolean(current.archivedAt);
+      const archiveChanged = dto.archived !== undefined && dto.archived !== archived;
+      if (labelChanged) {
+        const duplicate = await tx.forumCategory.findFirst({
+          where: {
+            value: { not: value },
+            label: { equals: label, mode: 'insensitive' },
+          },
+        });
+        if (duplicate) throw new ConflictException('Forum category name already exists');
+      }
+      if (archiveChanged && dto.archived) {
+        const activeCount = await tx.forumCategory.count({ where: { archivedAt: null } });
+        if (activeCount <= 1)
+          throw new ConflictException('The forum needs at least one active category');
+      }
+      if (!labelChanged && !archiveChanged) return this.categoryOption(current);
+      const updated = await tx.forumCategory.update({
+        where: { value },
+        data: {
+          ...(labelChanged ? { label } : {}),
+          ...(archiveChanged ? { archivedAt: dto.archived ? new Date() : null } : {}),
+        },
+      });
+      if (labelChanged) {
+        await writeAuditEvent(tx, {
+          projectId: project.id,
+          actor,
+          entityType: 'ForumCategory',
+          entityId: value,
+          action: 'UPDATE_FORUM_CATEGORY',
+          before: { label: current.label },
+          after: { label: updated.label },
+        });
+      }
+      if (archiveChanged) {
+        await writeAuditEvent(tx, {
+          projectId: project.id,
+          actor,
+          entityType: 'ForumCategory',
+          entityId: value,
+          action: dto.archived ? 'ARCHIVE_FORUM_CATEGORY' : 'RESTORE_FORUM_CATEGORY',
+          before: { archived },
+          after: { archived: Boolean(updated.archivedAt) },
+        });
+      }
+      return this.categoryOption(updated);
+    });
+  }
+
   async updateSettings(dto: ForumSettingsDto, actor: AuthenticatedPrincipal) {
     const project = await this.project();
     return this.prisma.$transaction(async (tx) => {
@@ -603,7 +776,10 @@ export class ForumService {
         before: { forumTopicModerationEnabled: before?.forumTopicModerationEnabled ?? false },
         after: { forumTopicModerationEnabled: settings.forumTopicModerationEnabled },
       });
-      return this.configFrom(settings);
+      const categories = await tx.forumCategory.findMany({
+        orderBy: [{ position: 'asc' }, { value: 'asc' }],
+      });
+      return this.configFrom(settings, categories);
     });
   }
 
@@ -635,7 +811,10 @@ export class ForumService {
         before: { forumMinimumPreRaw: this.minimumRaw(before).toString() },
         after: { forumMinimumPreRaw: settings.forumMinimumPreRaw },
       });
-      return this.configFrom(settings);
+      const categories = await tx.forumCategory.findMany({
+        orderBy: [{ position: 'asc' }, { value: 'asc' }],
+      });
+      return this.configFrom(settings, categories);
     });
   }
 
@@ -644,11 +823,12 @@ export class ForumService {
       forumTopicModerationEnabled?: boolean;
       forumMinimumPreRaw?: string | null;
     } | null,
+    categories: Array<{ value: string; label: string; archivedAt: Date | null }> = [],
   ) {
     return {
       topicModerationEnabled: settings?.forumTopicModerationEnabled ?? false,
       minimumPre: this.eligibility.minimum(this.minimumRaw(settings)),
-      categories: FORUM_CATEGORIES,
+      categories: categories.map((category) => this.categoryOption(category)),
     };
   }
 

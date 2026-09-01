@@ -1,5 +1,6 @@
 import {
   PayoutStatus,
+  SafePayoutDelivery,
   type PrismaClient,
   expireUnconsumedSafePayoutIntents,
 } from '@precommunity/database';
@@ -29,10 +30,19 @@ describe('expired Safe payout intents', () => {
     await expect(
       expireUnconsumedSafePayoutIntents(database, { chainId: 84532 }, now),
     ).resolves.toBe(1);
+    expect(database.safePayoutIntent.findMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        chainId: 84532,
+        delivery: SafePayoutDelivery.SERVICE,
+        expiresAt: { lte: now },
+      }),
+      select: { id: true, payoutId: true },
+    });
     expect(claim).toHaveBeenCalledTimes(2);
     expect(claim).toHaveBeenCalledWith({
       where: {
         id: 'intent-expired',
+        delivery: SafePayoutDelivery.SERVICE,
         consumedAt: null,
         expiresAt: { lte: now },
         proposal: { is: null },

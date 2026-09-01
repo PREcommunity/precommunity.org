@@ -195,10 +195,10 @@ const forumConfig = {
   topicModerationEnabled: false,
   minimumPre: { amount: '1', amountRaw: '1000000000000000000', asset: 'PRE' },
   categories: [
-    { value: 'GENERAL', label: 'General' },
-    { value: 'IDEAS_FEEDBACK', label: 'Ideas & Feedback' },
-    { value: 'TECHNICAL', label: 'Technical' },
-    { value: 'HELP', label: 'Help' },
+    { value: 'GENERAL', label: 'General', archived: false },
+    { value: 'IDEAS_FEEDBACK', label: 'Ideas & Feedback', archived: false },
+    { value: 'TECHNICAL', label: 'Technical', archived: false },
+    { value: 'HELP', label: 'Help', archived: true },
   ],
 };
 const proposal = {

@@ -1,6 +1,5 @@
 import { ForumIndex } from '@/components/forum-index';
 import { getForumConfig, getForumTopics } from '@/lib/api';
-import { FORUM_CATEGORIES, type ForumCategory } from '@precommunity/shared';
 
 export const metadata = {
   title: 'Community forum',
@@ -13,10 +12,11 @@ export default async function ForumPage({
   searchParams: Promise<{ category?: string }>;
 }) {
   const query = await searchParams;
-  const category = FORUM_CATEGORIES.some((item) => item.value === query.category)
-    ? (query.category as ForumCategory)
+  const config = await getForumConfig();
+  const category = config.categories.some((item) => item.value === query.category)
+    ? query.category
     : undefined;
-  const [initialPage, config] = await Promise.all([getForumTopics({ category }), getForumConfig()]);
+  const initialPage = await getForumTopics({ category });
   return (
     <ForumIndex
       key={category ?? 'ALL'}

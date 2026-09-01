@@ -4,7 +4,7 @@ import { FormEvent, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, LoaderCircle, LockKeyhole, Pencil, Trash2, UserRound } from 'lucide-react';
-import { FORUM_CATEGORIES, type ForumConfig, type ForumTopicDetail } from '@precommunity/shared';
+import { type ForumConfig, type ForumTopicDetail } from '@precommunity/shared';
 import { clientApiJson, clientApiRequest } from '@/lib/http';
 import { useForumReplies } from '@/hooks/use-forum-replies';
 import { formatUtcTimestamp, forumTopicTitle } from '@/lib/format';
@@ -51,7 +51,7 @@ export function ForumTopicWorkspace({
     sessionRoles.includes('SUPER_ADMIN') || sessionRoles.includes('CONTENT_ADMIN');
   const open = topic.status === 'PUBLISHED' && topic.state === 'ACTIVE';
   const category =
-    FORUM_CATEGORIES.find((item) => item.value === topic.category)?.label ?? topic.category;
+    config.categories.find((item) => item.value === topic.category)?.label ?? topic.category;
 
   useEffect(() => {
     clientApiJson<{ address: string; roles?: string[] }>('/v1/auth/me', undefined, 'Session API')
@@ -184,11 +184,14 @@ export function ForumTopicWorkspace({
                 name="category"
                 defaultValue={topic.category}
               >
-                {FORUM_CATEGORIES.map((item) => (
-                  <option value={item.value} key={item.value}>
-                    {item.label}
-                  </option>
-                ))}
+                {config.categories
+                  .filter((item) => !item.archived || item.value === topic.category)
+                  .map((item) => (
+                    <option value={item.value} key={item.value}>
+                      {item.label}
+                      {item.archived ? ' · archived' : ''}
+                    </option>
+                  ))}
               </select>
               <ForumMarkdownEditor
                 {...validation.fieldProps('body')}

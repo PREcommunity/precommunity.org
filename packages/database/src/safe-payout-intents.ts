@@ -1,4 +1,4 @@
-import { PayoutStatus, type PrismaClient } from './generated/prisma/client';
+import { PayoutStatus, SafePayoutDelivery, type PrismaClient } from './generated/prisma/client';
 
 interface SafePayoutIntentScope {
   chainId: number;
@@ -18,6 +18,7 @@ export async function expireUnconsumedSafePayoutIntents(
     where: {
       chainId: scope.chainId,
       ...(scope.safeAddress ? { safeAddress: scope.safeAddress.toLowerCase() } : {}),
+      delivery: SafePayoutDelivery.SERVICE,
       consumedAt: null,
       expiresAt: { lte: now },
       proposal: { is: null },
@@ -34,6 +35,7 @@ export async function expireUnconsumedSafePayoutIntents(
       const claimed = await tx.safePayoutIntent.updateMany({
         where: {
           id: candidate.id,
+          delivery: SafePayoutDelivery.SERVICE,
           consumedAt: null,
           expiresAt: { lte: now },
           proposal: { is: null },

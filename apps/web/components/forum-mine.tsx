@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft, CircleAlert, LoaderCircle, Pencil, Trash2 } from 'lucide-react';
-import { FORUM_CATEGORIES, type ForumConfig, type ForumTopicDetail } from '@precommunity/shared';
+import { type ForumConfig, type ForumTopicDetail } from '@precommunity/shared';
 import { ApiError, clientApiJson, clientApiRequest } from '@/lib/http';
 import { forumTopicTitle } from '@/lib/format';
 import { ActionButton } from './action-button';
@@ -186,7 +186,8 @@ export function ForumMine({ submitted, config }: { submitted?: string; config: F
                       : forumTopicTitle(topic.title, topic.state)}
                   </h2>
                   <p className="m-0 text-muted">
-                    {FORUM_CATEGORIES.find((item) => item.value === topic.category)?.label}
+                    {config.categories.find((item) => item.value === topic.category)?.label ??
+                      topic.category}
                   </p>
                   {topic.status === 'DECLINED' && topic.moderationNote ? (
                     <p className="text-danger">{topic.moderationNote}</p>
@@ -241,11 +242,14 @@ export function ForumMine({ submitted, config }: { submitted?: string; config: F
                     />
                     <FormFieldError {...validation.errorProps('title')} />
                     <select className={selectClass} name="category" defaultValue={topic.category}>
-                      {FORUM_CATEGORIES.map((item) => (
-                        <option value={item.value} key={item.value}>
-                          {item.label}
-                        </option>
-                      ))}
+                      {config.categories
+                        .filter((item) => !item.archived || item.value === topic.category)
+                        .map((item) => (
+                          <option value={item.value} key={item.value}>
+                            {item.label}
+                            {item.archived ? ' · archived' : ''}
+                          </option>
+                        ))}
                     </select>
                     <ForumMarkdownEditor
                       {...validation.fieldProps('body')}

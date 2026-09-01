@@ -31,16 +31,15 @@ export type ChainSyncStatus = 'AWAITING_DEPLOYMENT' | 'SYNCED';
 export type CommunityProposalStatus =
   'PENDING_REVIEW' | 'VOTING' | 'PASSED' | 'REJECTED' | 'CONVERTED' | 'DECLINED' | 'REMOVED';
 export type ProposalVoteChoice = 'FOR' | 'AGAINST' | 'ABSTAIN';
-export type ForumCategory = 'GENERAL' | 'IDEAS_FEEDBACK' | 'TECHNICAL' | 'HELP';
+export type ForumCategoryValue = string;
 export type ForumTopicStatus =
   'DRAFT' | 'PENDING_REVIEW' | 'PUBLISHED' | 'LOCKED' | 'DECLINED' | 'REMOVED';
 
-export const FORUM_CATEGORIES: ReadonlyArray<{ value: ForumCategory; label: string }> = [
-  { value: 'GENERAL', label: 'General' },
-  { value: 'IDEAS_FEEDBACK', label: 'Ideas & Feedback' },
-  { value: 'TECHNICAL', label: 'Technical' },
-  { value: 'HELP', label: 'Help' },
-] as const;
+export interface ForumCategoryOption {
+  value: ForumCategoryValue;
+  label: string;
+  archived: boolean;
+}
 
 export interface CommunityAuthor {
   address: string;
@@ -111,7 +110,7 @@ export interface ForumTopicSummary {
   title: string | null;
   excerpt: string | null;
   state: 'ACTIVE' | 'DELETED' | 'REMOVED';
-  category: ForumCategory;
+  category: ForumCategoryValue;
   status: ForumTopicStatus;
   replyCount: number;
   lastActivityAt: string;
@@ -140,7 +139,7 @@ export interface ForumRepliesPage {
 export interface ForumConfig {
   topicModerationEnabled: boolean;
   minimumPre: { amount: string; amountRaw: string; asset: 'PRE' };
-  categories: typeof FORUM_CATEGORIES;
+  categories: ForumCategoryOption[];
 }
 
 export interface GoalDocument {

@@ -5,7 +5,6 @@ import {
   Get,
   Inject,
   Param,
-  ParseEnumPipe,
   ParseUUIDPipe,
   Patch,
   Post,
@@ -14,7 +13,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ForumCategory, Role } from '@precommunity/database';
+import { Role } from '@precommunity/database';
 import { SessionGuard } from '../auth/session.guard';
 import type { AuthenticatedRequest } from '../common/request-context';
 import { Roles } from '../common/roles';
@@ -22,11 +21,13 @@ import { RolesGuard } from '../common/roles.guard';
 import { ModerationDto } from './community.dto';
 import {
   CreateForumTopicDto,
+  CreateForumCategoryDto,
   ForumDraftDto,
   ForumMinimumPreDto,
   ForumReplyDto,
   ForumSettingsDto,
   UpdateForumTopicDto,
+  UpdateForumCategoryDto,
 } from './forum.dto';
 import { ForumService } from './forum.service';
 
@@ -41,8 +42,7 @@ export class ForumController {
 
   @Get('topics')
   list(
-    @Query('category', new ParseEnumPipe(ForumCategory, { optional: true }))
-    category?: ForumCategory,
+    @Query('category') category?: string,
     @Query('cursor') cursor?: string,
     @Query('limit') limit?: string,
   ) {
@@ -174,6 +174,20 @@ export class ForumAdminController {
   @Get()
   workspace() {
     return this.service.adminWorkspace();
+  }
+
+  @Post('categories')
+  createCategory(@Body() body: CreateForumCategoryDto, @Req() request: AuthenticatedRequest) {
+    return this.service.createCategory(body, request.principal!);
+  }
+
+  @Patch('categories/:value')
+  updateCategory(
+    @Param('value') value: string,
+    @Body() body: UpdateForumCategoryDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.service.updateCategory(value, body, request.principal!);
   }
 
   @Put('settings')

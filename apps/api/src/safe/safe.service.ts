@@ -182,15 +182,20 @@ export class SafeService {
   }
 
   async assertPayoutReady(address: string) {
+    const info = await this.assertSafeEscrowOwner(address);
+    if (!(await this.transactionServiceReady(true))) {
+      throw new ServiceUnavailableException(
+        'Safe Transaction Service is unavailable or not configured',
+      );
+    }
+    return info;
+  }
+
+  async assertSafeEscrowOwner(address: string) {
     const info = await this.assertOwner(address, true);
     if (!info.isEscrowOwner) {
       throw new ServiceUnavailableException(
         'Safe must become the confirmed escrow owner before payout proposals can be created',
-      );
-    }
-    if (!(await this.transactionServiceReady(true))) {
-      throw new ServiceUnavailableException(
-        'Safe Transaction Service is unavailable or not configured',
       );
     }
     return info;
@@ -315,7 +320,7 @@ export class SafeService {
     }
   }
 
-  async ownershipAcceptanceRequest(signer: string) {
+  private async ownershipAcceptanceCall(signer: string) {
     const info = await this.runtimeInfo(true);
     if (!info.owners.some((owner) => isAddressEqual(owner, getAddress(signer)))) {
       throw new ForbiddenException('The connected wallet is not an owner of the configured Safe');
@@ -324,12 +329,6 @@ export class SafeService {
     if (!info.isPendingEscrowOwner) {
       throw new ForbiddenException('Safe is not the pending escrow owner');
     }
-    if (!(await this.transactionServiceReady(true))) {
-      throw new ServiceUnavailableException(
-        'Safe Transaction Service must be available before ownership can be accepted',
-      );
-    }
-
     const transactionRequest = deploymentTransactionRequest({
       to: getAddress(config.deployment.escrowAddress),
       value: '0',
@@ -345,6 +344,27 @@ export class SafeService {
     } catch {
       throw new ServiceUnavailableException(
         'Ownership acceptance preflight failed. Verify the pending owner on-chain.',
+      );
+    }
+
+    return { info, transactionRequest };
+  }
+
+  async manualOwnershipAcceptanceRequest(signer: string) {
+    const { info, transactionRequest } = await this.ownershipAcceptanceCall(signer);
+    return {
+      safeAddress: info.address,
+      threshold: info.threshold,
+      queueUrl: info.queueUrl,
+      transactionRequest,
+    };
+  }
+
+  async ownershipAcceptanceRequest(signer: string) {
+    const { info, transactionRequest } = await this.ownershipAcceptanceCall(signer);
+    if (!(await this.transactionServiceReady(true))) {
+      throw new ServiceUnavailableException(
+        'Safe Transaction Service must be available before ownership can be accepted',
       );
     }
 

@@ -1,7 +1,6 @@
 import Link from 'next/link';
 import { ArrowUpRight, MessageSquareText, Vote } from 'lucide-react';
-import { FORUM_CATEGORIES } from '@precommunity/shared';
-import { getCommunityProposals, getForumTopics } from '@/lib/api';
+import { getCommunityProposals, getForumConfig, getForumTopics } from '@/lib/api';
 import { formatUtcTimestamp, forumTopicTitle } from '@/lib/format';
 
 export const metadata = {
@@ -10,8 +9,9 @@ export const metadata = {
 };
 
 export default async function CommunityPage() {
-  const [forum, proposals] = await Promise.all([
+  const [forum, forumConfig, proposals] = await Promise.all([
     getForumTopics({ limit: 5 }),
+    getForumConfig(),
     getCommunityProposals(),
   ]);
   return (
@@ -39,7 +39,8 @@ export default async function CommunityPage() {
                 </span>
                 <div className="min-w-0">
                   <small className="font-mono text-[9px] text-blue uppercase">
-                    {FORUM_CATEGORIES.find((item) => item.value === topic.category)?.label}
+                    {forumConfig.categories.find((item) => item.value === topic.category)?.label ??
+                      topic.category}
                   </small>
                   <strong className="my-[3px] block text-[17px]">
                     {forumTopicTitle(topic.title, topic.state)}

@@ -2,7 +2,7 @@ import type {
   CommunityProposal,
   CommunityProposalStatus,
   DashboardResponse,
-  ForumCategory,
+  ForumCategoryValue,
   ForumConfig,
   ForumTopicDetail,
   ForumTopicsPage,
@@ -167,7 +167,7 @@ export async function getForumConfig(): Promise<ForumConfig> {
 }
 
 export async function getForumTopics(
-  options: { category?: ForumCategory; cursor?: string; limit?: number } = {},
+  options: { category?: ForumCategoryValue; cursor?: string; limit?: number } = {},
 ): Promise<ForumTopicsPage> {
   const params = new URLSearchParams();
   if (options.category) params.set('category', options.category);
@@ -224,7 +224,7 @@ export interface PublicCommunityProfile {
     websiteUrl: string | null;
     bio: string | null;
     defaultPublic: boolean;
-  };
+  } | null;
   proposals: Array<{
     slug: string;
     title: string;
@@ -246,7 +246,7 @@ export interface PublicCommunityProfile {
   forumTopics: Array<{
     slug: string;
     title: string;
-    category: ForumCategory;
+    category: ForumCategoryValue;
     status: string;
     createdAt: string;
   }>;
@@ -266,7 +266,12 @@ export async function getCommunityProfile(address: string): Promise<PublicCommun
     );
     return {
       ...profile,
-      profile: { ...profile.profile, avatarUrl: resolveApiAssetUrl(profile.profile.avatarUrl) },
+      profile: profile.profile
+        ? {
+            ...profile.profile,
+            avatarUrl: resolveApiAssetUrl(profile.profile.avatarUrl),
+          }
+        : null,
     };
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) return null;

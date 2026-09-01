@@ -24,6 +24,7 @@ import {
   SafeGoalActionKind,
   SafeGoalActionProposalStatus,
   SafeGoalManagerProposalStatus,
+  SafePayoutDelivery,
   SafePayoutProposalStatus,
   desiredGoalManagerSet,
   expireUnconsumedSafePayoutIntents,
@@ -70,7 +71,9 @@ import {
   FundingTargetDto,
   ModerateProfileDto,
   PrepareGoalLifecycleDto,
+  PrepareSafeDeliveryDto,
   ReleaseProposalDto,
+  type SafeDelivery,
   UpdateGoalManagerDto,
   UpdateExpenseDto,
 } from './admin.dto';
@@ -88,7 +91,21 @@ const pendingGoalManagerProposalStatuses: SafeGoalManagerProposalStatus[] = [
   SafeGoalManagerProposalStatus.AWAITING_CONFIRMATIONS,
   SafeGoalManagerProposalStatus.READY_TO_EXECUTE,
 ];
+const pendingGoalActionProposalStatuses: SafeGoalActionProposalStatus[] = [
+  SafeGoalActionProposalStatus.SUBMITTING,
+  SafeGoalActionProposalStatus.AWAITING_CONFIRMATIONS,
+  SafeGoalActionProposalStatus.READY_TO_EXECUTE,
+];
+const pendingPayoutProposalStatuses: SafePayoutProposalStatus[] = [
+  SafePayoutProposalStatus.SUBMITTING,
+  SafePayoutProposalStatus.AWAITING_CONFIRMATIONS,
+  SafePayoutProposalStatus.READY_TO_EXECUTE,
+];
 const zeroAddress = '0x0000000000000000000000000000000000000000';
+
+function safeDelivery(value?: SafeDelivery) {
+  return value ?? 'SERVICE';
+}
 
 function encodeGoalLifecycleData(
   chainGoalId: string,
@@ -358,6 +375,98 @@ export class AdminService {
   private safeClient() {
     if (!this.safe) throw new ServiceUnavailableException('Safe integration is unavailable');
     return this.safe;
+  }
+
+  private manualSafeExport(
+    info: Pick<SafeRuntimeInfo, 'address' | 'queueUrl'>,
+    name: string,
+    description: string,
+    transactions: Array<{
+      to: string;
+      value: string;
+      data: string;
+      operation?: OperationType;
+    }>,
+  ) {
+    const calls = transactions.map((transaction) => {
+      if (transaction.operation !== undefined && transaction.operation !== OperationType.Call) {
+        throw new ForbiddenException('Manual Safe exports cannot contain DelegateCall');
+      }
+      return {
+        chainId: config.deployment.chainId,
+        to: getAddress(transaction.to),
+        value: transaction.value,
+        data: transaction.data as `0x${string}`,
+        operation: OperationType.Call,
+      };
+    });
+    const first = calls[0];
+    if (!first) throw new BadRequestException('A manual Safe export requires a transaction');
+    return {
+      mode: 'MANUAL' as const,
+      name,
+      description,
+      chainId: config.deployment.chainId,
+      safeAddress: info.address,
+      queueUrl: info.queueUrl,
+      transactions: calls,
+      transactionRequest: {
+        chainId: first.chainId,
+        to: first.to,
+        value: first.value,
+        data: first.data,
+      },
+    };
+  }
+
+  private assertManualReplacementAllowed(
+    proposal: { status: string; failureReason: string | null },
+    confirmedAbsentFromSafe?: boolean,
+  ) {
+    if (proposal.status === 'AWAITING_CONFIRMATIONS' || proposal.status === 'READY_TO_EXECUTE') {
+      throw new BadRequestException(
+        'A Safe proposal is already awaiting signatures or ready to execute and cannot be duplicated.',
+      );
+    }
+    if (proposal.status !== 'SUBMITTING') return;
+    if (!proposal.failureReason) {
+      throw new BadRequestException('A Safe proposal is still being submitted. Try again later.');
+    }
+    if (!confirmedAbsentFromSafe) {
+      throw new BadRequestException(
+        'CONFIRM_SAFE_QUEUE_ABSENT: Check the Safe queue and confirm that this proposal is absent before exporting a manual replacement.',
+      );
+    }
+  }
+
+  private manualPayoutResponse(
+    info: Pick<SafeRuntimeInfo, 'address' | 'queueUrl'>,
+    intent: {
+      id: string;
+      toAddress: string;
+      valueRaw: string;
+      data: string;
+      payout: { asset: FundingAsset; kind: PayoutKind; amountRaw: string };
+    },
+    goalTitle: string,
+  ) {
+    return {
+      ...this.manualSafeExport(
+        info,
+        `Payout: ${goalTitle}`,
+        `${intent.payout.kind} payout of ${intent.payout.amountRaw} ${intent.payout.asset} for ${goalTitle}.`,
+        [
+          {
+            to: intent.toAddress,
+            value: intent.valueRaw,
+            data: intent.data,
+          },
+        ],
+      ),
+      id: intent.id,
+      reservationId: intent.id,
+      delivery: 'MANUAL' as const,
+    };
   }
 
   private isMissingDatabaseColumn(error: unknown) {
@@ -1000,8 +1109,83 @@ export class AdminService {
       );
     }
 
+    const delivery = safeDelivery(dto.delivery);
     const safe = this.safeClient();
-    const safeInfo = await safe.assertPayoutReady(actor.address);
+    const safeInfo =
+      delivery === 'MANUAL'
+        ? await safe.assertSafeEscrowOwner(actor.address)
+        : await safe.assertPayoutReady(actor.address);
+    const parameters = {
+      targetPolicy: dto.monthlySurplusPolicy ?? null,
+      expectedPolicy: goal.monthlySurplusPolicy,
+      expectedDeadline: goal.deadline.toISOString(),
+      expectedStopRequestedAt: goal.monthlyStopRequestedAt?.toISOString() ?? null,
+      expectedStatus: goal.status,
+    };
+
+    if (delivery === 'MANUAL') {
+      await this.prisma.safeGoalActionIntent.updateMany({
+        where: {
+          chainId: config.deployment.chainId,
+          safeAddress: safeInfo.address.toLowerCase(),
+          consumedAt: null,
+          proposal: { is: null },
+        },
+        data: { consumedAt: now },
+      });
+      const existingProposal = await this.prisma.safeGoalActionProposal.findFirst({
+        where: {
+          status: { in: pendingGoalActionProposalStatuses },
+          intent: {
+            chainId: config.deployment.chainId,
+            safeAddress: safeInfo.address.toLowerCase(),
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (existingProposal) {
+        this.assertManualReplacementAllowed(existingProposal, dto.confirmedAbsentFromSafe);
+        await this.prisma.$transaction(async (tx) => {
+          const replaced = await tx.safeGoalActionProposal.updateMany({
+            where: {
+              id: existingProposal.id,
+              status: SafeGoalActionProposalStatus.SUBMITTING,
+            },
+            data: {
+              status: SafeGoalActionProposalStatus.STALE,
+              failureReason: 'Superseded by a confirmed manual export after checking Safe.',
+              lastCheckedAt: now,
+            },
+          });
+          if (replaced.count !== 1) {
+            throw new BadRequestException('The Safe proposal changed. Refresh and try again.');
+          }
+          await writeAuditEvent(tx, {
+            projectId: project.id,
+            actor,
+            entityType: 'SafeGoalActionProposal',
+            entityId: existingProposal.id,
+            action: 'SUPERSEDE_UNCERTAIN_SAFE_PROPOSAL',
+            after: { delivery, safeTxHash: existingProposal.safeTxHash },
+          });
+        });
+      }
+      await writeAuditEvent(this.prisma, {
+        projectId: project.id,
+        actor,
+        entityType: 'FundingGoal',
+        entityId: goal.id,
+        action: 'EXPORT_MANUAL_SAFE_GOAL_ACTION',
+        after: { kind: dto.kind, ...parameters, delivery },
+      });
+      return this.manualSafeExport(
+        safeInfo,
+        `Monthly goal: ${dto.kind}`,
+        `Apply ${dto.kind} to ${goal.title}.`,
+        [deploymentTransactionRequest({ to, value: '0', data })],
+      );
+    }
+
     await this.prisma.safeGoalActionIntent.updateMany({
       where: {
         chainId: config.deployment.chainId,
@@ -1042,13 +1226,6 @@ export class AdminService {
 
     const safeNonce = await safe.nextNonce();
     const expiresAt = new Date(Date.now() + 10 * 60_000);
-    const parameters = {
-      targetPolicy: dto.monthlySurplusPolicy ?? null,
-      expectedPolicy: goal.monthlySurplusPolicy,
-      expectedDeadline: goal.deadline.toISOString(),
-      expectedStopRequestedAt: goal.monthlyStopRequestedAt?.toISOString() ?? null,
-      expectedStatus: goal.status,
-    };
     const intent = await this.prisma
       .$transaction(async (tx) => {
         const created = await tx.safeGoalActionIntent.create({
@@ -1271,7 +1448,7 @@ export class AdminService {
       };
     }
     try {
-      const [info, goalManagers, serviceConfigured] = await Promise.all([
+      const [info, goalManagers] = await Promise.all([
         safe.runtimeInfo(true),
         this.prisma.chainAuthority.count({
           where: {
@@ -1281,15 +1458,13 @@ export class AdminService {
             address: { not: safeAddress.toLowerCase() },
           },
         }),
-        safe.transactionServiceReady(true),
       ]);
-      const ownershipAcceptance =
-        info.isPendingEscrowOwner && serviceConfigured
-          ? await safe.ownershipAcceptanceStatus(info)
-          : null;
+      const ownershipAcceptance = info.isPendingEscrowOwner
+        ? await safe.ownershipAcceptanceStatus(info).catch(() => null)
+        : null;
       return {
         configured: true,
-        serviceConfigured,
+        serviceConfigured: safe.isConfigured(),
         network: config.deployment.network,
         networkName: config.deployment.networkName,
         chainId: config.deployment.chainId,
@@ -1478,6 +1653,7 @@ export class AdminService {
     rawChanges: GoalManagerChange[],
     actor: AuthenticatedPrincipal,
     desiredManagers: Set<string>,
+    deliveryDto: PrepareSafeDeliveryDto,
     currentInfo?: SafeRuntimeInfo,
   ) {
     const changes = normalizedGoalManagerChanges(rawChanges);
@@ -1491,11 +1667,7 @@ export class AdminService {
       return { mode: 'DIRECT' as const, changes, transactions };
     }
 
-    if (!(await safe.transactionServiceReady(true))) {
-      throw new ServiceUnavailableException(
-        'Safe Transaction Service must be available to synchronize goal managers',
-      );
-    }
+    const delivery = safeDelivery(deliveryDto.delivery);
     const existing = await this.prisma.safeGoalManagerProposal.findFirst({
       where: {
         status: { in: pendingGoalManagerProposalStatuses },
@@ -1505,11 +1677,68 @@ export class AdminService {
       orderBy: { createdAt: 'desc' },
     });
     if (existing) {
+      if (delivery === 'MANUAL') {
+        this.assertManualReplacementAllowed(existing, deliveryDto.confirmedAbsentFromSafe);
+        const project = await this.project();
+        await this.prisma.$transaction(async (tx) => {
+          const replaced = await tx.safeGoalManagerProposal.updateMany({
+            where: {
+              id: existing.id,
+              status: SafeGoalManagerProposalStatus.SUBMITTING,
+            },
+            data: {
+              status: SafeGoalManagerProposalStatus.STALE,
+              activeKey: null,
+              failureReason: 'Superseded by a confirmed manual export after checking Safe.',
+              lastCheckedAt: new Date(),
+            },
+          });
+          if (replaced.count !== 1) {
+            throw new BadRequestException('The Safe proposal changed. Refresh and try again.');
+          }
+          await writeAuditEvent(tx, {
+            projectId: project.id,
+            actor,
+            entityType: 'SafeGoalManagerProposal',
+            entityId: existing.id,
+            action: 'SUPERSEDE_UNCERTAIN_SAFE_PROPOSAL',
+            after: { delivery: 'MANUAL', safeTxHash: existing.safeTxHash },
+          });
+        });
+      } else {
+        return {
+          mode: 'PENDING' as const,
+          changes,
+          proposal: this.mapGoalManagerProposal(existing, info.queueUrl),
+        };
+      }
+    }
+
+    if (delivery === 'MANUAL') {
+      const project = await this.project();
+      await writeAuditEvent(this.prisma, {
+        projectId: project.id,
+        actor,
+        entityType: 'SafeGoalManagerExport',
+        entityId: info.address.toLowerCase(),
+        action: 'EXPORT_MANUAL_SAFE_GOAL_MANAGERS',
+        after: { changes, chainId: config.deployment.chainId },
+      });
       return {
-        mode: 'PENDING' as const,
+        ...this.manualSafeExport(
+          info,
+          'Synchronize goal managers',
+          'Apply the selected goal manager changes to the precommunity escrow.',
+          transactions,
+        ),
         changes,
-        proposal: this.mapGoalManagerProposal(existing, info.queueUrl),
       };
+    }
+
+    if (!(await safe.transactionServiceReady(true))) {
+      throw new ServiceUnavailableException(
+        'Safe Transaction Service must be available to synchronize goal managers',
+      );
     }
 
     const safeNonce = await safe.nextNonce();
@@ -1536,7 +1765,10 @@ export class AdminService {
     };
   }
 
-  async prepareSafeGoalManagerSync(actor: AuthenticatedPrincipal) {
+  async prepareSafeGoalManagerSync(
+    actor: AuthenticatedPrincipal,
+    dto: PrepareSafeDeliveryDto = {},
+  ) {
     const safe = this.safeClient();
     const info = await safe.runtimeInfo(true);
     this.assertCurrentGoalManagerActor(info, actor);
@@ -1554,7 +1786,7 @@ export class AdminService {
         .filter((address) => !state.desiredManagers.has(address))
         .map((address) => ({ address, enabled: false })),
     ];
-    return this.prepareGoalManagerChanges(changes, actor, state.desiredManagers, info);
+    return this.prepareGoalManagerChanges(changes, actor, state.desiredManagers, dto, info);
   }
 
   async updateGoalManager(
@@ -1575,6 +1807,19 @@ export class AdminService {
       throw new BadRequestException(
         'The zero, escrow and Safe addresses cannot be manual goal managers',
       );
+    }
+    if (info.isEscrowOwner && safeDelivery(dto.delivery) === 'MANUAL') {
+      const existing = await this.prisma.safeGoalManagerProposal.findFirst({
+        where: {
+          status: { in: pendingGoalManagerProposalStatuses },
+          intent: { chainId: config.deployment.chainId, safeAddress: info.address.toLowerCase() },
+        },
+        include: { intent: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (existing) {
+        this.assertManualReplacementAllowed(existing, dto.confirmedAbsentFromSafe);
+      }
     }
     await reconcileSafeOwnerGoalManagerAssignments(this.prisma, {
       ...this.goalManagerScope(),
@@ -1633,6 +1878,7 @@ export class AdminService {
       actual === desired ? [] : [{ address, enabled: desired }],
       actor,
       state.desiredManagers,
+      dto,
       info,
     );
   }
@@ -1821,11 +2067,6 @@ export class AdminService {
     }
     const safeAddress = safe.configuredAddress();
     if (!safeAddress) throw new ServiceUnavailableException('Safe address is not configured');
-    if (!(await safe.transactionServiceReady(true))) {
-      throw new ServiceUnavailableException(
-        'Safe Transaction Service must verify this Safe before ownership transfer',
-      );
-    }
     const managerCount = await this.prisma.chainAuthority.count({
       where: {
         chainId: config.deployment.chainId,
@@ -1852,21 +2093,80 @@ export class AdminService {
     return { transactionRequest };
   }
 
-  async prepareSafeOwnershipAcceptance(actor: AuthenticatedPrincipal) {
-    const acceptance = await this.safeClient().ownershipAcceptanceRequest(actor.address);
+  async prepareSafeOwnershipAcceptance(
+    actor: AuthenticatedPrincipal,
+    dto: PrepareSafeDeliveryDto = {},
+  ) {
+    const safe = this.safeClient();
+    const delivery = safeDelivery(dto.delivery);
+    const entityId = config.deployment.escrowAddress.toLowerCase();
+    const acceptance =
+      delivery === 'MANUAL'
+        ? await safe.manualOwnershipAcceptanceRequest(actor.address)
+        : await safe.ownershipAcceptanceRequest(actor.address);
+    let replacesUncertainProposal = false;
+    if (delivery === 'MANUAL') {
+      const latestAttempt = await this.prisma.auditEvent.findFirst({
+        where: {
+          entityType: 'EscrowOwnership',
+          entityId,
+          action: {
+            in: [
+              'SAFE_OWNERSHIP_ACCEPTANCE_UNCONFIRMED',
+              'SUBMIT_SAFE_OWNERSHIP_ACCEPTANCE',
+              'OBSERVE_SAFE_OWNERSHIP_ACCEPTANCE',
+              'SUPERSEDE_UNCERTAIN_SAFE_OWNERSHIP_ACCEPTANCE',
+            ],
+          },
+        },
+        select: { action: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (
+        latestAttempt?.action === 'SUBMIT_SAFE_OWNERSHIP_ACCEPTANCE' ||
+        latestAttempt?.action === 'OBSERVE_SAFE_OWNERSHIP_ACCEPTANCE'
+      ) {
+        throw new BadRequestException(
+          'An ownership acceptance is already waiting in Safe and cannot be duplicated.',
+        );
+      }
+      if (latestAttempt?.action === 'SAFE_OWNERSHIP_ACCEPTANCE_UNCONFIRMED') {
+        this.assertManualReplacementAllowed(
+          { status: 'SUBMITTING', failureReason: 'Safe submission was not confirmed.' },
+          dto.confirmedAbsentFromSafe,
+        );
+        replacesUncertainProposal = true;
+      }
+    }
     const project = await this.project();
     await writeAuditEvent(this.prisma, {
       projectId: project.id,
       actor,
       entityType: 'EscrowOwnership',
-      entityId: config.deployment.escrowAddress.toLowerCase(),
-      action: 'PREPARE_SAFE_OWNERSHIP_ACCEPTANCE',
+      entityId,
+      action: replacesUncertainProposal
+        ? 'SUPERSEDE_UNCERTAIN_SAFE_OWNERSHIP_ACCEPTANCE'
+        : delivery === 'MANUAL'
+          ? 'EXPORT_MANUAL_SAFE_OWNERSHIP_ACCEPTANCE'
+          : 'existingProposal' in acceptance && acceptance.existingProposal
+            ? 'OBSERVE_SAFE_OWNERSHIP_ACCEPTANCE'
+            : 'PREPARE_SAFE_OWNERSHIP_ACCEPTANCE',
       after: {
         safeAddress: acceptance.safeAddress.toLowerCase(),
-        safeNonce: acceptance.safeNonce,
+        safeNonce: 'safeNonce' in acceptance ? acceptance.safeNonce : null,
         chainId: config.deployment.chainId,
+        delivery,
+        confirmedAbsentFromSafe: dto.confirmedAbsentFromSafe ?? false,
       },
     });
+    if (delivery === 'MANUAL') {
+      return this.manualSafeExport(
+        { address: acceptance.safeAddress, queueUrl: acceptance.queueUrl },
+        'Accept escrow ownership',
+        'Accept the configured Safe as the owner of the precommunity escrow.',
+        [acceptance.transactionRequest],
+      );
+    }
     return acceptance;
   }
 
@@ -1898,12 +2198,31 @@ export class AdminService {
     if (calculatedHash.toLowerCase() !== dto.safeTxHash.toLowerCase()) {
       throw new ForbiddenException('Safe transaction hash does not match the signed transaction');
     }
-    await safe.propose({
-      transaction,
-      safeTxHash: calculatedHash,
-      senderAddress: actor.address,
-      senderSignature: dto.senderSignature,
-    });
+    const project = await this.project();
+    const ownershipAudit = (action: string) =>
+      writeAuditEvent(this.prisma, {
+        projectId: project.id,
+        actor,
+        entityType: 'EscrowOwnership',
+        entityId: config.deployment.escrowAddress.toLowerCase(),
+        action,
+        after: {
+          safeTxHash: calculatedHash.toLowerCase(),
+          safeNonce: acceptance.safeNonce,
+        },
+      }).catch(() => undefined);
+    try {
+      await safe.propose({
+        transaction,
+        safeTxHash: calculatedHash,
+        senderAddress: actor.address,
+        senderSignature: dto.senderSignature,
+      });
+    } catch (error) {
+      await ownershipAudit('SAFE_OWNERSHIP_ACCEPTANCE_UNCONFIRMED');
+      throw error;
+    }
+    await ownershipAudit('SUBMIT_SAFE_OWNERSHIP_ACCEPTANCE');
     return {
       safeTxHash: calculatedHash,
       safeNonce: acceptance.safeNonce,
@@ -1919,20 +2238,31 @@ export class AdminService {
     dto: ReleaseProposalDto,
     actor: AuthenticatedPrincipal,
   ) {
+    const delivery = safeDelivery(dto.delivery);
     const safe = this.safeClient();
-    const safeInfo = await safe.assertPayoutReady(actor.address);
+    const safeInfo =
+      delivery === 'MANUAL'
+        ? await safe.assertSafeEscrowOwner(actor.address)
+        : await safe.assertPayoutReady(actor.address);
     await this.expireAbandonedSafeIntents();
+    const now = new Date();
     const activeIntent = await this.prisma.safePayoutIntent.findFirst({
       where: {
         chainId: config.deployment.chainId,
         safeAddress: safeInfo.address.toLowerCase(),
         payout: { status: PayoutStatus.PROPOSED },
         OR: [
-          { consumedAt: null, expiresAt: { gt: new Date() } },
-          { proposal: { is: { status: SafePayoutProposalStatus.SUBMITTING } } },
+          { delivery: SafePayoutDelivery.MANUAL },
+          {
+            delivery: SafePayoutDelivery.SERVICE,
+            consumedAt: null,
+            expiresAt: { gt: now },
+          },
+          { proposal: { is: { status: { in: pendingPayoutProposalStatuses } } } },
         ],
       },
-      include: { payout: true, proposal: true },
+      include: { payout: true, proposal: true, goal: true },
+      orderBy: { createdAt: 'desc' },
     });
     if (activeIntent) {
       const sameRequest =
@@ -1940,8 +2270,86 @@ export class AdminService {
         activeIntent.payout.asset === dto.asset &&
         activeIntent.payout.kind === dto.kind &&
         activeIntent.payout.amountRaw === dto.amountRaw;
-      if (sameRequest) {
+      if (!sameRequest) {
+        throw new BadRequestException(
+          'Another payout is being prepared or submitted for this Safe. Finish it before starting a new one.',
+        );
+      }
+
+      if (delivery === 'MANUAL') {
+        const project = await this.project();
+        if (activeIntent.delivery !== SafePayoutDelivery.MANUAL) {
+          if (activeIntent.proposal) {
+            this.assertManualReplacementAllowed(activeIntent.proposal, dto.confirmedAbsentFromSafe);
+          }
+          await this.prisma.$transaction(async (tx) => {
+            if (activeIntent.proposal) {
+              const replaced = await tx.safePayoutProposal.updateMany({
+                where: {
+                  id: activeIntent.proposal.id,
+                  status: SafePayoutProposalStatus.SUBMITTING,
+                },
+                data: {
+                  status: SafePayoutProposalStatus.STALE,
+                  failureReason: 'Superseded by a confirmed manual export after checking Safe.',
+                  lastCheckedAt: now,
+                },
+              });
+              if (replaced.count !== 1) {
+                throw new BadRequestException('The Safe proposal changed. Refresh and try again.');
+              }
+              await writeAuditEvent(tx, {
+                projectId: project.id,
+                actor,
+                entityType: 'SafePayoutProposal',
+                entityId: activeIntent.proposal.id,
+                action: 'SUPERSEDE_UNCERTAIN_SAFE_PROPOSAL',
+                after: {
+                  delivery,
+                  safeTxHash: activeIntent.proposal.safeTxHash,
+                },
+              });
+            }
+            await tx.safePayoutIntent.update({
+              where: { id: activeIntent.id },
+              data: {
+                delivery: SafePayoutDelivery.MANUAL,
+                safeNonce: null,
+                expiresAt: null,
+                consumedAt: null,
+              },
+            });
+          });
+          activeIntent.delivery = SafePayoutDelivery.MANUAL;
+          activeIntent.safeNonce = null;
+          activeIntent.expiresAt = null;
+          activeIntent.consumedAt = null;
+        }
+        await writeAuditEvent(this.prisma, {
+          projectId: project.id,
+          actor,
+          entityType: 'SafePayoutIntent',
+          entityId: activeIntent.id,
+          action: 'EXPORT_MANUAL_SAFE_PAYOUT',
+          after: { ...dto, idempotent: true, delivery },
+        });
+        return this.manualPayoutResponse(safeInfo, activeIntent, activeIntent.goal.title);
+      }
+
+      if (activeIntent.delivery === SafePayoutDelivery.MANUAL) {
+        throw new BadRequestException(
+          'This payout is reserved for manual execution. Execute or cancel it before using Safe API.',
+        );
+      }
+      if (
+        activeIntent.proposal &&
+        activeIntent.proposal.status !== SafePayoutProposalStatus.SUBMITTING
+      ) {
+        throw new BadRequestException('This payout already has an active Safe proposal.');
+      }
+      if (activeIntent.expiresAt && activeIntent.safeNonce !== null) {
         return {
+          delivery: 'SERVICE' as const,
           id: activeIntent.id,
           expiresAt: activeIntent.expiresAt.toISOString(),
           safeAddress: safeInfo.address,
@@ -1955,9 +2363,7 @@ export class AdminService {
           }),
         };
       }
-      throw new BadRequestException(
-        'Another payout is being prepared or submitted for this Safe. Finish it before starting a new one.',
-      );
+      throw new BadRequestException('This Safe payout intent is no longer usable.');
     }
 
     const to = deploymentAddress();
@@ -2010,8 +2416,8 @@ export class AdminService {
       functionName,
       args: [goal.chainGoalId as `0x${string}`, getAddress(token), BigInt(dto.amountRaw)],
     });
-    const safeNonce = await safe.nextNonce();
-    const expiresAt = new Date(Date.now() + 10 * 60_000);
+    const safeNonce = delivery === 'SERVICE' ? await safe.nextNonce() : null;
+    const expiresAt = delivery === 'SERVICE' ? new Date(Date.now() + 10 * 60_000) : null;
     const recipientAddress =
       kind === PayoutKind.EXPENSE
         ? goal.recipientAddress.toLowerCase()
@@ -2034,7 +2440,9 @@ export class AdminService {
             goalId,
             chainId: config.deployment.chainId,
             safeAddress: safeInfo.address.toLowerCase(),
-            safeNonce: safeNonce.toString(),
+            delivery:
+              delivery === 'MANUAL' ? SafePayoutDelivery.MANUAL : SafePayoutDelivery.SERVICE,
+            safeNonce: safeNonce?.toString() ?? null,
             toAddress: to.toLowerCase(),
             valueRaw: '0',
             data: data.toLowerCase(),
@@ -2047,24 +2455,54 @@ export class AdminService {
           actor,
           entityType: 'SafePayoutIntent',
           entityId: created.id,
-          action: 'PREPARE_SAFE_PAYOUT',
-          after: { ...dto, safeAddress: safeInfo.address.toLowerCase(), safeNonce },
+          action: delivery === 'MANUAL' ? 'EXPORT_MANUAL_SAFE_PAYOUT' : 'PREPARE_SAFE_PAYOUT',
+          after: {
+            ...dto,
+            safeAddress: safeInfo.address.toLowerCase(),
+            safeNonce,
+            delivery,
+          },
         });
         return created;
       })
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         if (this.isUniqueConstraint(error)) {
+          if (delivery === 'MANUAL') {
+            const concurrent = await this.prisma.safePayoutIntent.findFirst({
+              where: {
+                chainId: config.deployment.chainId,
+                safeAddress: safeInfo.address.toLowerCase(),
+                delivery: SafePayoutDelivery.MANUAL,
+                goalId,
+                payout: {
+                  asset: dto.asset,
+                  kind,
+                  amountRaw: dto.amountRaw,
+                  status: PayoutStatus.PROPOSED,
+                },
+              },
+            });
+            if (concurrent) return concurrent;
+          }
           throw new BadRequestException(
             'Another payout is being prepared for this Safe. Try this payout again in a moment.',
           );
         }
         throw error;
       });
+    if (delivery === 'MANUAL') {
+      return this.manualPayoutResponse(
+        safeInfo,
+        { ...intent, payout: { asset: dto.asset, kind, amountRaw: dto.amountRaw } },
+        goal.title,
+      );
+    }
     return {
+      delivery: 'SERVICE' as const,
       id: intent.id,
-      expiresAt: intent.expiresAt.toISOString(),
+      expiresAt: intent.expiresAt!.toISOString(),
       safeAddress: safeInfo.address,
-      safeNonce,
+      safeNonce: safeNonce!,
       threshold: safeInfo.threshold,
       queueUrl: safeInfo.queueUrl,
       transactionRequest: deploymentTransactionRequest({ to, value: '0', data }),
@@ -2080,12 +2518,23 @@ export class AdminService {
       throw new ForbiddenException('The Safe proposal signer must match the signed-in wallet');
     }
     const safe = this.safeClient();
-    const safeInfo = await safe.assertPayoutReady(actor.address);
     const intent = await this.prisma.safePayoutIntent.findUnique({
       where: { id: intentId },
       include: { proposal: true, payout: true },
     });
     if (!intent) throw new NotFoundException('Safe payout intent not found');
+    if (
+      intent.delivery === SafePayoutDelivery.MANUAL ||
+      intent.safeNonce === null ||
+      intent.expiresAt === null
+    ) {
+      throw new BadRequestException(
+        'Manual payout reservations must be executed in Safe Wallet, not submitted through the API.',
+      );
+    }
+    const safeNonce = intent.safeNonce;
+    const expiresAt = intent.expiresAt;
+    const safeInfo = await safe.assertPayoutReady(actor.address);
     if (
       intent.chainId !== config.deployment.chainId ||
       !isAddressEqual(getAddress(intent.safeAddress), safeInfo.address) ||
@@ -2105,13 +2554,13 @@ export class AdminService {
     if (intent.payout.status !== PayoutStatus.PROPOSED) {
       throw new BadRequestException('This payout intent is no longer active');
     }
-    if (!intent.proposal && intent.expiresAt <= new Date()) {
+    if (!intent.proposal && expiresAt <= new Date()) {
       await expireUnconsumedSafePayoutIntents(this.prisma, {
         chainId: config.deployment.chainId,
       });
       throw new BadRequestException('The payout intent has expired. Create a new one.');
     }
-    if (!intent.proposal && (await safe.nextNonce()) !== Number(intent.safeNonce)) {
+    if (!intent.proposal && (await safe.nextNonce()) !== Number(safeNonce)) {
       throw new BadRequestException('The Safe nonce changed. Create a new payout request.');
     }
 
@@ -2120,7 +2569,7 @@ export class AdminService {
       to: intent.toAddress,
       value: intent.valueRaw,
       data: intent.data,
-      nonce: Number(intent.safeNonce),
+      nonce: Number(safeNonce),
     });
     const calculatedHash = await safe.transactionHash(transaction);
     if (calculatedHash.toLowerCase() !== dto.safeTxHash.toLowerCase()) {
@@ -2135,6 +2584,7 @@ export class AdminService {
           const claimed = await tx.safePayoutIntent.updateMany({
             where: {
               id: intent.id,
+              delivery: SafePayoutDelivery.SERVICE,
               consumedAt: null,
               expiresAt: { gt: consumedAt },
               proposal: { is: null },
@@ -2148,7 +2598,7 @@ export class AdminService {
             data: {
               intentId: intent.id,
               safeTxHash: calculatedHash.toLowerCase(),
-              safeNonce: intent.safeNonce,
+              safeNonce,
               senderAddress: actor.address.toLowerCase(),
               confirmations: 1,
               threshold: safeInfo.threshold,
@@ -2161,7 +2611,7 @@ export class AdminService {
             entityType: 'SafePayoutProposal',
             entityId: created.id,
             action: 'SUBMIT_SAFE_PAYOUT_REQUESTED',
-            after: { safeTxHash: calculatedHash.toLowerCase(), safeNonce: intent.safeNonce },
+            after: { safeTxHash: calculatedHash.toLowerCase(), safeNonce },
           });
           return created;
         });
@@ -2174,7 +2624,7 @@ export class AdminService {
         });
         if (!concurrent) {
           throw new BadRequestException(
-            intent.expiresAt <= new Date()
+            expiresAt <= new Date()
               ? 'The payout intent has expired. Create a new one.'
               : 'This payout intent is no longer active',
           );
@@ -2230,7 +2680,7 @@ export class AdminService {
           entityType: 'SafePayoutProposal',
           entityId: current.id,
           action: 'SUBMIT_SAFE_PAYOUT',
-          after: { safeTxHash: calculatedHash.toLowerCase(), safeNonce: intent.safeNonce },
+          after: { safeTxHash: calculatedHash.toLowerCase(), safeNonce },
         });
       }
       return current;
@@ -2238,31 +2688,116 @@ export class AdminService {
     return this.mapSafeProposal(submitted, intent, intent.payout, safeInfo.queueUrl);
   }
 
+  async cancelManualSafePayout(intentId: string, actor: AuthenticatedPrincipal) {
+    const safeInfo = await this.safeClient().assertOwner(actor.address, true);
+    const intent = await this.prisma.safePayoutIntent.findUnique({
+      where: { id: intentId },
+      include: { payout: true },
+    });
+    if (!intent) throw new NotFoundException('Manual payout reservation not found');
+    if (
+      intent.delivery !== SafePayoutDelivery.MANUAL ||
+      intent.chainId !== config.deployment.chainId ||
+      !isAddressEqual(getAddress(intent.safeAddress), safeInfo.address)
+    ) {
+      throw new ForbiddenException('This is not a manual payout reservation for this Safe');
+    }
+    const project = await this.project();
+    const cancelledAt = new Date();
+    await this.prisma.$transaction(async (tx) => {
+      const cancelled = await tx.payout.updateMany({
+        where: { id: intent.payoutId, status: PayoutStatus.PROPOSED },
+        data: { status: PayoutStatus.FAILED },
+      });
+      if (cancelled.count !== 1) {
+        throw new BadRequestException('This payout is already executed or cancelled');
+      }
+      await tx.safePayoutIntent.update({
+        where: { id: intent.id },
+        data: { consumedAt: cancelledAt },
+      });
+      await writeAuditEvent(tx, {
+        projectId: project.id,
+        actor,
+        entityType: 'SafePayoutIntent',
+        entityId: intent.id,
+        action: 'CANCEL_MANUAL_SAFE_PAYOUT_RESERVATION',
+        before: {
+          payoutStatus: intent.payout.status,
+          amountRaw: intent.payout.amountRaw,
+          asset: intent.payout.asset,
+        },
+        after: {
+          payoutStatus: PayoutStatus.FAILED,
+          cancelledAt: cancelledAt.toISOString(),
+        },
+      });
+    });
+    return { id: intent.id, status: 'CANCELLED' as const };
+  }
+
   async safePayoutProposals() {
     await this.expireAbandonedSafeIntents();
     const safeAddress = this.safeClient().configuredAddress();
     if (!safeAddress) return [];
     const queueUrl = safeWalletQueueUrl(safeAddress, config.deployment);
-    const proposals = await this.prisma.safePayoutProposal.findMany({
+    const intents = await this.prisma.safePayoutIntent.findMany({
       where: {
-        intent: {
-          chainId: config.deployment.chainId,
-          safeAddress: safeAddress.toLowerCase(),
-        },
+        chainId: config.deployment.chainId,
+        safeAddress: safeAddress.toLowerCase(),
+        OR: [{ delivery: SafePayoutDelivery.MANUAL }, { proposal: { isNot: null } }],
       },
-      include: { intent: { include: { payout: true, goal: true } } },
+      include: { proposal: true, payout: true, goal: true },
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
-    return proposals.map((proposal) =>
-      this.mapSafeProposal(
-        proposal,
-        proposal.intent,
-        proposal.intent.payout,
-        queueUrl,
-        proposal.intent.goal.title,
-      ),
-    );
+    return intents
+      .map((intent) => {
+        if (intent.delivery === SafePayoutDelivery.MANUAL) {
+          return {
+            id: intent.id,
+            intentId: intent.id,
+            delivery: 'MANUAL' as const,
+            goalId: intent.goalId,
+            safeAddress: intent.safeAddress,
+            safeTxHash: null,
+            safeNonce: null,
+            status:
+              intent.payout.status === PayoutStatus.EXECUTED
+                ? ('EXECUTED' as const)
+                : intent.payout.status === PayoutStatus.FAILED
+                  ? ('CANCELLED' as const)
+                  : ('AWAITING_EXECUTION' as const),
+            confirmations: null,
+            threshold: null,
+            executionTxHash: intent.payout.chainTxHash,
+            failureReason: null,
+            queueUrl,
+            goalTitle: intent.goal.title,
+            asset: intent.payout.asset,
+            kind: intent.payout.kind,
+            amountRaw: intent.payout.amountRaw,
+            recipientAddress: intent.payout.recipientAddress,
+            payoutStatus: intent.payout.status,
+            transactionRequest: deploymentTransactionRequest({
+              to: getAddress(intent.toAddress),
+              value: intent.valueRaw,
+              data: intent.data as `0x${string}`,
+            }),
+            createdAt: intent.createdAt.toISOString(),
+            updatedAt: (intent.payout.executedAt ?? intent.updatedAt).toISOString(),
+          };
+        }
+        if (!intent.proposal) return null;
+        return this.mapSafeProposal(
+          intent.proposal,
+          intent,
+          intent.payout,
+          queueUrl,
+          intent.goal.title,
+        );
+      })
+      .filter((item) => item !== null);
   }
 
   private mapSafeProposal(
@@ -2292,6 +2827,7 @@ export class AdminService {
     return {
       id: proposal.id,
       intentId: intent.id,
+      delivery: 'SERVICE' as const,
       goalId: intent.goalId,
       safeAddress: intent.safeAddress,
       safeTxHash: proposal.safeTxHash,
@@ -2308,6 +2844,7 @@ export class AdminService {
       amountRaw: payout.amountRaw,
       recipientAddress: payout.recipientAddress,
       payoutStatus: payout.status,
+      transactionRequest: null,
       createdAt: proposal.createdAt.toISOString(),
       updatedAt: proposal.updatedAt.toISOString(),
     };

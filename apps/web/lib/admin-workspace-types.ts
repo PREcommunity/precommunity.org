@@ -116,6 +116,22 @@ export interface AdminSafeContractCall extends AdminTransactionRequest {
   operation: SafeTransactionData['operation'];
 }
 
+export type AdminSafeDelivery = 'SERVICE' | 'MANUAL';
+
+export interface AdminManualSafeExport {
+  mode: 'MANUAL';
+  name: string;
+  description: string;
+  chainId: number;
+  safeAddress: `0x${string}`;
+  queueUrl: string;
+  transactions: AdminSafeContractCall[];
+  transactionRequest: AdminTransactionRequest;
+  id?: string;
+  reservationId?: string;
+  delivery?: 'MANUAL';
+}
+
 export type ChainAuthority = 'OWNER' | 'GOAL_MANAGER';
 
 export interface AdminSessionPrincipal {
@@ -215,6 +231,9 @@ export type AdminGoalManagerChangeRequest =
       threshold: number;
       queueUrl: string;
     }
+  | (AdminManualSafeExport & {
+      changes: Array<{ address: `0x${string}`; enabled: boolean }>;
+    })
   | {
       mode: 'PENDING';
       changes: Array<{ address: `0x${string}`; enabled: boolean }>;
@@ -222,18 +241,26 @@ export type AdminGoalManagerChangeRequest =
     };
 
 export type AdminSafeProposalStatus =
-  'SUBMITTING' | 'AWAITING_CONFIRMATIONS' | 'READY_TO_EXECUTE' | 'EXECUTED' | 'STALE' | 'FAILED';
+  | 'SUBMITTING'
+  | 'AWAITING_CONFIRMATIONS'
+  | 'READY_TO_EXECUTE'
+  | 'AWAITING_EXECUTION'
+  | 'EXECUTED'
+  | 'CANCELLED'
+  | 'STALE'
+  | 'FAILED';
 
 export interface AdminSafePayoutProposal {
   id: string;
   intentId: string;
+  delivery: AdminSafeDelivery;
   goalId: string;
   safeAddress: `0x${string}`;
-  safeTxHash: Hex;
-  safeNonce: string;
+  safeTxHash: Hex | null;
+  safeNonce: string | null;
   status: AdminSafeProposalStatus;
-  confirmations: number;
-  threshold: number;
+  confirmations: number | null;
+  threshold: number | null;
   executionTxHash: Hex | null;
   failureReason: string | null;
   queueUrl: string;
@@ -243,11 +270,13 @@ export interface AdminSafePayoutProposal {
   amountRaw: string;
   recipientAddress: `0x${string}`;
   payoutStatus: 'PROPOSED' | 'EXECUTED' | 'FAILED';
+  transactionRequest: AdminTransactionRequest | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface AdminSafePayoutIntent {
+  delivery: 'SERVICE';
   id: string;
   expiresAt: string;
   safeAddress: `0x${string}`;
@@ -256,6 +285,8 @@ export interface AdminSafePayoutIntent {
   queueUrl: string;
   transactionRequest: AdminTransactionRequest;
 }
+
+export type AdminSafePayoutPreparation = AdminSafePayoutIntent | AdminManualSafeExport;
 
 export type AdminGoalLifecycleKind =
   'SET_MONTHLY_SURPLUS_POLICY' | 'REQUEST_MONTHLY_STOP' | 'CANCEL_MONTHLY';
@@ -267,7 +298,8 @@ export type AdminGoalLifecyclePreparation =
       mode: 'DIRECT';
       transactionRequest: AdminTransactionRequest;
     }
-  | ({ mode: 'SAFE' } & AdminSafeGoalActionIntent);
+  | ({ mode: 'SAFE' } & AdminSafeGoalActionIntent)
+  | AdminManualSafeExport;
 
 export interface AdminSafeGoalActionProposal {
   id: string;
@@ -295,6 +327,9 @@ export interface AdminSafeOwnershipAcceptanceRequest {
   transactionRequest: AdminTransactionRequest;
   existingProposal?: AdminSafeOwnershipAcceptance | null;
 }
+
+export type AdminSafeOwnershipAcceptancePreparation =
+  AdminSafeOwnershipAcceptanceRequest | AdminManualSafeExport;
 
 export interface AdminSafeProposalSubmission {
   transaction: SafeTransactionData;

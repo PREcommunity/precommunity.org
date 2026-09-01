@@ -16,6 +16,7 @@ import { getAddress, isAddress } from 'viem';
 import type {
   AdminGoalManagerEntry,
   AdminGoalManagerWorkspace,
+  AdminSafeDelivery,
   AdminSafeGoalManagerProposal,
 } from '@/lib/admin-workspace-types';
 import { ActionButton } from './action-button';
@@ -54,6 +55,7 @@ interface GoalManagerPanelProps {
   workspace: AdminGoalManagerWorkspace;
   canManage: boolean;
   pending: boolean;
+  delivery: AdminSafeDelivery;
   onSync: () => Promise<void>;
   onUpdate: (address: string, enabled: boolean) => Promise<boolean>;
 }
@@ -62,6 +64,7 @@ export function GoalManagerPanel({
   workspace,
   canManage,
   pending,
+  delivery,
   onSync,
   onUpdate,
 }: GoalManagerPanelProps) {
@@ -77,6 +80,11 @@ export function GoalManagerPanel({
   const proposalNeedsReplacement = Boolean(
     proposalIsPending && latestProposal?.failureReason?.includes('Cancel or replace'),
   );
+  const proposalIsUncertain = Boolean(
+    latestProposal?.status === 'SUBMITTING' && latestProposal.failureReason,
+  );
+  const proposalBlocksChanges =
+    proposalIsPending && !(delivery === 'MANUAL' && proposalIsUncertain);
   const riskySyncEntries = workspace.entries.filter(
     (entry) => entry.status === 'NEEDS_REMOVE' && entry.openGoalCount > 0,
   );
@@ -150,7 +158,7 @@ export function GoalManagerPanel({
                 <ShieldCheck size={14} />
               )
             }
-            disabled={pending || syncBusy || proposalIsPending || workspace.inSync}
+            disabled={pending || syncBusy || proposalBlocksChanges || workspace.inSync}
             onClick={() => {
               if (riskySyncEntries.length) setConfirmSync(true);
               else void synchronize();
@@ -160,7 +168,9 @@ export function GoalManagerPanel({
               ? 'Synchronizing…'
               : workspace.inSync
                 ? 'Safe owners synced'
-                : 'Sync Safe owners'}
+                : delivery === 'MANUAL'
+                  ? 'Export owner sync JSON'
+                  : 'Sync Safe owners'}
           </ActionButton>
         ) : null}
       </div>
@@ -256,7 +266,7 @@ export function GoalManagerPanel({
                           <Pin size={13} />
                         )
                       }
-                      disabled={pending || Boolean(managerAction) || proposalIsPending}
+                      disabled={pending || Boolean(managerAction) || proposalBlocksChanges}
                       onClick={() => void updateManager(entry.address, !entry.manualPinned)}
                     >
                       {managerAction === entry.address.toLowerCase()
@@ -272,7 +282,7 @@ export function GoalManagerPanel({
                       disabled={
                         pending ||
                         Boolean(managerAction) ||
-                        proposalIsPending ||
+                        proposalBlocksChanges ||
                         entry.status === 'NEEDS_REMOVE'
                       }
                       onClick={() => setManagerToRemove(entry)}
@@ -334,7 +344,7 @@ export function GoalManagerPanel({
             disabled={
               pending ||
               Boolean(managerAction) ||
-              proposalIsPending ||
+              proposalBlocksChanges ||
               !isManagerAddress(managerAddress)
             }
           >

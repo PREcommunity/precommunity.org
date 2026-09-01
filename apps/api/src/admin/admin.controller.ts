@@ -26,6 +26,7 @@ import {
   CreateSubprojectDto,
   ModerateProfileDto,
   PrepareGoalLifecycleDto,
+  PrepareSafeDeliveryDto,
   ReleaseProposalDto,
   UpdateGoalManagerDto,
   UpdateExpenseDto,
@@ -61,8 +62,11 @@ export class AdminController {
 
   @Post('goal-managers/safe-sync/prepare')
   @Roles(Role.SUPER_ADMIN)
-  prepareSafeGoalManagerSync(@Req() request: AuthenticatedRequest) {
-    return this.service.prepareSafeGoalManagerSync(request.principal!);
+  prepareSafeGoalManagerSync(
+    @Body() body: PrepareSafeDeliveryDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.service.prepareSafeGoalManagerSync(request.principal!, body);
   }
 
   @Put('goal-managers/:address')
@@ -92,8 +96,11 @@ export class AdminController {
   }
 
   @Post('safe/ownership-acceptance')
-  prepareSafeOwnershipAcceptance(@Req() request: AuthenticatedRequest) {
-    return this.service.prepareSafeOwnershipAcceptance(request.principal!);
+  prepareSafeOwnershipAcceptance(
+    @Body() body: PrepareSafeDeliveryDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.service.prepareSafeOwnershipAcceptance(request.principal!, body);
   }
 
   @Post('safe/ownership-acceptance/submit')
@@ -220,6 +227,15 @@ export class AdminController {
     @Req() request: AuthenticatedRequest,
   ) {
     return this.service.submitSafePayoutProposal(id, body, request.principal!);
+  }
+
+  @Post('safe-payout-intents/:id/cancel-manual')
+  @Roles(Role.SUPER_ADMIN, Role.FINANCE_ADMIN)
+  cancelManualSafePayout(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.service.cancelManualSafePayout(id, request.principal!);
   }
 
   @Get('audit')

@@ -82,6 +82,11 @@ enum PayoutStatus {
   FAILED
 }
 
+enum SafePayoutDelivery {
+  SERVICE
+  MANUAL
+}
+
 enum SafePayoutProposalStatus {
   SUBMITTING
   AWAITING_CONFIRMATIONS
@@ -131,13 +136,6 @@ enum ProposalVoteChoice {
   FOR
   AGAINST
   ABSTAIN
-}
-
-enum ForumCategory {
-  GENERAL
-  IDEAS_FEEDBACK
-  TECHNICAL
-  HELP
 }
 
 enum ForumTopicStatus {
@@ -510,6 +508,17 @@ model ProposalVote {
   @@index([userId, createdAt])
 }
 
+/// Configurable forum taxonomy shared by public discussions and admin controls.
+model ForumCategory {
+  value      String       @id
+  label      String       @unique
+  position   Int
+  archivedAt DateTime?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  topics     ForumTopic[]
+}
+
 /// Public off-chain discussion. Topics never enter the funding flow directly.
 model ForumTopic {
   id             String              @id @default(uuid()) @db.Uuid
@@ -517,7 +526,7 @@ model ForumTopic {
   authorId       String              @db.Uuid
   title          String
   body           String
-  category       ForumCategory
+  category       String
   status         ForumTopicStatus    @default(PUBLISHED)
   replyCount     Int                 @default(0)
   lastActivityAt DateTime            @default(now())
@@ -530,6 +539,7 @@ model ForumTopic {
   createdAt      DateTime            @default(now())
   updatedAt      DateTime            @updatedAt
   author         User                @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  categoryRecord ForumCategory       @relation(fields: [category], references: [value], onDelete: Restrict, onUpdate: Cascade)
   replies        ForumReply[]
   notifications  ForumNotification[]
 
@@ -720,12 +730,13 @@ model SafePayoutIntent {
   goalId           String              @db.Uuid
   chainId          Int
   safeAddress      String
-  safeNonce        String
+  delivery         SafePayoutDelivery  @default(SERVICE)
+  safeNonce        String?
   toAddress        String
   valueRaw         String              @default("0")
   data             String
   createdByAddress String
-  expiresAt        DateTime
+  expiresAt        DateTime?
   consumedAt       DateTime?
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt

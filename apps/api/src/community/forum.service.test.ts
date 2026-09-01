@@ -1,5 +1,5 @@
 import { ConflictException, ForbiddenException } from '@nestjs/common';
-import { ForumCategory, ForumTopicStatus } from '@precommunity/database';
+import { ForumTopicStatus } from '@precommunity/database';
 import { describe, expect, it, vi } from 'vitest';
 import { formatUnits, maxUint256 } from 'viem';
 import { ForumService } from './forum.service';
@@ -15,6 +15,17 @@ const principal = {
   safeAddress: null,
 };
 const now = new Date('2026-08-06T12:00:00.000Z');
+const forumCategories = [
+  { value: 'GENERAL', label: 'General', position: 0 },
+  { value: 'IDEAS_FEEDBACK', label: 'Ideas & Feedback', position: 1 },
+  { value: 'TECHNICAL', label: 'Technical', position: 2 },
+  { value: 'HELP', label: 'Help', position: 3 },
+].map((category) => ({
+  ...category,
+  archivedAt: null,
+  createdAt: now,
+  updatedAt: now,
+}));
 
 function topic(overrides: Record<string, unknown> = {}) {
   return {
@@ -23,7 +34,7 @@ function topic(overrides: Record<string, unknown> = {}) {
     authorId: principal.userId,
     title: 'First useful topic',
     body: 'A useful opening post for the community.',
-    category: ForumCategory.GENERAL,
+    category: 'GENERAL',
     status: ForumTopicStatus.PUBLISHED,
     replyCount: 0,
     lastActivityAt: now,
@@ -69,6 +80,16 @@ function setup() {
         forumMinimumPreRaw: null,
       }),
       upsert: vi.fn(),
+    },
+    forumCategory: {
+      findUnique: vi.fn(({ where }: { where: { value: string } }) =>
+        Promise.resolve(forumCategories.find((category) => category.value === where.value) ?? null),
+      ),
+      findFirst: vi.fn().mockResolvedValue(forumCategories[0]),
+      findMany: vi.fn().mockResolvedValue(forumCategories),
+      count: vi.fn().mockResolvedValue(forumCategories.length),
+      create: vi.fn(),
+      update: vi.fn(),
     },
     forumTopic: {
       count: vi.fn().mockResolvedValue(0),
@@ -119,7 +140,7 @@ describe('ForumService publishing', () => {
       {
         title: 'First useful topic',
         body: 'A useful opening post for the community.',
-        category: ForumCategory.GENERAL,
+        category: 'GENERAL',
       },
       principal,
     );
@@ -142,7 +163,7 @@ describe('ForumService publishing', () => {
         {
           title: 'Ineligible topic',
           body: 'This topic must not reach the database.',
-          category: ForumCategory.GENERAL,
+          category: 'GENERAL',
         },
         principal,
       ),
@@ -163,7 +184,7 @@ describe('ForumService publishing', () => {
       {
         title: 'Reviewed topic',
         body: 'A useful opening post for moderator review.',
-        category: ForumCategory.TECHNICAL,
+        category: 'TECHNICAL',
       },
       principal,
     );
@@ -218,7 +239,7 @@ describe('ForumService publishing', () => {
       {
         title: 'Published from a draft',
         body: 'This draft now contains enough context to publish.',
-        category: ForumCategory.IDEAS_FEEDBACK,
+        category: 'IDEAS_FEEDBACK',
       },
       principal,
     );
@@ -270,7 +291,7 @@ describe('ForumService publishing', () => {
         {
           title: 'Fourth published topic',
           body: 'This completed draft exceeds the hourly publication limit.',
-          category: ForumCategory.GENERAL,
+          category: 'GENERAL',
         },
         principal,
       ),
@@ -310,7 +331,7 @@ describe('ForumService publishing', () => {
         {
           title: 'Fourth useful topic',
           body: 'This topic should exceed the hourly author limit.',
-          category: ForumCategory.GENERAL,
+          category: 'GENERAL',
         },
         principal,
       ),
@@ -534,6 +555,193 @@ describe('ForumService author controls', () => {
     ).rejects.toThrow('Reply limit reached');
     expect(prisma.$queryRaw).toHaveBeenCalledOnce();
     expect(prisma.forumReply.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('ForumService categories', () => {
+  it('returns database categories in forum configuration order', async () => {
+    const { service } = setup();
+
+    const result = await service.config();
+
+    expect(result.categories).toEqual([
+      { value: 'GENERAL', label: 'General', archived: false },
+      { value: 'IDEAS_FEEDBACK', label: 'Ideas & Feedback', archived: false },
+      { value: 'TECHNICAL', label: 'Technical', archived: false },
+      { value: 'HELP', label: 'Help', archived: false },
+    ]);
+  });
+
+  it('creates an appended category with a generated stable identifier and audit event', async () => {
+    const { prisma, service } = setup();
+    prisma.forumCategory.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ position: 3 });
+    prisma.forumCategory.create.mockImplementation(
+      ({ data }: { data: Record<string, unknown> }) => ({
+        ...data,
+        archivedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+
+    const result = await service.createCategory({ label: '  Aktualności  ' }, principal);
+
+    expect(result).toEqual({ value: 'AKTUALNOSCI', label: 'Aktualności', archived: false });
+    expect(prisma.forumCategory.create).toHaveBeenCalledWith({
+      data: { value: 'AKTUALNOSCI', label: 'Aktualności', position: 4 },
+    });
+    expect(prisma.auditEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'CREATE_FORUM_CATEGORY' }),
+      }),
+    );
+  });
+
+  it('rejects duplicate category identifiers or names', async () => {
+    const { prisma, service } = setup();
+
+    await expect(service.createCategory({ label: 'General' }, principal)).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(prisma.forumCategory.create).not.toHaveBeenCalled();
+  });
+
+  it('renames a category without changing its identifier', async () => {
+    const { prisma, service } = setup();
+    prisma.forumCategory.findFirst.mockResolvedValueOnce(null);
+    prisma.forumCategory.update.mockImplementation(
+      ({ data }: { data: Record<string, unknown> }) => ({ ...forumCategories[0], ...data }),
+    );
+
+    const result = await service.updateCategory('GENERAL', { label: 'Community' }, principal);
+
+    expect(result).toEqual({ value: 'GENERAL', label: 'Community', archived: false });
+    expect(prisma.auditEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'UPDATE_FORUM_CATEGORY' }),
+      }),
+    );
+  });
+
+  it('archives and restores categories while retaining their position', async () => {
+    const { prisma, service } = setup();
+    prisma.forumCategory.update.mockImplementation(
+      ({ data }: { data: Record<string, unknown> }) => ({ ...forumCategories[0], ...data }),
+    );
+
+    const archived = await service.updateCategory('GENERAL', { archived: true }, principal);
+    expect(archived.archived).toBe(true);
+    expect(prisma.auditEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'ARCHIVE_FORUM_CATEGORY' }),
+      }),
+    );
+
+    prisma.forumCategory.findUnique.mockResolvedValue({
+      ...forumCategories[0],
+      archivedAt: now,
+    });
+    prisma.forumCategory.update.mockImplementation(
+      ({ data }: { data: Record<string, unknown> }) => ({
+        ...forumCategories[0],
+        archivedAt: now,
+        ...data,
+      }),
+    );
+    const restored = await service.updateCategory('GENERAL', { archived: false }, principal);
+    expect(restored).toEqual({ value: 'GENERAL', label: 'General', archived: false });
+    expect(prisma.auditEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'RESTORE_FORUM_CATEGORY' }),
+      }),
+    );
+  });
+
+  it('does not archive the last active category', async () => {
+    const { prisma, service } = setup();
+    prisma.forumCategory.count.mockResolvedValue(1);
+
+    await expect(service.updateCategory('GENERAL', { archived: true }, principal)).rejects.toThrow(
+      'at least one active category',
+    );
+    expect(prisma.forumCategory.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects an empty category update', async () => {
+    const { service } = setup();
+
+    await expect(service.updateCategory('GENERAL', {}, principal)).rejects.toThrow(
+      'Provide a category name or archive state',
+    );
+  });
+
+  it('keeps archived categories filterable but rejects them for new topics and publishing', async () => {
+    const { prisma, service } = setup();
+    const archived = { ...forumCategories[2], archivedAt: now };
+    prisma.forumCategory.findUnique.mockResolvedValue(archived);
+
+    await service.list('TECHNICAL');
+    expect(prisma.forumTopic.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ category: 'TECHNICAL' }) }),
+    );
+    await expect(
+      service.create(
+        {
+          title: 'Archived category topic',
+          body: 'This topic cannot use an archived category.',
+          category: 'TECHNICAL',
+        },
+        principal,
+      ),
+    ).rejects.toThrow('Forum category is archived');
+    await expect(
+      service.publishDraft(
+        '00000000-0000-4000-8000-000000000010',
+        {
+          title: 'Archived category draft',
+          body: 'This draft must move before it can be published.',
+          category: 'TECHNICAL',
+        },
+        principal,
+      ),
+    ).rejects.toThrow('Forum category is archived');
+  });
+
+  it('rejects a nonexistent category filter before querying topics', async () => {
+    const { prisma, service } = setup();
+    prisma.forumCategory.findUnique.mockResolvedValue(null);
+
+    await expect(service.list('MISSING')).rejects.toThrow('Forum category does not exist');
+    expect(prisma.forumTopic.findMany).not.toHaveBeenCalled();
+  });
+
+  it('allows an unchanged archived category during editing but rejects moving into one', async () => {
+    const unchanged = setup();
+    unchanged.prisma.forumTopic.findUnique.mockResolvedValue(topic());
+    const result = await unchanged.service.update(
+      '00000000-0000-4000-8000-000000000010',
+      { body: 'Updated opening post with enough useful context.', category: 'GENERAL' },
+      principal,
+    );
+    expect(result.category).toBe('GENERAL');
+    expect(unchanged.prisma.forumCategory.findUnique).not.toHaveBeenCalled();
+
+    const moved = setup();
+    moved.prisma.forumTopic.findUnique.mockResolvedValue(topic());
+    moved.prisma.forumCategory.findUnique.mockResolvedValue({
+      ...forumCategories[2],
+      archivedAt: now,
+    });
+    await expect(
+      moved.service.update(
+        '00000000-0000-4000-8000-000000000010',
+        { category: 'TECHNICAL' },
+        principal,
+      ),
+    ).rejects.toThrow('Forum category is archived');
+    expect(moved.prisma.forumTopic.updateMany).not.toHaveBeenCalled();
   });
 });
 

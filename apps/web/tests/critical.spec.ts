@@ -313,6 +313,14 @@ test('forum replaces topics and pagination state when the category changes', asy
   await expect(page.getByRole('button', { name: 'Start a topic' })).toBeVisible();
 });
 
+test('forum keeps archived categories as filters but not new-topic choices', async ({ page }) => {
+  await page.goto('/community/forum');
+
+  await expect(page.getByRole('link', { name: 'Help', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Start a topic' }).click();
+  await expect(page.locator('select[name="category"] option[value="HELP"]')).toHaveCount(0);
+});
+
 test('forum explains that a signed-in wallet is required when topic creation is unauthorized', async ({
   page,
 }) => {
@@ -733,9 +741,9 @@ test('goal manager panel exposes policy sources and prepares direct owner synchr
   await expect(page.getByText(formerOwner)).toBeVisible();
   await expect(page.getByText('Safe owners changed — do not execute this proposal')).toBeVisible();
 
-  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await page.getByRole('button', { name: 'Refresh Safe data' }).click();
   await expect.poll(() => refreshes).toBe(1);
-  await expect(page.getByText('Admin data refreshed.')).toBeVisible();
+  await expect(page.getByText('Safe data refreshed.')).toBeVisible();
 
   await page.getByRole('button', { name: 'Keep after Safe removal' }).click();
   await expect.poll(() => updates).toContainEqual({ address: connectedAddress, enabled: true });
@@ -795,6 +803,10 @@ test('forum moderator can open a pending discussion from its highlighted row', a
       body: JSON.stringify({ config: { proposalModerationEnabled: true }, proposals: [] }),
     }),
   );
+  let adminCategories = [
+    { value: 'GENERAL', label: 'General', archived: false },
+    { value: 'TECHNICAL', label: 'Technical', archived: false },
+  ];
   await page.route('**/v1/community/admin/forum', (route) =>
     route.fulfill({
       status: 200,
@@ -803,7 +815,7 @@ test('forum moderator can open a pending discussion from its highlighted row', a
         config: {
           topicModerationEnabled: true,
           minimumPre: { amount: '1', amountRaw: '1000000000000000000', asset: 'PRE' },
-          categories: [],
+          categories: adminCategories,
         },
         topics: [
           {
@@ -815,6 +827,38 @@ test('forum moderator can open a pending discussion from its highlighted row', a
       }),
     }),
   );
+  await page.route('**/v1/community/admin/forum/categories', async (route) => {
+    const body = await route.request().postDataJSON();
+    const created = {
+      value: 'PRODUCT_UPDATES',
+      label: String(body.label).trim(),
+      archived: false,
+    };
+    adminCategories = [...adminCategories, created];
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify(created),
+    });
+  });
+  await page.route('**/v1/community/admin/forum/categories/*', async (route) => {
+    const value = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-1)!);
+    const body = await route.request().postDataJSON();
+    adminCategories = adminCategories.map((category) =>
+      category.value === value
+        ? {
+            ...category,
+            ...(body.label === undefined ? {} : { label: String(body.label).trim() }),
+            ...(body.archived === undefined ? {} : { archived: Boolean(body.archived) }),
+          }
+        : category,
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(adminCategories.find((category) => category.value === value)),
+    });
+  });
   let savedMinimum = '';
   await page.route('**/v1/community/admin/forum/settings/minimum-pre', async (route) => {
     savedMinimum = String((await route.request().postDataJSON()).amount);
@@ -831,6 +875,25 @@ test('forum moderator can open a pending discussion from its highlighted row', a
     'href',
     '/community/forum/welcome-to-the-forum-a1b2c3',
   );
+  await page.getByRole('button', { name: 'Add category' }).click();
+  await page.getByLabel('Category name').fill('Product Updates');
+  await page.getByRole('button', { name: 'Create category' }).click();
+  await expect(page.getByText('Product Updates', { exact: true })).toBeVisible();
+
+  let categoryRow = page
+    .getByText('Product Updates', { exact: true })
+    .locator('xpath=ancestor::article[1]');
+  await categoryRow.getByRole('button', { name: 'Edit' }).click();
+  await page.getByLabel('Category name').fill('Product News');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  categoryRow = page
+    .getByText('Product News', { exact: true })
+    .locator('xpath=ancestor::article[1]');
+  await categoryRow.getByRole('button', { name: 'Archive' }).click();
+  await expect(categoryRow.getByText('Archived', { exact: true })).toBeVisible();
+  await categoryRow.getByRole('button', { name: 'Restore' }).click();
+  await expect(categoryRow.getByText('Active', { exact: true })).toBeVisible();
+
   await page.getByLabel('Minimum PRE to write').fill('12.5');
   await page.getByRole('button', { name: 'Save minimum' }).click();
   await expect.poll(() => savedMinimum).toBe('12.5');

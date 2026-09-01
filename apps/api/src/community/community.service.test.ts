@@ -300,6 +300,34 @@ describe('CommunityService proposal lookup', () => {
 });
 
 describe('CommunityService public profiles', () => {
+  it('returns public activity when the member has no profile', async () => {
+    const address = '0x0000000000000000000000000000000000000001';
+    const findUnique = vi.fn().mockResolvedValue({
+      address,
+      profile: null,
+      proposals: [],
+      comments: [],
+      proposalVotes: [],
+      forumTopics: [
+        {
+          slug: 'wallet-only-member-a1b2c3',
+          title: 'A public topic',
+          category: 'GENERAL',
+          status: ForumTopicStatus.PUBLISHED,
+          createdAt: new Date(),
+        },
+      ],
+      forumReplies: [],
+    });
+    const service = new CommunityService({ user: { findUnique } } as never, {} as never);
+
+    await expect(service.publicProfile(address)).resolves.toMatchObject({
+      address,
+      profile: null,
+      forumTopics: [{ slug: 'wallet-only-member-a1b2c3', title: 'A public topic' }],
+    });
+  });
+
   it('keeps pending submissions out of a public profile', async () => {
     const address = '0x0000000000000000000000000000000000000001';
     const findUnique = vi.fn().mockResolvedValue({

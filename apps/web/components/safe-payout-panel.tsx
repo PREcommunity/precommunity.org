@@ -1,10 +1,20 @@
 'use client';
 
 import { useState } from 'react';
-import { AlertTriangle, Check, Clock3, ExternalLink, ShieldCheck, Users } from 'lucide-react';
+import {
+  AlertTriangle,
+  Check,
+  Clock3,
+  ExternalLink,
+  FileJson,
+  ShieldCheck,
+  Trash2,
+  Users,
+} from 'lucide-react';
 import { formatUnits } from 'viem';
 import type {
   AdminSafePayoutProposal,
+  AdminSafeDelivery,
   AdminSafeProposalStatus,
   AdminSafeStatus,
   AdminSessionPrincipal,
@@ -20,6 +30,8 @@ const statusCopy: Record<AdminSafeProposalStatus, string> = {
   EXECUTED: 'Executed',
   STALE: 'Replaced in Safe',
   FAILED: 'Needs attention',
+  AWAITING_EXECUTION: 'Waiting for execution',
+  CANCELLED: 'Reservation cancelled',
 };
 
 function shortAddress(value: string) {
@@ -27,11 +39,17 @@ function shortAddress(value: string) {
 }
 
 function proposalDetail(proposal: AdminSafePayoutProposal) {
+  if (proposal.status === 'AWAITING_EXECUTION') {
+    return 'Import or reopen the JSON in Safe Wallet';
+  }
+  if (proposal.status === 'CANCELLED') {
+    return 'The local reservation was released; Safe Wallet was not changed';
+  }
   if (proposal.status === 'SUBMITTING') {
     return proposal.failureReason ?? 'Confirming the proposal with Safe Transaction Service';
   }
   if (proposal.status === 'AWAITING_CONFIRMATIONS') {
-    return `${proposal.confirmations} of ${proposal.threshold} approvals collected`;
+    return `${proposal.confirmations ?? 0} of ${proposal.threshold ?? 0} approvals collected`;
   }
   if (proposal.status === 'READY_TO_EXECUTE') return 'All required approvals are collected';
   if (proposal.status === 'EXECUTED') return 'The payout was sent successfully';
@@ -43,8 +61,12 @@ interface SafePayoutPanelProps {
   status: AdminSafeStatus | null;
   proposals: AdminSafePayoutProposal[];
   pending: boolean;
+  delivery: AdminSafeDelivery;
+  onDeliveryChange: (delivery: AdminSafeDelivery) => void;
   onTransferOwnership: () => Promise<void>;
   onProposeOwnershipAcceptance: () => Promise<void>;
+  onReopenManualPayout: (proposal: AdminSafePayoutProposal) => void;
+  onCancelManualPayout: (intentId: string) => Promise<void>;
 }
 
 export function SafePayoutPanel({
@@ -52,13 +74,19 @@ export function SafePayoutPanel({
   status,
   proposals,
   pending,
+  delivery,
+  onDeliveryChange,
   onTransferOwnership,
   onProposeOwnershipAcceptance,
+  onReopenManualPayout,
+  onCancelManualPayout,
 }: SafePayoutPanelProps) {
   const [confirmTransfer, setConfirmTransfer] = useState(false);
   const [confirmAcceptance, setConfirmAcceptance] = useState(false);
   const [migrationPending, setMigrationPending] = useState(false);
   const [acceptancePending, setAcceptancePending] = useState(false);
+  const [payoutToCancel, setPayoutToCancel] = useState<AdminSafePayoutProposal | null>(null);
+  const [cancellationPending, setCancellationPending] = useState(false);
 
   async function transferOwnership() {
     setMigrationPending(true);
@@ -74,20 +102,60 @@ export function SafePayoutPanel({
     setConfirmAcceptance(false);
   }
 
+  async function cancelManualPayout() {
+    if (!payoutToCancel) return;
+    setCancellationPending(true);
+    await onCancelManualPayout(payoutToCancel.intentId);
+    setCancellationPending(false);
+    setPayoutToCancel(null);
+  }
+
   if (!status) return null;
+
+  const deliverySelector = (
+    <div
+      className="flex items-center gap-1 border border-line bg-white p-1"
+      role="group"
+      aria-label="Safe delivery mode"
+    >
+      <button
+        className={`min-h-7 cursor-pointer border-0 px-2 text-[10px] font-medium ${
+          delivery === 'SERVICE' ? 'bg-navy text-white' : 'bg-transparent text-muted'
+        } disabled:cursor-not-allowed disabled:opacity-45`}
+        type="button"
+        disabled={!status.serviceConfigured}
+        aria-pressed={delivery === 'SERVICE'}
+        onClick={() => onDeliveryChange('SERVICE')}
+      >
+        Safe API
+      </button>
+      <button
+        className={`min-h-7 cursor-pointer border-0 px-2 text-[10px] font-medium ${
+          delivery === 'MANUAL' ? 'bg-navy text-white' : 'bg-transparent text-muted'
+        } disabled:cursor-not-allowed disabled:opacity-45`}
+        type="button"
+        disabled={!status.configured}
+        aria-pressed={delivery === 'MANUAL'}
+        onClick={() => onDeliveryChange('MANUAL')}
+      >
+        Manual JSON
+      </button>
+    </div>
+  );
 
   if (!status.configured) {
     return (
       <section className="mt-7 border-y border-line py-5">
-        <div className="flex items-start gap-3">
+        <div className="flex items-start justify-between gap-3 max-sm:flex-col">
           <ShieldCheck className="mt-0.5 shrink-0 text-muted" size={20} />
           <div>
             <h2 className="m-0 text-lg">Safe approvals</h2>
             <p className="mt-1 mb-0 text-[13px] text-muted">
-              Safe is not configured for {status.networkName}. Add the environment address and
-              Transaction Service access before enabling payouts.
+              Safe is not configured for {status.networkName}. Add its environment address before
+              enabling payouts.
             </p>
           </div>
+          {deliverySelector}
         </div>
       </section>
     );
@@ -96,13 +164,12 @@ export function SafePayoutPanel({
   const canTransfer =
     !status.isEscrowOwner &&
     !status.isPendingEscrowOwner &&
-    status.serviceConfigured &&
     principal.chainAuthorities.includes('OWNER') &&
     !status.error;
   const canProposeAcceptance =
     status.isPendingEscrowOwner &&
     !status.ownershipAcceptance &&
-    status.serviceConfigured &&
+    (delivery === 'MANUAL' || status.serviceConfigured) &&
     status.safeOwner &&
     !status.error;
   const queueUrl = status.queueUrl ?? proposals[0]?.queueUrl;
@@ -129,16 +196,19 @@ export function SafePayoutPanel({
             </p>
           </div>
         </div>
-        {queueUrl ? (
-          <a
-            className="inline-flex min-h-8 cursor-pointer items-center justify-center gap-1.5 rounded-md border border-navy bg-white px-2 text-[10px] text-navy no-underline transition-[color,background-color,border-color,transform] duration-150 hover:translate-x-0.5 hover:border-blue hover:bg-blue-soft"
-            href={queueUrl}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Open Safe approvals <ExternalLink size={14} />
-          </a>
-        ) : null}
+        <div className="flex flex-wrap items-center justify-end gap-2 max-sm:justify-start">
+          {deliverySelector}
+          {queueUrl ? (
+            <a
+              className="inline-flex min-h-8 cursor-pointer items-center justify-center gap-1.5 rounded-md border border-navy bg-white px-2 text-[10px] text-navy no-underline transition-[color,background-color,border-color,transform] duration-150 hover:translate-x-0.5 hover:border-blue hover:bg-blue-soft"
+              href={queueUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open Safe approvals <ExternalLink size={14} />
+            </a>
+          ) : null}
+        </div>
       </div>
 
       {status.error ? (
@@ -158,7 +228,7 @@ export function SafePayoutPanel({
               : 'Connect a Safe owner wallet to create a goal'}
           </span>
           {!status.serviceConfigured ? (
-            <span className="text-danger">Transaction Service access is missing</span>
+            <span className="text-muted">Manual JSON remains available without API access</span>
           ) : null}
         </div>
       ) : status.isPendingEscrowOwner ? (
@@ -185,7 +255,7 @@ export function SafePayoutPanel({
               disabled={pending}
               onClick={() => setConfirmAcceptance(true)}
             >
-              Send acceptance to Safe
+              {delivery === 'MANUAL' ? 'Prepare acceptance JSON' : 'Send acceptance to Safe'}
             </ActionButton>
           ) : null}
           {!status.safeOwner && !status.ownershipAcceptance ? (
@@ -193,7 +263,7 @@ export function SafePayoutPanel({
               Connect a Safe owner wallet to create the acceptance proposal.
             </span>
           ) : null}
-          {!status.serviceConfigured ? (
+          {delivery === 'SERVICE' && !status.serviceConfigured ? (
             <span className="text-xs text-danger">
               Safe Transaction Service is required to publish the acceptance proposal.
             </span>
@@ -219,11 +289,6 @@ export function SafePayoutPanel({
               Transfer control to Safe
             </ActionButton>
           ) : null}
-          {!status.serviceConfigured ? (
-            <span className="text-xs text-danger">
-              Verify Transaction Service access before transferring control.
-            </span>
-          ) : null}
         </div>
       )}
 
@@ -246,8 +311,8 @@ export function SafePayoutPanel({
                     {proposal.asset}
                   </strong>
                   <small className="mt-0.5 block text-[10px] text-muted">
-                    {proposal.kind === 'EXPENSE' ? 'To recipient' : 'To treasury'} · nonce{' '}
-                    {proposal.safeNonce}
+                    {proposal.kind === 'EXPENSE' ? 'To recipient' : 'To treasury'} ·{' '}
+                    {proposal.delivery === 'MANUAL' ? 'manual JSON' : `nonce ${proposal.safeNonce}`}
                   </small>
                 </span>
                 <span className="text-right max-sm:row-start-2 max-sm:text-left">
@@ -259,21 +324,46 @@ export function SafePayoutPanel({
                     {proposalDetail(proposal)}
                   </small>
                 </span>
-                <a
-                  className="inline-flex size-8 items-center justify-center border border-line text-navy hover:border-navy"
-                  href={
-                    proposal.executionTxHash
-                      ? activeExplorerTransaction(proposal.executionTxHash)
-                      : proposal.queueUrl
-                  }
-                  target="_blank"
-                  rel="noreferrer"
-                  aria-label={
-                    proposal.executionTxHash ? 'Open transaction proof' : 'Open proposal in Safe'
-                  }
-                >
-                  <ExternalLink size={13} />
-                </a>
+                <span className="flex items-center justify-end gap-1">
+                  {proposal.delivery === 'MANUAL' && proposal.payoutStatus === 'PROPOSED' ? (
+                    <>
+                      <button
+                        className="inline-flex size-8 cursor-pointer items-center justify-center border border-line bg-transparent text-navy hover:border-navy"
+                        type="button"
+                        aria-label="Open manual payout JSON"
+                        onClick={() => onReopenManualPayout(proposal)}
+                      >
+                        <FileJson size={13} />
+                      </button>
+                      <button
+                        className="inline-flex size-8 cursor-pointer items-center justify-center border border-line bg-transparent text-danger hover:border-danger"
+                        type="button"
+                        aria-label="Cancel manual payout reservation"
+                        onClick={() => setPayoutToCancel(proposal)}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </>
+                  ) : (
+                    <a
+                      className="inline-flex size-8 items-center justify-center border border-line text-navy hover:border-navy"
+                      href={
+                        proposal.executionTxHash
+                          ? activeExplorerTransaction(proposal.executionTxHash)
+                          : proposal.queueUrl
+                      }
+                      target="_blank"
+                      rel="noreferrer"
+                      aria-label={
+                        proposal.executionTxHash
+                          ? 'Open transaction proof'
+                          : 'Open proposal in Safe'
+                      }
+                    >
+                      <ExternalLink size={13} />
+                    </a>
+                  )}
+                </span>
               </div>
             ))}
           </div>
@@ -294,10 +384,27 @@ export function SafePayoutPanel({
         onConfirm={() => void transferOwnership()}
       />
       <ConfirmationDialog
+        open={Boolean(payoutToCancel)}
+        title="Cancel the manual payout reservation?"
+        description="This releases the reserved amount in precommunity only. It does not remove or cancel any transaction already imported or proposed in Safe Wallet. Confirm only after checking Safe."
+        confirmLabel="Cancel reservation"
+        pending={cancellationPending}
+        onCancel={() => setPayoutToCancel(null)}
+        onConfirm={() => void cancelManualPayout()}
+      />
+      <ConfirmationDialog
         open={confirmAcceptance}
-        title="Send ownership acceptance to Safe?"
-        description="Your wallet will sign the exact acceptOwnership transaction and publish it to the Safe approval queue. Control changes only after the Safe threshold approves and executes it."
-        confirmLabel="Send to Safe"
+        title={
+          delivery === 'MANUAL'
+            ? 'Prepare ownership acceptance JSON?'
+            : 'Send ownership acceptance to Safe?'
+        }
+        description={
+          delivery === 'MANUAL'
+            ? 'This prepares the exact acceptOwnership call without signing or publishing it. Import the JSON in Safe Transaction Builder, review it, collect approvals and execute it there.'
+            : 'Your wallet will sign the exact acceptOwnership transaction and publish it to the Safe approval queue. Control changes only after the Safe threshold approves and executes it.'
+        }
+        confirmLabel={delivery === 'MANUAL' ? 'Prepare JSON' : 'Send to Safe'}
         pending={acceptancePending}
         onCancel={() => setConfirmAcceptance(false)}
         onConfirm={() => void proposeOwnershipAcceptance()}

@@ -27,6 +27,7 @@ describe('AdminController identifiers', () => {
     'cancel',
     'createSafePayoutIntent',
     'submitSafePayoutProposal',
+    'cancelManualSafePayout',
     'submitSafeGoalManagerIntent',
     'moderateProfile',
   ])('validates the UUID path parameter on %s', (method) => {
@@ -43,6 +44,10 @@ describe('AdminController Safe ownership authorization', () => {
 
   it('keeps the initial ownership transfer restricted to the current root administrator', () => {
     expect(routeRoles('prepareSafeOwnershipTransfer')).toEqual([Role.SUPER_ADMIN]);
+  });
+
+  it('restricts manual payout cancellation to finance administrators', () => {
+    expect(routeRoles('cancelManualSafePayout')).toEqual([Role.SUPER_ADMIN, Role.FINANCE_ADMIN]);
   });
 
   it('restricts goal manager mutations to root administrators', () => {

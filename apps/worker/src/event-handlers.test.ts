@@ -5,6 +5,8 @@ import {
   MonthlySurplusPolicy,
   PayoutKind,
   PayoutStatus,
+  SafePayoutDelivery,
+  SafePayoutProposalStatus,
   SafeGoalActionProposalStatus,
 } from '@precommunity/database';
 import { describe, expect, it, vi } from 'vitest';
@@ -43,6 +45,7 @@ function proposedPayout(id: string, proposalId: string, proposalTxHash: string |
     status: PayoutStatus.PROPOSED,
     createdAt: new Date('2026-08-15T09:00:00.000Z'),
     safeIntent: {
+      delivery: SafePayoutDelivery.SERVICE,
       proposal: {
         id: proposalId,
         threshold: 2,
@@ -629,6 +632,57 @@ describe('escrow event projection', () => {
       expect.objectContaining({ where: { id: 'proposal-2' } }),
     );
     expect(payoutCreate).not.toHaveBeenCalled();
+  });
+
+  it('settles a manual payout without executing its superseded Service proposal', async () => {
+    const payout = {
+      id: 'manual-payout',
+      goalId: 'goal-row-id',
+      asset: FundingAsset.PRE,
+      kind: PayoutKind.EXPENSE,
+      amountRaw: '100',
+      recipientAddress,
+      status: PayoutStatus.PROPOSED,
+      createdAt: new Date('2026-08-15T09:00:00.000Z'),
+      safeIntent: {
+        id: 'manual-intent',
+        delivery: SafePayoutDelivery.MANUAL,
+        proposal: {
+          id: 'stale-service-proposal',
+          status: SafePayoutProposalStatus.STALE,
+          threshold: 2,
+          executionTxHash: null,
+        },
+      },
+    };
+    const payoutUpdate = vi.fn().mockResolvedValue({});
+    const proposalUpdate = vi.fn();
+    const intentUpdate = vi.fn().mockResolvedValue({});
+    const database = {
+      fundingGoal: { findUnique: vi.fn().mockResolvedValue({ id: 'goal-row-id' }) },
+      payout: {
+        findMany: vi.fn().mockResolvedValue([payout]),
+        update: payoutUpdate,
+        create: vi.fn(),
+      },
+      safePayoutProposal: { update: proposalUpdate },
+      safePayoutIntent: { update: intentUpdate },
+    } as never;
+
+    await handleDecodedEscrowEvent(database, payoutEvent());
+
+    expect(payoutUpdate).toHaveBeenCalledWith({
+      where: { id: payout.id },
+      data: expect.objectContaining({
+        status: PayoutStatus.EXECUTED,
+        chainTxHash: executionTxHash,
+      }),
+    });
+    expect(intentUpdate).toHaveBeenCalledWith({
+      where: { id: 'manual-intent' },
+      data: { consumedAt: new Date(1_776_422_400_000) },
+    });
+    expect(proposalUpdate).not.toHaveBeenCalled();
   });
 
   it('does not guess between multiple indistinguishable Safe proposals', async () => {

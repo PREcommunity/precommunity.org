@@ -1,7 +1,7 @@
 import { ForbiddenException } from '@nestjs/common';
 import { OperationType, type SafeTransactionData } from '@safe-global/types-kit';
 import { getAddress } from 'viem';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { config } from '../config';
 import { SafeService } from './safe.service';
 
@@ -88,6 +88,49 @@ describe('SafeService MultiSend validation', () => {
 });
 
 describe('SafeService ownership acceptance', () => {
+  it('preflights a manual acceptOwnership request without Transaction Service', async () => {
+    const service = new SafeService();
+    const safeAddress = getAddress('0x2222222222222222222222222222222222222222');
+    const simulateContract = vi.fn().mockResolvedValue({});
+    const apiKit = vi.fn(() => {
+      throw new Error('Transaction Service must not be called');
+    });
+    Object.defineProperty(service, 'runtimeInfo', {
+      configurable: true,
+      value: vi.fn().mockResolvedValue({
+        address: safeAddress,
+        owners: [getAddress('0x1111111111111111111111111111111111111111')],
+        threshold: 2,
+        nonce: 7,
+        escrowOwner: getAddress('0x1111111111111111111111111111111111111111'),
+        isEscrowOwner: false,
+        pendingOwner: safeAddress,
+        isPendingEscrowOwner: true,
+        queueUrl: 'https://app.safe.global/transactions/queue?safe=basesep:test',
+      }),
+    });
+    Object.defineProperty(service, 'publicClient', {
+      configurable: true,
+      value: { simulateContract },
+    });
+    Object.defineProperty(service, 'apiKit', { configurable: true, value: apiKit });
+
+    await expect(
+      service.manualOwnershipAcceptanceRequest('0x1111111111111111111111111111111111111111'),
+    ).resolves.toMatchObject({
+      safeAddress,
+      threshold: 2,
+      transactionRequest: {
+        chainId: config.deployment.chainId,
+        to: getAddress(config.deployment.escrowAddress),
+        value: '0',
+        data: '0x79ba5097',
+      },
+    });
+    expect(simulateContract).toHaveBeenCalledOnce();
+    expect(apiKit).not.toHaveBeenCalled();
+  });
+
   it('finds only the exact pending acceptOwnership transaction', async () => {
     const service = new SafeService();
     const safeAddress = getAddress('0x2222222222222222222222222222222222222222');

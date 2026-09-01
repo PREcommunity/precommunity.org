@@ -16,13 +16,15 @@ import type {
   AdminGoalLifecycleKind,
   AdminGoalManagerChangeRequest,
   AdminGoalManagerWorkspace,
+  AdminManualSafeExport,
+  AdminSafeDelivery,
   AdminSafeGoalManagerProposal,
   AdminGoalLifecyclePreparation,
   AdminSafeGoalActionProposal,
-  AdminSafePayoutIntent,
+  AdminSafePayoutPreparation,
   AdminSafePayoutProposal,
   AdminSafeOwnershipAcceptance,
-  AdminSafeOwnershipAcceptanceRequest,
+  AdminSafeOwnershipAcceptancePreparation,
   AdminSafeProposalSubmission,
   AdminSafeStatus,
   AdminSessionPrincipal,
@@ -53,7 +55,56 @@ export function useAdminWorkspace() {
   const [notice, setNotice] = useState<StatusNoticeState | null>(null);
   const [proofHash, setProofHash] = useState('');
   const [transactionPending, setTransactionPending] = useState(false);
+  const [safeDelivery, setSafeDelivery] = useState<AdminSafeDelivery>('SERVICE');
+  const [manualSafeExport, setManualSafeExport] = useState<AdminManualSafeExport | null>(null);
+  const [manualReplacement, setManualReplacement] = useState<{
+    retry: () => Promise<void>;
+  } | null>(null);
+  const [manualReplacementPending, setManualReplacementPending] = useState(false);
+  const [ownershipSubmissionUncertain, setOwnershipSubmissionUncertain] = useState(false);
   const deploymentReady = isDeploymentConfigured(activeDeployment);
+
+  useEffect(() => {
+    if (safeStatus && !safeStatus.serviceConfigured && safeDelivery === 'SERVICE') {
+      setSafeDelivery('MANUAL');
+    }
+  }, [safeDelivery, safeStatus]);
+
+  function openManualSafeExport(request: AdminManualSafeExport) {
+    if (request.chainId !== activeDeployment.chainId) {
+      throw new Error('The manual Safe export belongs to a different deployment.');
+    }
+    for (const transaction of request.transactions) {
+      requireMatchingTransactionDeployment(transaction, activeDeployment);
+      if (transaction.operation !== OperationType.Call) {
+        throw new Error('A manual Safe export contains an unsupported DelegateCall.');
+      }
+    }
+    setManualSafeExport(request);
+  }
+
+  function requestManualReplacement(error: unknown, retry: () => Promise<void>) {
+    if (
+      safeDelivery === 'MANUAL' &&
+      error instanceof Error &&
+      error.message.includes('CONFIRM_SAFE_QUEUE_ABSENT')
+    ) {
+      setManualReplacement({ retry });
+      return true;
+    }
+    return false;
+  }
+
+  async function confirmManualReplacement() {
+    if (!manualReplacement) return;
+    setManualReplacementPending(true);
+    try {
+      await manualReplacement.retry();
+      setManualReplacement(null);
+    } finally {
+      setManualReplacementPending(false);
+    }
+  }
 
   const load = useCallback(async () => {
     setState('loading');
@@ -153,7 +204,8 @@ export function useAdminWorkspace() {
       (proposal) =>
         proposal.status === 'SUBMITTING' ||
         proposal.status === 'AWAITING_CONFIRMATIONS' ||
-        proposal.status === 'READY_TO_EXECUTE',
+        proposal.status === 'READY_TO_EXECUTE' ||
+        proposal.status === 'AWAITING_EXECUTION',
     ) ||
     safeGoalActions.some(
       (proposal) =>
@@ -305,6 +357,15 @@ export function useAdminWorkspace() {
       await load();
       return true;
     }
+    if (request.mode === 'MANUAL') {
+      openManualSafeExport(request);
+      setNotice({
+        type: 'success',
+        message: 'Manual Safe JSON is ready. Import it in Safe Transaction Builder.',
+      });
+      await load();
+      return true;
+    }
     if (!deploymentReady) {
       setNotice({ type: 'error', message: 'Deployment manifest is not configured.' });
       return false;
@@ -418,16 +479,26 @@ export function useAdminWorkspace() {
     }
   }
 
-  async function syncGoalManagers() {
+  async function syncGoalManagers(confirmedAbsentFromSafe = false) {
     setTransactionPending(true);
     try {
       const request = await clientApiJson<AdminGoalManagerChangeRequest>(
         '/v1/admin/goal-managers/safe-sync/prepare',
-        { method: 'POST' },
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ delivery: safeDelivery, confirmedAbsentFromSafe }),
+        },
         'Goal manager synchronization',
       );
       await processGoalManagerRequest(request);
     } catch (error) {
+      if (
+        !confirmedAbsentFromSafe &&
+        requestManualReplacement(error, () => syncGoalManagers(true))
+      ) {
+        return;
+      }
       setNotice({
         type: 'error',
         message: error instanceof Error ? error.message : 'Could not prepare manager sync.',
@@ -451,7 +522,7 @@ export function useAdminWorkspace() {
         'Goal manager data refresh',
       );
       await load();
-      setNotice({ type: 'success', message: 'Admin data refreshed.' });
+      setNotice({ type: 'success', message: 'Safe data refreshed.' });
     } catch (error) {
       await load().catch(() => undefined);
       setNotice({
@@ -461,7 +532,11 @@ export function useAdminWorkspace() {
     }
   }
 
-  async function updateGoalManager(managerAddress: string, enabled: boolean) {
+  async function updateGoalManager(
+    managerAddress: string,
+    enabled: boolean,
+    confirmedAbsentFromSafe = false,
+  ) {
     setTransactionPending(true);
     try {
       const request = await clientApiJson<AdminGoalManagerChangeRequest>(
@@ -469,7 +544,11 @@ export function useAdminWorkspace() {
         {
           method: 'PUT',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ enabled }),
+          body: JSON.stringify({
+            enabled,
+            delivery: safeDelivery,
+            confirmedAbsentFromSafe,
+          }),
         },
         enabled ? 'Goal manager pin' : 'Goal manager removal',
       );
@@ -478,6 +557,14 @@ export function useAdminWorkspace() {
         'Goal manager policy updated. No on-chain change is currently required.',
       );
     } catch (error) {
+      if (
+        !confirmedAbsentFromSafe &&
+        requestManualReplacement(error, () =>
+          updateGoalManager(managerAddress, enabled, true).then(() => undefined),
+        )
+      ) {
+        return false;
+      }
       setNotice({
         type: 'error',
         message: error instanceof Error ? error.message : 'Could not update the goal manager.',
@@ -612,8 +699,9 @@ export function useAdminWorkspace() {
     asset: 'PRE' | 'USDC',
     kind: 'EXPENSE' | 'CANCELLED_FUNDS',
     amountRaw: bigint,
+    confirmedAbsentFromSafe = false,
   ) {
-    if (!address || !connector || !principal) {
+    if (!address || !principal) {
       setNotice({ type: 'error', message: 'Connect and sign in with a Safe owner wallet first.' });
       return;
     }
@@ -628,8 +716,12 @@ export function useAdminWorkspace() {
       setNotice({ type: 'error', message: 'The connected wallet is not an owner of this Safe.' });
       return;
     }
-    if (!safeStatus?.isEscrowOwner || !safeStatus.serviceConfigured) {
+    if (!safeStatus?.isEscrowOwner) {
       setNotice({ type: 'error', message: 'Safe payout approvals are not ready yet.' });
+      return;
+    }
+    if (safeDelivery === 'SERVICE' && !safeStatus.serviceConfigured) {
+      setNotice({ type: 'error', message: 'Safe Transaction Service is unavailable.' });
       return;
     }
 
@@ -637,16 +729,32 @@ export function useAdminWorkspace() {
       requireMatchingDeployment(safeStatus, activeDeployment);
       setTransactionPending(true);
       setProofHash('');
-      if (chainId !== activeChain.id) await switchChainAsync({ chainId: activeChain.id });
-      const intent = await clientApiJson<AdminSafePayoutIntent>(
+      const intent = await clientApiJson<AdminSafePayoutPreparation>(
         `/v1/admin/goals/${goalId}/safe-payout-intents`,
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ asset, kind, amountRaw: amountRaw.toString() }),
+          body: JSON.stringify({
+            asset,
+            kind,
+            amountRaw: amountRaw.toString(),
+            delivery: safeDelivery,
+            confirmedAbsentFromSafe,
+          }),
         },
         'Safe payout preparation',
       );
+      if ('mode' in intent) {
+        openManualSafeExport(intent);
+        setNotice({
+          type: 'success',
+          message: 'Payout reserved. Manual Safe JSON is ready to import.',
+        });
+        await load();
+        return;
+      }
+      if (!connector) throw new Error('The connected wallet provider is unavailable.');
+      if (chainId !== activeChain.id) await switchChainAsync({ chainId: activeChain.id });
       requireMatchingTransactionDeployment(intent.transactionRequest, activeDeployment);
       const provider = (await connector.getProvider()) as Eip1193Provider | undefined;
       if (!provider) throw new Error('The connected wallet provider is unavailable.');
@@ -686,12 +794,18 @@ export function useAdminWorkspace() {
       setNotice({
         type: 'success',
         message:
-          proposal.threshold > 1
-            ? `Sent to Safe. ${proposal.confirmations} of ${proposal.threshold} approvals collected.`
+          (proposal.threshold ?? 0) > 1
+            ? `Sent to Safe. ${proposal.confirmations ?? 0} of ${proposal.threshold} approvals collected.`
             : 'Sent to Safe. It is ready to execute in Safe Wallet.',
       });
       await load();
     } catch (error) {
+      if (
+        !confirmedAbsentFromSafe &&
+        requestManualReplacement(error, () => release(goalId, asset, kind, amountRaw, true))
+      ) {
+        return;
+      }
       setNotice({
         type: 'error',
         message: error instanceof Error ? error.message.split('\n')[0]! : 'Could not send to Safe.',
@@ -706,6 +820,7 @@ export function useAdminWorkspace() {
     goalId: string,
     kind: AdminGoalLifecycleKind,
     monthlySurplusPolicy?: 'PAYOUT_ALL' | 'ROLL_OVER',
+    confirmedAbsentFromSafe = false,
   ) {
     if (!address || !principal) {
       setNotice({ type: 'error', message: 'Connect and sign in with an authorized wallet first.' });
@@ -721,7 +836,12 @@ export function useAdminWorkspace() {
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ kind, monthlySurplusPolicy }),
+          body: JSON.stringify({
+            kind,
+            monthlySurplusPolicy,
+            delivery: safeDelivery,
+            confirmedAbsentFromSafe,
+          }),
         },
         'Monthly lifecycle preparation',
       );
@@ -731,6 +851,15 @@ export function useAdminWorkspace() {
           kind === 'SET_MONTHLY_SURPLUS_POLICY' ? 'Monthly policy change' : 'Monthly graceful stop',
           ['OWNER', 'GOAL_MANAGER'],
         );
+        return;
+      }
+      if (preparation.mode === 'MANUAL') {
+        openManualSafeExport(preparation);
+        setNotice({
+          type: 'success',
+          message: 'Manual Safe JSON is ready. Import it in Safe Transaction Builder.',
+        });
+        await load();
         return;
       }
 
@@ -789,6 +918,14 @@ export function useAdminWorkspace() {
       });
       await load();
     } catch (error) {
+      if (
+        !confirmedAbsentFromSafe &&
+        requestManualReplacement(error, () =>
+          goalLifecycle(goalId, kind, monthlySurplusPolicy, true),
+        )
+      ) {
+        return;
+      }
       setNotice({
         type: 'error',
         message: error instanceof Error ? error.message.split('\n')[0]! : 'Could not send to Safe.',
@@ -799,8 +936,8 @@ export function useAdminWorkspace() {
     }
   }
 
-  async function proposeOwnershipAcceptance() {
-    if (!address || !connector || !principal) {
+  async function proposeOwnershipAcceptance(confirmedAbsentFromSafe = false) {
+    if (!address || !principal) {
       setNotice({ type: 'error', message: 'Connect and sign in with a Safe owner wallet first.' });
       return;
     }
@@ -819,21 +956,40 @@ export function useAdminWorkspace() {
       setNotice({ type: 'error', message: 'The connected wallet is not an owner of this Safe.' });
       return;
     }
-    if (!safeStatus.serviceConfigured) {
+    if (safeDelivery === 'SERVICE' && !safeStatus.serviceConfigured) {
       setNotice({ type: 'error', message: 'Safe Transaction Service is unavailable.' });
       return;
     }
+    if (safeDelivery === 'MANUAL' && ownershipSubmissionUncertain && !confirmedAbsentFromSafe) {
+      setManualReplacement({ retry: () => proposeOwnershipAcceptance(true) });
+      return;
+    }
 
+    let signed = false;
     try {
       requireMatchingDeployment(safeStatus, activeDeployment);
       setTransactionPending(true);
       setProofHash('');
-      if (chainId !== activeChain.id) await switchChainAsync({ chainId: activeChain.id });
-      const request = await clientApiJson<AdminSafeOwnershipAcceptanceRequest>(
+      const request = await clientApiJson<AdminSafeOwnershipAcceptancePreparation>(
         '/v1/admin/safe/ownership-acceptance',
-        { method: 'POST' },
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ delivery: safeDelivery, confirmedAbsentFromSafe }),
+        },
         'Safe ownership acceptance preparation',
       );
+      if ('mode' in request) {
+        openManualSafeExport(request);
+        setOwnershipSubmissionUncertain(false);
+        setNotice({
+          type: 'success',
+          message: 'Manual acceptOwnership JSON is ready to import.',
+        });
+        return;
+      }
+      if (!connector) throw new Error('The connected wallet provider is unavailable.');
+      if (chainId !== activeChain.id) await switchChainAsync({ chainId: activeChain.id });
       requireMatchingTransactionDeployment(request.transactionRequest, activeDeployment);
       if (request.existingProposal) {
         setSafeStatus((current) =>
@@ -866,6 +1022,7 @@ export function useAdminWorkspace() {
       });
       const safeTxHash = (await protocolKit.getTransactionHash(safeTransaction)) as Hex;
       const signature = await protocolKit.signHash(safeTxHash);
+      signed = true;
       const submission: AdminSafeProposalSubmission = {
         transaction: safeTransaction.data,
         safeTxHash,
@@ -887,11 +1044,19 @@ export function useAdminWorkspace() {
           ? 'Ownership acceptance is ready to execute in Safe Wallet.'
           : `Sent to Safe. ${proposal.confirmations} of ${proposal.threshold} approvals collected.`,
       });
+      setOwnershipSubmissionUncertain(false);
       await load();
       setSafeStatus((current) =>
         current?.isPendingEscrowOwner ? { ...current, ownershipAcceptance: proposal } : current,
       );
     } catch (error) {
+      if (signed) setOwnershipSubmissionUncertain(true);
+      if (
+        !confirmedAbsentFromSafe &&
+        requestManualReplacement(error, () => proposeOwnershipAcceptance(true))
+      ) {
+        return;
+      }
       setNotice({
         type: 'error',
         message:
@@ -914,7 +1079,58 @@ export function useAdminWorkspace() {
     );
   }
 
+  function reopenManualPayout(proposal: AdminSafePayoutProposal) {
+    if (proposal.delivery !== 'MANUAL' || !proposal.transactionRequest) {
+      setNotice({ type: 'error', message: 'This payout does not have a manual JSON export.' });
+      return;
+    }
+    openManualSafeExport({
+      mode: 'MANUAL',
+      name: `Payout: ${proposal.goalTitle ?? 'Goal'}`,
+      description: `${proposal.kind} payout of ${proposal.amountRaw} ${proposal.asset} for ${proposal.goalTitle ?? 'Goal'}.`,
+      chainId: proposal.transactionRequest.chainId,
+      safeAddress: proposal.safeAddress,
+      queueUrl: proposal.queueUrl,
+      transactions: [
+        {
+          ...proposal.transactionRequest,
+          operation: OperationType.Call,
+        },
+      ],
+      transactionRequest: proposal.transactionRequest,
+      id: proposal.intentId,
+      reservationId: proposal.intentId,
+      delivery: 'MANUAL',
+    });
+  }
+
+  async function cancelManualPayout(intentId: string) {
+    setTransactionPending(true);
+    try {
+      await clientApiRequest(
+        `/v1/admin/safe-payout-intents/${intentId}/cancel-manual`,
+        { method: 'POST' },
+        'Manual payout cancellation',
+      );
+      if (manualSafeExport?.reservationId === intentId) setManualSafeExport(null);
+      setNotice({
+        type: 'success',
+        message:
+          'Manual payout reservation cancelled. Any Safe proposal must be handled separately.',
+      });
+      await load();
+    } catch (error) {
+      setNotice({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Could not cancel the reservation.',
+      });
+    } finally {
+      setTransactionPending(false);
+    }
+  }
+
   return {
+    cancelManualPayout,
     cancelGoal,
     closeGoal,
     createGoal,
@@ -922,6 +1138,9 @@ export function useAdminWorkspace() {
     goalManagers,
     goalLifecycle,
     load,
+    manualReplacement,
+    manualReplacementPending,
+    manualSafeExport,
     notice,
     principal,
     proofHash,
@@ -929,14 +1148,20 @@ export function useAdminWorkspace() {
     publish,
     refreshData,
     release,
+    reopenManualPayout,
+    safeDelivery,
     safeProposals,
     safeGoalActions,
     safeStatus,
+    setSafeDelivery,
     state,
     transactionExplorerUrl: proofHash ? activeExplorerTransaction(proofHash) : null,
     transactionPending,
     transferOwnershipToSafe,
     syncGoalManagers,
+    confirmManualReplacement,
+    closeManualSafeExport: () => setManualSafeExport(null),
+    cancelManualReplacement: () => setManualReplacement(null),
     updateGoalManager,
     updateDraft,
     workspace,

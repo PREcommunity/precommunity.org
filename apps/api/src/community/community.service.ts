@@ -526,19 +526,21 @@ export class CommunityService {
         },
       },
     });
-    const profile = visibleProfile(user?.profile);
-    if (!user || !profile) throw new NotFoundException('Public community profile not found');
+    if (!user) throw new NotFoundException('Community member not found');
+    const profile = visibleProfile(user.profile);
     return {
       address: user.address,
-      profile: {
-        active: true,
-        revision: profile.revision.toString(),
-        displayName: profile.displayName,
-        avatarUrl: profileAvatarPath(user.address, profile),
-        websiteUrl: profile.websiteUrl?.startsWith('https://') ? profile.websiteUrl : null,
-        bio: profile.bio,
-        defaultPublic: profile.defaultPublic,
-      },
+      profile: profile
+        ? {
+            active: true,
+            revision: profile.revision.toString(),
+            displayName: profile.displayName,
+            avatarUrl: profileAvatarPath(user.address, profile),
+            websiteUrl: profile.websiteUrl?.startsWith('https://') ? profile.websiteUrl : null,
+            bio: profile.bio,
+            defaultPublic: profile.defaultPublic,
+          }
+        : null,
       proposals: user.proposals,
       comments: user.comments,
       votes: user.proposalVotes,

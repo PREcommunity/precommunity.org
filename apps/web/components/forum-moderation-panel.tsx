@@ -2,8 +2,17 @@
 
 import { type FormEvent, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, UnlockKeyhole, X } from 'lucide-react';
-import { FORUM_CATEGORIES, type ForumConfig, type ForumTopicSummary } from '@precommunity/shared';
+import {
+  LoaderCircle,
+  LockKeyhole,
+  Pencil,
+  Plus,
+  RefreshCw,
+  ShieldCheck,
+  UnlockKeyhole,
+  X,
+} from 'lucide-react';
+import { type ForumConfig, type ForumTopicSummary } from '@precommunity/shared';
 import { clientApiJson, clientApiRequest } from '@/lib/http';
 import { forumTopicTitle } from '@/lib/format';
 import { ActionButton } from './action-button';
@@ -22,6 +31,8 @@ export function ForumModerationPanel() {
   const [notice, setNotice] = useState<StatusNoticeState | null>(null);
   const [topicToRemove, setTopicToRemove] = useState<string | null>(null);
   const [minimumPre, setMinimumPre] = useState('');
+  const [showCategoryForm, setShowCategoryForm] = useState(false);
+  const [editingCategory, setEditingCategory] = useState<string | null>(null);
 
   async function load() {
     setLoading(true);
@@ -104,6 +115,72 @@ export function ForumModerationPanel() {
     }
   }
 
+  async function createCategory(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const label = String(new FormData(form).get('label') ?? '');
+    setPending(true);
+    setNotice(null);
+    try {
+      await clientApiRequest(
+        '/v1/community/admin/forum/categories',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ label }),
+        },
+        'Forum category',
+      );
+      form.reset();
+      setShowCategoryForm(false);
+      setNotice({ type: 'success', message: `Category “${label.trim()}” created.` });
+      await load();
+    } catch (error) {
+      setNotice({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'The category could not be created.',
+      });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function updateCategory(
+    value: string,
+    update: { label?: string; archived?: boolean },
+    success: string,
+  ) {
+    setPending(true);
+    setNotice(null);
+    try {
+      await clientApiRequest(
+        `/v1/community/admin/forum/categories/${encodeURIComponent(value)}`,
+        {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(update),
+        },
+        'Forum category',
+      );
+      setEditingCategory(null);
+      setNotice({ type: 'success', message: success });
+      await load();
+    } catch (error) {
+      setNotice({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'The category could not be updated.',
+      });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function saveCategory(event: FormEvent<HTMLFormElement>, value: string) {
+    event.preventDefault();
+    const label = String(new FormData(event.currentTarget).get('label') ?? '');
+    await updateCategory(value, { label }, `Category renamed to “${label.trim()}”.`);
+  }
+
   async function moderate(
     id: string,
     action: 'approve' | 'decline' | 'lock' | 'unlock' | 'remove',
@@ -137,6 +214,9 @@ export function ForumModerationPanel() {
     await moderate(topicToRemove, 'remove');
     setTopicToRemove(null);
   }
+
+  const activeCategoryCount =
+    workspace?.config.categories.filter((category) => !category.archived).length ?? 0;
 
   return (
     <section className="mb-[34px] pb-7">
@@ -215,6 +295,147 @@ export function ForumModerationPanel() {
               wallet to write.
             </p>
           </form>
+          <section className="mb-5 border-t border-line" aria-labelledby="forum-categories-title">
+            <header className="flex items-center justify-between gap-4 border-b border-line py-3 max-sm:items-start">
+              <div>
+                <h3 className="m-0 text-[17px]" id="forum-categories-title">
+                  Forum categories
+                </h3>
+                <p className="mt-1 mb-0 text-[10px] text-muted">
+                  Archived categories stay visible in existing discussions but cannot receive new
+                  topics.
+                </p>
+              </div>
+              <ActionButton
+                type="button"
+                size="compact"
+                icon={showCategoryForm ? <X size={13} /> : <Plus size={13} />}
+                onClick={() => setShowCategoryForm((value) => !value)}
+                disabled={pending}
+              >
+                {showCategoryForm ? 'Cancel' : 'Add category'}
+              </ActionButton>
+            </header>
+            {showCategoryForm ? (
+              <form
+                className="grid grid-cols-[minmax(180px,320px)_auto_1fr] items-end gap-3 border-b border-line bg-blue-soft px-3 py-3 max-sm:grid-cols-1"
+                onSubmit={(event) => void createCategory(event)}
+              >
+                <label className="grid gap-1.5">
+                  <span className="text-[10px] font-bold text-muted uppercase">Category name</span>
+                  <input
+                    className="h-10 rounded-[3px] border border-line bg-white px-2.5 text-navy"
+                    name="label"
+                    maxLength={80}
+                    required
+                    autoFocus
+                  />
+                </label>
+                <ActionButton variant="primary" disabled={pending}>
+                  Create category
+                </ActionButton>
+                <p className="m-0 text-[10px] text-muted">
+                  The stable identifier is generated once from this name.
+                </p>
+              </form>
+            ) : null}
+            <div>
+              {workspace.config.categories.length ? (
+                workspace.config.categories.map((category) =>
+                  editingCategory === category.value ? (
+                    <form
+                      className="grid grid-cols-[minmax(180px,320px)_auto_auto_1fr] items-end gap-2 border-b border-line bg-blue-soft px-3 py-3 max-sm:grid-cols-1"
+                      key={category.value}
+                      onSubmit={(event) => void saveCategory(event, category.value)}
+                    >
+                      <label className="grid gap-1.5">
+                        <span className="text-[10px] font-bold text-muted uppercase">
+                          Category name
+                        </span>
+                        <input
+                          className="h-10 rounded-[3px] border border-line bg-white px-2.5 text-navy"
+                          name="label"
+                          defaultValue={category.label}
+                          maxLength={80}
+                          required
+                          autoFocus
+                        />
+                      </label>
+                      <ActionButton variant="primary" disabled={pending}>
+                        Save
+                      </ActionButton>
+                      <ActionButton
+                        type="button"
+                        disabled={pending}
+                        onClick={() => setEditingCategory(null)}
+                      >
+                        Cancel
+                      </ActionButton>
+                      <small className="self-center font-mono text-[9px] text-muted">
+                        {category.value}
+                      </small>
+                    </form>
+                  ) : (
+                    <article
+                      className="group grid min-h-14 grid-cols-[minmax(180px,1fr)_90px_auto] items-center gap-3 border-b border-line py-2.5 max-sm:grid-cols-1"
+                      key={category.value}
+                    >
+                      <span className="flex min-w-0 flex-col transition-transform duration-180 group-hover:translate-x-1">
+                        <strong>{category.label}</strong>
+                        <small className="font-mono text-[9px] text-muted">{category.value}</small>
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 font-mono text-[8px] uppercase">
+                        <i
+                          className={`size-2 rounded-full ${category.archived ? 'bg-muted' : 'bg-success'}`}
+                        />
+                        {category.archived ? 'Archived' : 'Active'}
+                      </span>
+                      <span className="flex justify-end gap-1.5 max-sm:justify-start">
+                        <ActionButton
+                          type="button"
+                          size="compact"
+                          icon={<Pencil size={13} />}
+                          onClick={() => setEditingCategory(category.value)}
+                          disabled={pending}
+                        >
+                          Edit
+                        </ActionButton>
+                        <ActionButton
+                          type="button"
+                          size="compact"
+                          onClick={() =>
+                            void updateCategory(
+                              category.value,
+                              { archived: !category.archived },
+                              category.archived
+                                ? `Category “${category.label}” restored.`
+                                : `Category “${category.label}” archived.`,
+                            )
+                          }
+                          disabled={pending || (!category.archived && activeCategoryCount <= 1)}
+                          title={
+                            !category.archived && activeCategoryCount <= 1
+                              ? 'At least one category must remain active.'
+                              : undefined
+                          }
+                        >
+                          {category.archived ? 'Restore' : 'Archive'}
+                        </ActionButton>
+                      </span>
+                    </article>
+                  ),
+                )
+              ) : (
+                <p className="m-0 border-b border-line py-5 text-muted">
+                  No forum categories configured.
+                </p>
+              )}
+            </div>
+          </section>
+          <header className="flex items-end justify-between gap-4 pb-2">
+            <h3 className="m-0 text-[17px]">Topics to moderate</h3>
+            <small className="text-muted">Up to 100 active discussions</small>
+          </header>
           <div className="border-t border-line">
             {workspace.topics.length ? (
               workspace.topics.map((topic) => (
@@ -230,8 +451,9 @@ export function ForumModerationPanel() {
                     href={`/community/forum/${topic.slug}`}
                   >
                     <small className="text-muted">
-                      {FORUM_CATEGORIES.find((item) => item.value === topic.category)?.label} ·{' '}
-                      {topic.replyCount} responses
+                      {workspace.config.categories.find((item) => item.value === topic.category)
+                        ?.label ?? topic.category}{' '}
+                      · {topic.replyCount} responses
                     </small>
                     <strong>{forumTopicTitle(topic.title, topic.state)}</strong>
                   </Link>

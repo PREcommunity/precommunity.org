@@ -3,7 +3,13 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { ExpenseCadence, FundingAsset, MonthlySurplusPolicy } from '@precommunity/database';
 import { describe, expect, it } from 'vitest';
-import { CreateExpenseDto, UpdateExpenseDto, UpdateGoalManagerDto } from './admin.dto';
+import {
+  CreateExpenseDto,
+  PrepareSafeDeliveryDto,
+  ReleaseProposalDto,
+  UpdateExpenseDto,
+  UpdateGoalManagerDto,
+} from './admin.dto';
 
 const validCreateBody = {
   name: 'Public infrastructure',
@@ -131,5 +137,37 @@ describe('goal manager policy validation', () => {
     await expect(
       validate(plainToInstance(UpdateGoalManagerDto, { enabled: 'false' })),
     ).resolves.not.toHaveLength(0);
+  });
+});
+
+describe('Safe delivery validation', () => {
+  it('accepts omitted, service and confirmed manual delivery', async () => {
+    await expect(validate(plainToInstance(PrepareSafeDeliveryDto, {}))).resolves.toHaveLength(0);
+    await expect(
+      validate(plainToInstance(PrepareSafeDeliveryDto, { delivery: 'SERVICE' })),
+    ).resolves.toHaveLength(0);
+    await expect(
+      validate(
+        plainToInstance(ReleaseProposalDto, {
+          asset: FundingAsset.PRE,
+          kind: 'EXPENSE',
+          amountRaw: '1',
+          delivery: 'MANUAL',
+          confirmedAbsentFromSafe: true,
+        }),
+      ),
+    ).resolves.toHaveLength(0);
+  });
+
+  it('rejects unknown delivery modes and non-boolean confirmations', async () => {
+    const errors = await validate(
+      plainToInstance(PrepareSafeDeliveryDto, {
+        delivery: 'AUTO',
+        confirmedAbsentFromSafe: 'yes',
+      }),
+    );
+    expect(errors.map((error) => error.property)).toEqual(
+      expect.arrayContaining(['delivery', 'confirmedAbsentFromSafe']),
+    );
   });
 });

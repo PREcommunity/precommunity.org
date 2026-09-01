@@ -1,5 +1,4 @@
 import { UnauthorizedException } from '@nestjs/common';
-import { ForumCategory } from '@precommunity/database';
 import { SiweMessage } from 'siwe';
 import { privateKeyToAccount } from 'viem/accounts';
 import { describe, expect, it, vi } from 'vitest';
@@ -99,7 +98,7 @@ describe('forum SIWE boundary', () => {
     const input = {
       title: 'Signed community topic',
       body: 'This mutation is backed by a verified SIWE session.',
-      category: ForumCategory.GENERAL,
+      category: 'GENERAL',
     };
     await controller.create(input, request);
 

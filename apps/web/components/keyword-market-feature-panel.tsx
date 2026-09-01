@@ -1,11 +1,9 @@
 'use client';
 
-import { LoaderCircle, RefreshCw } from 'lucide-react';
 import { useState } from 'react';
 import { useApplicationFeatures } from '@/hooks/use-application-features';
 import { APPLICATION_FEATURES_CHANGED_EVENT } from '@/lib/application-features';
 import { clientApiJson } from '@/lib/http';
-import { ActionButton } from './action-button';
 import { ConfirmationDialog } from './confirmation-dialog';
 import { StatusNotice, type StatusNoticeState } from './status-notice';
 
@@ -60,20 +58,6 @@ export function KeywordMarketFeaturePanel({ canManage }: { canManage: boolean })
           </p>
         </div>
         <span className="flex items-center gap-2 max-sm:justify-between">
-          <ActionButton
-            size="compact"
-            icon={
-              loading ? (
-                <LoaderCircle className="animate-spin" size={14} />
-              ) : (
-                <RefreshCw size={14} />
-              )
-            }
-            onClick={() => void refresh()}
-            disabled={loading || pending}
-          >
-            Refresh
-          </ActionButton>
           <button
             className={`flex min-h-8 cursor-pointer items-center gap-2 rounded-md border border-navy px-2.5 text-[10px] font-bold transition-colors duration-150 hover:border-blue hover:bg-blue-soft disabled:cursor-not-allowed disabled:opacity-55 ${enabled ? 'bg-navy text-white hover:text-navy dark:hover:text-white' : 'bg-white'}`}
             type="button"
