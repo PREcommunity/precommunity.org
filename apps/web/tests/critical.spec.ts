@@ -543,7 +543,11 @@ test('wallet connection opens the RainbowKit wallet chooser', async ({ page }) =
 
 test('admin surface does not expose local chain fixtures as admin records', async ({ page }) => {
   await page.goto('/admin');
+  await expect(page).toHaveURL(/\/admin\?tab=operations$/);
   await expect(page.getByRole('heading', { name: 'Admin' })).toBeVisible();
+  await expect(
+    page.getByRole('navigation', { name: 'Admin sections' }).getByRole('link'),
+  ).toHaveText(['Operations']);
   await expect(page.getByText('Connect an authorized wallet')).toBeVisible();
   await expect(page.getByText('Local chain infrastructure')).toHaveCount(0);
   await expect(page.getByText('Base Sepolia manifest active.')).toHaveCount(0);
@@ -736,6 +740,28 @@ test('goal manager panel exposes policy sources and prepares direct owner synchr
   await accountButton.click();
   await connectInjectedWallet(page, page.getByRole('menuitem', { name: 'Reconnect wallet' }));
 
+  const adminSections = page.getByRole('navigation', { name: 'Admin sections' });
+  await expect(adminSections.getByRole('link')).toHaveText([
+    'Operations',
+    'Forum',
+    'Goals',
+    'Keyword Marketplace',
+  ]);
+  await expect(page).toHaveURL(/\/admin\?tab=operations$/);
+  await expect(page.getByRole('heading', { name: 'Goal managers' })).toBeVisible();
+  await adminSections.getByRole('link', { name: 'Goals', exact: true }).click();
+  await expect(page).toHaveURL(/\/admin\?tab=goals$/);
+  await expect(page.getByRole('heading', { name: 'Goal managers' })).toHaveCount(0);
+  await expect(page.getByText('0 goal drafts')).toBeVisible();
+  await adminSections.getByRole('link', { name: 'Keyword Marketplace' }).click();
+  await expect(page).toHaveURL(/\/admin\?tab=keyword-marketplace$/);
+  await expect(page.getByRole('heading', { name: 'Keyword Marketplace' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Open ad moderation' })).toHaveAttribute(
+    'href',
+    '/keyword-market/admin',
+  );
+  await adminSections.getByRole('link', { name: 'Operations' }).click();
+  await expect(page).toHaveURL(/\/admin\?tab=operations$/);
   await expect(page.getByRole('heading', { name: 'Goal managers' })).toBeVisible();
   await expect(page.getByText(connectedAddress)).toBeVisible();
   await expect(page.getByText(formerOwner)).toBeVisible();
@@ -869,6 +895,11 @@ test('forum moderator can open a pending discussion from its highlighted row', a
   const accountButton = page.getByRole('button', { name: /Signed-in session/ });
   await accountButton.click();
   await connectInjectedWallet(page, page.getByRole('menuitem', { name: 'Reconnect wallet' }));
+  await page
+    .getByRole('navigation', { name: 'Admin sections' })
+    .getByRole('link', { name: 'Forum' })
+    .click();
+  await expect(page).toHaveURL(/\/admin\?tab=forum$/);
   await expect(page.getByRole('heading', { name: 'Discussion moderation' })).toBeVisible();
   await expect(page.getByRole('switch', { name: 'Proposal review on' })).toBeVisible();
   await expect(page.getByRole('link', { name: /Pending technical discussion/ })).toHaveAttribute(

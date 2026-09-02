@@ -33,6 +33,7 @@ function useWalletSessionState() {
   const { switchChainAsync } = useSwitchChain();
   const [sessionAddress, setSessionAddress] = useState<`0x${string}`>();
   const [sessionRoles, setSessionRoles] = useState<SessionRole[]>([]);
+  const [sessionReady, setSessionReady] = useState(false);
   const [canAccessSafeOwnershipAcceptance, setCanAccessSafeOwnershipAcceptance] = useState(false);
   const [error, setError] = useState('');
   const [isAuthenticating, setIsAuthenticating] = useState(false);
@@ -55,6 +56,8 @@ function useWalletSessionState() {
       setSessionAddress(undefined);
       setSessionRoles([]);
       setCanAccessSafeOwnershipAcceptance(false);
+    } finally {
+      setSessionReady(true);
     }
   }, []);
 
@@ -178,6 +181,7 @@ function useWalletSessionState() {
     isLoggingOut,
     logout,
     sessionAddress,
+    sessionReady,
     sessionRoles,
   };
 }

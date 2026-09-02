@@ -1,9 +1,13 @@
 'use client';
 
+import { useEffect } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { CircleAlert, ExternalLink, LoaderCircle, RefreshCw } from 'lucide-react';
 import { useAdminWorkspace } from '@/hooks/use-admin-workspace';
 import { useWalletSession } from '@/hooks/use-wallet-session';
 import { hasAdminWorkspaceRole } from '@/lib/admin-access';
+import { availableAdminTabs, resolveAdminTab } from '@/lib/admin-tabs';
 import { canAccessAdmin } from '@/lib/session-access';
 import { ActionButton } from './action-button';
 import { AdminCreationForms } from './admin-creation-forms';
@@ -23,12 +27,32 @@ const accessStateClass =
 const accessHeadingClass = 'mt-2.5 mb-1 text-2xl';
 const accessButtonClass = 'mt-4 cursor-pointer border border-navy bg-navy px-3 py-2 text-white';
 
-export function AdminWorkspace() {
+export function AdminWorkspace({ requestedTab }: { requestedTab?: string }) {
+  const router = useRouter();
   const admin = useAdminWorkspace();
-  const { sessionRoles } = useWalletSession();
+  const { sessionReady, sessionRoles } = useWalletSession();
   const hasWorkspaceAccess = admin.principal ? hasAdminWorkspaceRole(admin.principal) : false;
   const adminRoles = admin.principal?.roles ?? sessionRoles;
   const hasAdminAccess = canAccessAdmin(adminRoles);
+  const canModerateCommunity = adminRoles.some(
+    (role) => role === 'SUPER_ADMIN' || role === 'CONTENT_ADMIN',
+  );
+  const tabs = availableAdminTabs(adminRoles);
+  const activeTab = resolveAdminTab(requestedTab ?? null, tabs);
+
+  useEffect(() => {
+    if (admin.state === 'loading' || (!sessionReady && !admin.principal)) return;
+    if (requestedTab === activeTab) return;
+    router.replace(`/admin?tab=${activeTab}`, { scroll: false });
+  }, [
+    activeTab,
+    admin.principal,
+    admin.state,
+    adminRoles.length,
+    requestedTab,
+    router,
+    sessionReady,
+  ]);
 
   return (
     <div className="px-[var(--page-pad)] pt-7 pb-[60px]">
@@ -46,16 +70,16 @@ export function AdminWorkspace() {
         </div>
         <ActionButton
           icon={
-            admin.state === 'loading' ? (
+            admin.refreshPending ? (
               <LoaderCircle className="animate-spin" size={15} />
             ) : (
               <RefreshCw size={15} />
             )
           }
-          disabled={admin.state === 'loading'}
+          disabled={admin.refreshPending}
           onClick={() => void admin.refreshData()}
         >
-          {admin.state === 'loading' ? 'Refreshing Safe data…' : 'Refresh Safe data'}
+          {admin.refreshPending ? 'Refreshing Safe data…' : 'Refresh Safe data'}
         </ActionButton>
       </section>
 
@@ -76,8 +100,31 @@ export function AdminWorkspace() {
         </div>
       ) : null}
 
-      {hasAdminAccess ? (
-        <KeywordMarketFeaturePanel canManage={adminRoles.includes('SUPER_ADMIN')} />
+      <nav className="mt-7 overflow-x-auto overflow-y-hidden border-b border-navy" aria-label="Admin sections">
+        <div className="flex min-w-max gap-1">
+          {tabs.map((tab) => (
+            <Link
+              className={`-mb-px flex min-h-11 items-center border-b-2 px-3.5 text-xs font-bold transition-colors ${
+                tab.id === activeTab
+                  ? 'border-blue text-navy'
+                  : 'border-transparent text-muted hover:border-line hover:text-navy dark:hover:text-white'
+              }`}
+              href={`/admin?tab=${tab.id}`}
+              scroll={false}
+              aria-current={tab.id === activeTab ? 'page' : undefined}
+              key={tab.id}
+            >
+              {tab.label}
+            </Link>
+          ))}
+        </div>
+      </nav>
+
+      {hasAdminAccess && activeTab === 'keyword-marketplace' ? (
+        <KeywordMarketFeaturePanel
+          canManage={adminRoles.includes('SUPER_ADMIN')}
+          canModerate={canModerateCommunity}
+        />
       ) : null}
 
       {admin.state === 'idle' ? (
@@ -121,45 +168,45 @@ export function AdminWorkspace() {
 
       {admin.state === 'ready' && admin.workspace ? (
         <>
-          {admin.principal ? (
-            <SafePayoutPanel
-              principal={admin.principal}
-              status={admin.safeStatus}
-              proposals={admin.safeProposals}
-              pending={admin.transactionPending}
-              delivery={admin.safeDelivery}
-              onDeliveryChange={admin.setSafeDelivery}
-              onTransferOwnership={admin.transferOwnershipToSafe}
-              onProposeOwnershipAcceptance={admin.proposeOwnershipAcceptance}
-              onReopenManualPayout={admin.reopenManualPayout}
-              onCancelManualPayout={admin.cancelManualPayout}
-            />
-          ) : null}
-          {admin.goalManagers && hasWorkspaceAccess ? (
-            <GoalManagerPanel
-              workspace={admin.goalManagers}
-              canManage={Boolean(admin.principal?.roles.some((role) => role === 'SUPER_ADMIN'))}
-              pending={admin.transactionPending}
-              delivery={admin.safeDelivery}
-              onSync={admin.syncGoalManagers}
-              onUpdate={admin.updateGoalManager}
-            />
-          ) : null}
-          {hasWorkspaceAccess && admin.safeGoalActions.length ? (
-            <SafeLifecyclePanel proposals={admin.safeGoalActions} />
-          ) : null}
-          {hasWorkspaceAccess ? (
+          {activeTab === 'operations' ? (
             <>
-              {admin.principal?.roles.some(
-                (role) => role === 'SUPER_ADMIN' || role === 'CONTENT_ADMIN',
-              ) ? (
-                <ForumModerationPanel />
+              {admin.principal ? (
+                <SafePayoutPanel
+                  principal={admin.principal}
+                  status={admin.safeStatus}
+                  proposals={admin.safeProposals}
+                  pending={admin.transactionPending}
+                  delivery={admin.safeDelivery}
+                  onDeliveryChange={admin.setSafeDelivery}
+                  onTransferOwnership={admin.transferOwnershipToSafe}
+                  onProposeOwnershipAcceptance={admin.proposeOwnershipAcceptance}
+                  onReopenManualPayout={admin.reopenManualPayout}
+                  onCancelManualPayout={admin.cancelManualPayout}
+                />
               ) : null}
-              {admin.principal?.roles.some(
-                (role) => role === 'SUPER_ADMIN' || role === 'CONTENT_ADMIN',
-              ) ? (
-                <CommunityModerationPanel onDraftCreated={admin.load} />
+              {admin.goalManagers && hasWorkspaceAccess ? (
+                <GoalManagerPanel
+                  workspace={admin.goalManagers}
+                  canManage={Boolean(admin.principal?.roles.some((role) => role === 'SUPER_ADMIN'))}
+                  pending={admin.transactionPending}
+                  delivery={admin.safeDelivery}
+                  onSync={admin.syncGoalManagers}
+                  onUpdate={admin.updateGoalManager}
+                />
               ) : null}
+              {hasWorkspaceAccess && admin.safeGoalActions.length ? (
+                <SafeLifecyclePanel proposals={admin.safeGoalActions} />
+              ) : null}
+            </>
+          ) : null}
+          {activeTab === 'forum' && hasWorkspaceAccess && canModerateCommunity ? (
+            <>
+              <ForumModerationPanel />
+              <CommunityModerationPanel onDraftCreated={admin.load} />
+            </>
+          ) : null}
+          {activeTab === 'goals' && hasWorkspaceAccess ? (
+            <>
               <AdminCreationForms
                 workspace={admin.workspace}
                 onCreateSubproject={admin.createSubproject}

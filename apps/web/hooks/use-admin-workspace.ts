@@ -52,6 +52,7 @@ export function useAdminWorkspace() {
   const [safeGoalActions, setSafeGoalActions] = useState<AdminSafeGoalActionProposal[]>([]);
   const [goalManagers, setGoalManagers] = useState<AdminGoalManagerWorkspace | null>(null);
   const [state, setState] = useState<AdminWorkspaceState>('idle');
+  const [refreshPending, setRefreshPending] = useState(false);
   const [notice, setNotice] = useState<StatusNoticeState | null>(null);
   const [proofHash, setProofHash] = useState('');
   const [transactionPending, setTransactionPending] = useState(false);
@@ -106,8 +107,8 @@ export function useAdminWorkspace() {
     }
   }
 
-  const load = useCallback(async () => {
-    setState('loading');
+  const load = useCallback(async (showLoading = true) => {
+    if (showLoading) setState('loading');
     try {
       const [nextPrincipal, nextSafeStatus] = await Promise.all([
         clientApiJson<AdminSessionPrincipal>('/v1/auth/me', undefined, 'Session API'),
@@ -514,21 +515,23 @@ export function useAdminWorkspace() {
       return;
     }
 
-    setState('loading');
+    setRefreshPending(true);
     try {
       await clientApiRequest(
         '/v1/admin/goal-managers/refresh',
         { method: 'POST' },
         'Goal manager data refresh',
       );
-      await load();
+      await load(false);
       setNotice({ type: 'success', message: 'Safe data refreshed.' });
     } catch (error) {
-      await load().catch(() => undefined);
+      await load(false).catch(() => undefined);
       setNotice({
         type: 'error',
         message: error instanceof Error ? error.message : 'Could not refresh the admin data.',
       });
+    } finally {
+      setRefreshPending(false);
     }
   }
 
@@ -1144,6 +1147,7 @@ export function useAdminWorkspace() {
     notice,
     principal,
     proofHash,
+    refreshPending,
     proposeOwnershipAcceptance,
     publish,
     refreshData,
