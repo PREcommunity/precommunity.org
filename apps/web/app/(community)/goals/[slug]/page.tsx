@@ -107,8 +107,6 @@ export default async function GoalPage({
         </div>
       </section>
 
-      {goal.monthly && periods ? <MonthlyGoalPanel goal={goal} periods={periods} /> : null}
-
       <section className="py-9">
         <header className="mb-5">
           <span className="font-mono text-[11px] tracking-[.05em] text-blue uppercase">
@@ -122,6 +120,8 @@ export default async function GoalPage({
           ))}
         </div>
       </section>
+
+      {goal.monthly && periods ? <MonthlyGoalPanel goal={goal} periods={periods} /> : null}
 
       <section className="grid grid-cols-[minmax(0,1fr)_340px] gap-10 border-t border-line pt-9 max-[900px]:grid-cols-1">
         <div>
