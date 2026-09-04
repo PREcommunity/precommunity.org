@@ -204,6 +204,24 @@ describe('monthly public projection', () => {
       beneficiaryAvailable: '5',
     });
   });
+
+  it('prefers verified discussion metadata and rejects unsafe draft URLs', () => {
+    const discussionUrl = 'https://example.org/community/forum/infrastructure';
+    const project = (overrides: Record<string, unknown>) =>
+      mapPublicFundingGoal({ ...goal, ...overrides } as never, new Map(), new Map());
+
+    expect(
+      project({
+        metadataStatus: MetadataStatus.AVAILABLE,
+        metadata: { schema: 'precommunity.goal-metadata.v1', discussionUrl },
+        expense: { discussionUrl: 'https://example.org/another-discussion' },
+      }).discussionUrl,
+    ).toBe(discussionUrl);
+    expect(project({ expense: { discussionUrl: 'javascript:alert(1)' } }).discussionUrl).toBe(
+      undefined,
+    );
+    expect(project({ expense: null }).discussionUrl).toBeUndefined();
+  });
 });
 
 describe('public goal metadata', () => {
@@ -533,6 +551,7 @@ describe('funding dashboard queries', () => {
         deadline: new Date(now.getTime() + 60_000),
         metadataStatus: MetadataStatus.NOT_SET,
         metadata: null,
+        expense: { discussionUrl: 'https://example.org/community/forum/infrastructure' },
         chainGoalId: `0x${'11'.repeat(32)}`,
         recipientAddress: address,
         preTargetRaw: '3000000000000000000',
@@ -593,9 +612,23 @@ describe('funding dashboard queries', () => {
       funded: '2',
       released: '1',
     });
+    expect(dashboard.goals[0]?.discussionUrl).toBe(
+      'https://example.org/community/forum/infrastructure',
+    );
     expect(dashboard.activity).toHaveLength(2);
     expect(findGoals.mock.calls[0]![0]).toMatchObject({
       where: {
+        chainId: config.deployment.chainId,
+        creationTxHash: { not: null },
+        creationBlock: { not: null },
+        status: {
+          in: [
+            FundingGoalStatus.OPEN,
+            FundingGoalStatus.CLOSED,
+            FundingGoalStatus.SETTLED,
+            FundingGoalStatus.CANCELLED,
+          ],
+        },
         OR: expect.arrayContaining([
           {
             goalType: FundingGoalType.ONE_TIME,
@@ -617,6 +650,7 @@ describe('funding dashboard queries', () => {
         ]),
       },
       include: {
+        expense: { select: { discussionUrl: true } },
         periods: {
           where: {
             startsAt: { lt: new Date('2026-09-01T00:00:00.000Z') },

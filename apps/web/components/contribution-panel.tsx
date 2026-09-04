@@ -9,7 +9,7 @@ import {
   type GoalSummary,
   type SponsorVisibility,
 } from '@precommunity/shared';
-import { formatEther, getAddress, parseUnits } from 'viem';
+import { erc20Abi, formatEther, getAddress, parseUnits } from 'viem';
 import {
   useAccount,
   usePublicClient,
@@ -21,25 +21,6 @@ import { activeChain, activeDeployment } from '@/lib/deployment';
 import { requireSuccessfulReceipt } from '@/lib/transactions';
 import { ActionButton } from './action-button';
 
-const erc20Abi = [
-  {
-    type: 'function',
-    name: 'balanceOf',
-    stateMutability: 'view',
-    inputs: [{ name: 'account', type: 'address' }],
-    outputs: [{ name: '', type: 'uint256' }],
-  },
-  {
-    type: 'function',
-    name: 'approve',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'spender', type: 'address' },
-      { name: 'amount', type: 'uint256' },
-    ],
-    outputs: [{ name: '', type: 'bool' }],
-  },
-] as const;
 const APPROVAL_CONFIRMATIONS = 3;
 const zeroAddress = '0x0000000000000000000000000000000000000000' as const;
 
@@ -203,7 +184,11 @@ export function ContributionPanel({ goal }: { goal: GoalSummary }) {
   }
 
   return (
-    <section className="border border-line bg-white p-[18px]" aria-labelledby="contribute-title">
+    <section
+      id="contribute"
+      className="scroll-mt-[calc(var(--header-height)+16px)] border border-line bg-white p-[18px]"
+      aria-labelledby="contribute-title"
+    >
       <span className="font-mono text-[11px] tracking-[.05em] text-blue uppercase">
         Direct to escrow
       </span>

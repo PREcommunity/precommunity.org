@@ -51,6 +51,18 @@ const nextConfig: NextConfig = {
       '@x402/svm/exact/client': disabledX402Module,
     },
   },
+  async headers() {
+    return [
+      {
+        source: '/preview/goals/:path*',
+        headers: [
+          { key: 'Cache-Control', value: 'private, no-store' },
+          { key: 'X-Robots-Tag', value: 'noindex, nofollow, noarchive' },
+          { key: 'Referrer-Policy', value: 'no-referrer' },
+        ],
+      },
+    ];
+  },
   async rewrites() {
     return [
       {

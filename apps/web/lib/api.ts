@@ -7,6 +7,7 @@ import type {
   ForumTopicDetail,
   ForumTopicsPage,
   GoalContributionsPage,
+  GoalPreviewResponse,
   FundingGoalPeriodsPage,
   GoalSummary,
 } from '@precommunity/shared';
@@ -95,6 +96,18 @@ export async function getGoal(slug: string, month?: string): Promise<GoalSummary
     return await serverJson<GoalSummary>(
       `/v1/public/goals/${encodeURIComponent(slug)}${query}`,
       'Verified goal API',
+    );
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  }
+}
+
+export async function getGoalPreview(token: string): Promise<GoalPreviewResponse | null> {
+  try {
+    return await serverJson<GoalPreviewResponse>(
+      `/v1/public/goal-previews/${encodeURIComponent(token)}`,
+      'Goal preview API',
     );
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) return null;

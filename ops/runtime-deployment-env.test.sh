@@ -107,3 +107,31 @@ if runtime_deployment_value base unsupported >/dev/null 2>&1; then
 fi
 
 printf 'Runtime deployment environment tests passed.\n'
+
+validate_fixture() (
+  ESCROW_ADDRESS="$ESCROW_ADDRESS_VALUE"
+  PRE_ADDRESS="$PRE_ADDRESS_VALUE"
+  USDC_ADDRESS="$USDC_ADDRESS_VALUE"
+  INITIAL_OWNER_ADDRESS="$OWNER_ADDRESS_VALUE"
+  TREASURY_ADDRESS="$TREASURY_ADDRESS_VALUE"
+  ESCROW_DEPLOYMENT_BLOCK=123
+  CHAIN_CONFIRMATIONS=''
+  ADS_CONTRACT_ADDRESS_VALUE=''
+  ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE=''
+  if (( $# )); then printf -v "$1" '%s' "$2"; fi
+  validate_runtime_deployment
+)
+
+validate_fixture
+validate_fixture CHAIN_CONFIRMATIONS 1000
+for fixture in 'ESCROW_ADDRESS invalid' 'ESCROW_ADDRESS 0x0000000000000000000000000000000000000000' 'ESCROW_DEPLOYMENT_BLOCK 0' 'CHAIN_CONFIRMATIONS 0' 'CHAIN_CONFIRMATIONS 1001' 'ADS_CONTRACT_ADDRESS_VALUE 0x1111111111111111111111111111111111111111' 'ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE 123'; do
+  read -r field value <<<"$fixture"
+  if validate_fixture "$field" "$value" >/dev/null 2>&1; then
+    echo "Deployment validation accepted invalid $field." >&2
+    exit 1
+  else
+    code="$?"
+    [[ "$code" == 2 ]] || exit 1
+  fi
+done
+printf 'Shared deployment validation tests passed.\n'

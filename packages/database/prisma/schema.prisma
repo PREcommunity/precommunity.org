@@ -434,6 +434,7 @@ model Expense {
   discussionUrl        String?
   metadataUri          String?
   metadataDocuments    Json?
+  previewToken         String?               @unique
   pendingChainGoalId   String?               @unique
   pendingChainTxHash   String?
   activeFrom           DateTime?

@@ -12,7 +12,7 @@ import {
   isDeploymentConfigured,
   isValidIpfsUri,
 } from '@precommunity/shared';
-import { createPublicClient, getAddress, http } from 'viem';
+import { erc20Abi, createPublicClient, getAddress, http } from 'viem';
 import { z } from 'zod';
 import { config } from './config';
 import {
@@ -31,15 +31,6 @@ export {
   visibilityForContribution,
 } from './event-handlers';
 
-const erc20Abi = [
-  {
-    type: 'function',
-    name: 'balanceOf',
-    stateMutability: 'view',
-    inputs: [{ name: 'account', type: 'address' }],
-    outputs: [{ name: '', type: 'uint256' }],
-  },
-] as const;
 const client = createPublicClient({ chain: config.chain, transport: http(config.BASE_RPC_URL) });
 const stateKey = deploymentStateKey(config.deployment);
 const contractAddress = config.deployment.escrowAddress.toLowerCase();

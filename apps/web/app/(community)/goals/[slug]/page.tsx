@@ -1,4 +1,4 @@
-import { ArrowLeft, ExternalLink } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ExternalLink } from 'lucide-react';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { ContributionPanel } from '@/components/contribution-panel';
@@ -35,6 +35,9 @@ export default async function GoalPage({
     goal.goalType === 'MONTHLY' ? getGoalPeriods(slug) : Promise.resolve(null),
   ]);
   const transactionUrl = activeExplorerTransaction(goal.creationTxHash);
+  const hasSupportingMaterial = Boolean(
+    goal.discussionUrl || goal.metadataUri || goal.documents.length,
+  );
   return (
     <main className="page-gutter pt-7 pb-[60px]">
       <Link
@@ -45,6 +48,30 @@ export default async function GoalPage({
       >
         <ArrowLeft size={16} /> Back to verified goals
       </Link>
+      <section className="py-9">
+        <header className="mb-5 flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <span className="font-mono text-[11px] tracking-[.05em] text-blue uppercase">
+              Confirmed balances
+            </span>
+            <h2 className="mt-1.5 text-2xl leading-[1.15] tracking-[-.025em]">Funding progress</h2>
+          </div>
+          {goal.status === 'OPEN' ? (
+            <a
+              className="ml-auto inline-flex min-h-11 shrink-0 items-center justify-center gap-1.5 rounded-md border border-navy bg-navy px-4 font-bold text-white transition-colors duration-150 hover:border-blue hover:bg-blue hover:text-navy dark:hover:bg-blue-soft dark:hover:text-white"
+              href="#contribute"
+            >
+              Contribute <ArrowDown size={16} aria-hidden="true" />
+            </a>
+          ) : null}
+        </header>
+        <div className="grid grid-cols-2 gap-8 max-sm:grid-cols-1">
+          {goal.progress.map((item) => (
+            <FundingMeter item={item} key={item.asset} />
+          ))}
+        </div>
+      </section>
+
       <section className="grid grid-cols-[minmax(0,1fr)_260px] items-end gap-10 border-b border-navy py-7 max-[900px]:grid-cols-1">
         <div>
           <span className="inline-flex items-center gap-1.5 font-mono text-[11px] tracking-[.05em] text-blue uppercase">
@@ -56,6 +83,16 @@ export default async function GoalPage({
           <p className="m-0 max-w-[760px] whitespace-pre-wrap text-muted">
             {goal.description || 'No description.'}
           </p>
+          {goal.discussionUrl ? (
+            <a
+              className="mt-5 inline-flex min-h-11 items-center justify-center gap-1.5 rounded-md border border-navy bg-white px-4 font-bold transition-colors duration-150 hover:border-blue hover:bg-blue-soft"
+              href={goal.discussionUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Forum discussion <ExternalLink size={15} aria-hidden="true" />
+            </a>
+          ) : null}
           <ShareLinks kind="goal" title={goal.title} />
         </div>
         <a
@@ -107,71 +144,8 @@ export default async function GoalPage({
         </div>
       </section>
 
-      <section className="py-9">
-        <header className="mb-5">
-          <span className="font-mono text-[11px] tracking-[.05em] text-blue uppercase">
-            Confirmed balances
-          </span>
-          <h2 className="mt-1.5 text-2xl leading-[1.15] tracking-[-.025em]">Funding progress</h2>
-        </header>
-        <div className="grid grid-cols-2 gap-8 max-sm:grid-cols-1">
-          {goal.progress.map((item) => (
-            <FundingMeter item={item} key={item.asset} />
-          ))}
-        </div>
-      </section>
-
-      {goal.monthly && periods ? <MonthlyGoalPanel goal={goal} periods={periods} /> : null}
-
-      <section className="grid grid-cols-[minmax(0,1fr)_340px] gap-10 border-t border-line pt-9 max-[900px]:grid-cols-1">
-        <div>
-          <span className="font-mono text-[11px] tracking-[.05em] text-blue uppercase">
-            Optional context
-          </span>
-          <h2 className="mt-1.5 text-2xl leading-[1.15] tracking-[-.025em]">
-            {goal.metadataStatus === 'AVAILABLE' ? 'Supporting material' : 'No supporting material'}
-          </h2>
-          <p className="m-0 text-muted">
-            {goal.metadataStatus === 'AVAILABLE'
-              ? 'Links attached to this goal.'
-              : goal.metadataStatus === 'NOT_SET'
-                ? 'No metadata attached.'
-                : 'Metadata unavailable.'}
-          </p>
-          <div className="mt-4 flex flex-wrap gap-3.5">
-            {goal.discussionUrl ? (
-              <a
-                className="inline-flex items-center gap-1.5 text-xs text-blue"
-                href={goal.discussionUrl}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Community discussion <ExternalLink size={14} />
-              </a>
-            ) : null}
-            {goal.metadataUri ? (
-              <a
-                className="inline-flex items-center gap-1.5 text-xs text-blue"
-                href={`https://ipfs.io/ipfs/${goal.metadataUri.slice(7)}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                IPFS reference <ExternalLink size={14} />
-              </a>
-            ) : null}
-            {goal.documents.map((document) => (
-              <a
-                className="inline-flex items-center gap-1.5 text-xs text-blue"
-                href={document.url}
-                target="_blank"
-                rel="noreferrer"
-                key={`${document.label}-${document.url}`}
-              >
-                {document.label} <ExternalLink size={14} />
-              </a>
-            ))}
-          </div>
-        </div>
+      <div className="grid grid-cols-[minmax(0,1fr)_340px] items-start gap-10 py-9 max-[900px]:grid-cols-1">
+        <GoalContributions slug={slug} initialPage={contributions} />
         {goal.status === 'SETTLED' ? (
           <aside
             className="border border-line bg-white p-[18px]"
@@ -229,8 +203,52 @@ export default async function GoalPage({
         ) : (
           <ContributionPanel goal={goal} />
         )}
-      </section>
-      <GoalContributions slug={slug} initialPage={contributions} />
+      </div>
+
+      {goal.monthly && periods ? <MonthlyGoalPanel goal={goal} periods={periods} /> : null}
+
+      {hasSupportingMaterial ? (
+        <section className="border-t border-line py-9">
+          <span className="font-mono text-[11px] tracking-[.05em] text-blue uppercase">
+            Optional context
+          </span>
+          <h2 className="mt-1.5 text-2xl leading-[1.15] tracking-[-.025em]">Supporting material</h2>
+          <p className="m-0 text-muted">Links attached to this goal.</p>
+          <div className="mt-4 flex flex-wrap gap-3.5">
+            {goal.discussionUrl ? (
+              <a
+                className="inline-flex items-center gap-1.5 text-xs text-blue"
+                href={goal.discussionUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Community discussion <ExternalLink size={14} />
+              </a>
+            ) : null}
+            {goal.metadataUri ? (
+              <a
+                className="inline-flex items-center gap-1.5 text-xs text-blue"
+                href={`https://ipfs.io/ipfs/${goal.metadataUri.slice(7)}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                IPFS reference <ExternalLink size={14} />
+              </a>
+            ) : null}
+            {goal.documents.map((document) => (
+              <a
+                className="inline-flex items-center gap-1.5 text-xs text-blue"
+                href={document.url}
+                target="_blank"
+                rel="noreferrer"
+                key={`${document.label}-${document.url}`}
+              >
+                {document.label} <ExternalLink size={14} />
+              </a>
+            ))}
+          </div>
+        </section>
+      ) : null}
     </main>
   );
 }

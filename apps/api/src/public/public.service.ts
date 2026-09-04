@@ -9,6 +9,7 @@ import {
   UnsupportedMediaTypeException,
 } from '@nestjs/common';
 import {
+  ExpenseStatus,
   FundingAsset,
   FundingGoalType,
   FundingGoalStatus,
@@ -18,8 +19,15 @@ import {
   Prisma,
   SponsorVisibility,
 } from '@precommunity/database';
-import type { AssetCode, DashboardResponse, GoalContributionsPage } from '@precommunity/shared';
+import type {
+  AssetCode,
+  DashboardResponse,
+  GoalContributionsPage,
+  GoalPreviewResponse,
+} from '@precommunity/shared';
 import {
+  PROJECT_SLUG,
+  canonicalGoalMetadata,
   deploymentStateKey,
   explorerTransactionUrl,
   isDeploymentConfigured,
@@ -225,6 +233,96 @@ interface FundingAmountAggregateRow {
 export class PublicService {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
+  async goalPreview(token: string): Promise<GoalPreviewResponse> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new NotFoundException('Preview not found');
+    const draft = await this.prisma.expense.findUnique({
+      where: {
+        previewToken: token,
+        archivedAt: null,
+        status: { in: [ExpenseStatus.DRAFT, ExpenseStatus.PENDING_CHAIN, ExpenseStatus.PUBLISHED] },
+        subproject: { project: { slug: PROJECT_SLUG } },
+      },
+      select: {
+        name: true,
+        purpose: true,
+        status: true,
+        category: true,
+        cadence: true,
+        recipientAddress: true,
+        deadline: true,
+        monthlySurplusPolicy: true,
+        firstSettlementAtOverride: true,
+        discussionUrl: true,
+        metadataUri: true,
+        metadataDocuments: true,
+        subproject: { select: { name: true, slug: true } },
+        targets: { select: { asset: true, amount: true } },
+        goals: {
+          where: {
+            chainId: config.deployment.chainId,
+            creationTxHash: { not: null },
+            creationBlock: { not: null },
+            status: {
+              in: [
+                FundingGoalStatus.OPEN,
+                FundingGoalStatus.CLOSED,
+                FundingGoalStatus.SETTLED,
+                FundingGoalStatus.CANCELLED,
+              ],
+            },
+          },
+          orderBy: { creationBlock: 'desc' },
+          take: 1,
+          select: { slug: true },
+        },
+      },
+    });
+    if (!draft) throw new NotFoundException('Preview not found');
+    if (draft.goals[0]) return { kind: 'published', slug: draft.goals[0].slug };
+    if (draft.status !== ExpenseStatus.DRAFT && draft.status !== ExpenseStatus.PENDING_CHAIN)
+      throw new NotFoundException('Preview not found');
+
+    const documents = Array.isArray(draft.metadataDocuments)
+      ? draft.metadataDocuments.flatMap((document) =>
+          document &&
+          typeof document === 'object' &&
+          !Array.isArray(document) &&
+          typeof document.label === 'string' &&
+          typeof document.url === 'string'
+            ? [{ label: document.label, url: document.url }]
+            : [],
+        )
+      : [];
+    const metadata = canonicalGoalMetadata({
+      category: draft.category ?? undefined,
+      subproject: draft.subproject,
+      discussionUrl: draft.discussionUrl ?? undefined,
+      documents,
+    });
+    return {
+      kind: 'draft',
+      draft: {
+        title: draft.name,
+        description: draft.purpose,
+        status: draft.status,
+        category: metadata.category ?? null,
+        subproject: metadata.subproject ?? null,
+        recipientAddress: draft.recipientAddress,
+        cadence: draft.cadence,
+        deadline: draft.deadline?.toISOString() ?? null,
+        monthlySurplusPolicy: draft.monthlySurplusPolicy,
+        firstSettlementAt: draft.firstSettlementAtOverride?.toISOString() ?? null,
+        discussionUrl: metadata.discussionUrl ?? null,
+        metadataUri:
+          draft.metadataUri && isValidIpfsUri(draft.metadataUri) ? draft.metadataUri : null,
+        documents: metadata.documents ?? [],
+        targets: draft.targets
+          .map((target) => ({ asset: target.asset, amount: target.amount.toString() }))
+          .filter((target) => target.amount !== '0'),
+      },
+    };
+  }
+
   private async syncState() {
     if (!isDeploymentConfigured(config.deployment)) return null;
     const state = await this.prisma.indexerState.findUnique({
@@ -297,6 +395,7 @@ export class PublicService {
         },
       },
       include: {
+        expense: { select: { discussionUrl: true } },
         periods: {
           where: {
             startsAt: { lt: nextMonth },

@@ -21,6 +21,8 @@ describe('AdminController identifiers', () => {
     'convertProposal',
     'updateExpense',
     'archiveExpense',
+    'createExpensePreviewLink',
+    'revokeExpensePreviewLink',
     'publishExpense',
     'markExpenseSubmitted',
     'close',
@@ -36,6 +38,11 @@ describe('AdminController identifiers', () => {
 });
 
 describe('AdminController Safe ownership authorization', () => {
+  it('restricts preview link changes to content and super administrators', () => {
+    expect(routeRoles('createExpensePreviewLink')).toEqual([Role.SUPER_ADMIN, Role.CONTENT_ADMIN]);
+    expect(routeRoles('revokeExpensePreviewLink')).toEqual([Role.SUPER_ADMIN, Role.CONTENT_ADMIN]);
+  });
+
   it('leaves Safe status and acceptance available to any authenticated wallet', () => {
     expect(routeRoles('safeStatus')).toBeUndefined();
     expect(routeRoles('prepareSafeOwnershipAcceptance')).toBeUndefined();

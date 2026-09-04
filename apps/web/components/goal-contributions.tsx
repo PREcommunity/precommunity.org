@@ -38,7 +38,7 @@ export function GoalContributions({
   }
 
   return (
-    <section className="mt-10 border-t border-line pt-9" aria-labelledby="goal-contributions-title">
+    <section className="min-w-0" aria-labelledby="goal-contributions-title">
       <header className="mb-5">
         <span className="font-mono text-[11px] tracking-[.05em] text-blue uppercase">
           Confirmed on Base

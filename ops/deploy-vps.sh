@@ -4,6 +4,9 @@ set -Eeuo pipefail
 umask 027
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/runtime-deployment-env.sh"
 readonly REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 readonly REPOSITORY_ENV_FILE="$REPO_ROOT/.env"
 
@@ -132,42 +135,7 @@ if [[ -n "$WALLETCONNECT_PROJECT_ID" && ! "$WALLETCONNECT_PROJECT_ID" =~ ^[a-fA-
   exit 2
 fi
 
-require_address() {
-  local name="$1"
-  local value="$2"
-  if [[ ! "$value" =~ ^0x[a-fA-F0-9]{40}$ || "$value" =~ ^0x0{40}$ ]]; then
-    printf '%s must be a non-zero 20-byte hexadecimal address.\n' "$name" >&2
-    exit 2
-  fi
-}
-
-require_address PUBLIC_ESCROW_ADDRESS "$ESCROW_ADDRESS"
-require_address PUBLIC_PRE_ADDRESS "$PRE_ADDRESS"
-require_address PUBLIC_USDC_ADDRESS "$USDC_ADDRESS"
-require_address PUBLIC_INITIAL_OWNER_ADDRESS "$INITIAL_OWNER_ADDRESS"
-require_address PUBLIC_TREASURY_ADDRESS "$TREASURY_ADDRESS"
-if [[ ! "$ESCROW_DEPLOYMENT_BLOCK" =~ ^[1-9][0-9]*$ ]]; then
-  echo 'PUBLIC_ESCROW_DEPLOYMENT_BLOCK must be a positive integer.' >&2
-  exit 2
-fi
-if [[ -n "$CHAIN_CONFIRMATIONS" ]] &&
-  { [[ ! "$CHAIN_CONFIRMATIONS" =~ ^[0-9]+$ ]] || (( CHAIN_CONFIRMATIONS < 1 || CHAIN_CONFIRMATIONS > 1000 )); }; then
-  echo 'PUBLIC_CHAIN_CONFIRMATIONS must be an integer from 1 to 1000.' >&2
-  exit 2
-fi
-if [[ -n "$ADS_CONTRACT_ADDRESS_VALUE" && ! "$ADS_CONTRACT_ADDRESS_VALUE" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
-  echo 'ADS_CONTRACT_ADDRESS must be a 20-byte hexadecimal address.' >&2
-  exit 2
-fi
-if [[ -n "$ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE" && ! "$ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE" =~ ^[0-9]+$ ]]; then
-  echo 'ADS_CONTRACT_DEPLOYMENT_BLOCK must be a non-negative integer.' >&2
-  exit 2
-fi
-if [[ -n "$ADS_CONTRACT_ADDRESS_VALUE" && -z "$ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE" ]] ||
-  [[ -z "$ADS_CONTRACT_ADDRESS_VALUE" && -n "$ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE" ]]; then
-  echo 'ADS_CONTRACT_ADDRESS and ADS_CONTRACT_DEPLOYMENT_BLOCK must be configured together.' >&2
-  exit 2
-fi
+validate_runtime_deployment
 
 printf 'Creating release %s on %s...\n' "$RELEASE_ID" "$SSH_HOST"
 ssh "$SSH_HOST" sudo install -d -o "$APP_USER" -g "$APP_USER" -m 0755 "$RELEASE_DIR"

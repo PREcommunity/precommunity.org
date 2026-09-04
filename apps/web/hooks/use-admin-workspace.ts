@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import Safe, { type Eip1193Provider } from '@safe-global/protocol-kit';
+import { type Eip1193Provider } from '@safe-global/protocol-kit';
 import { OperationType } from '@safe-global/types-kit';
 import { isDeploymentConfigured } from '@precommunity/shared';
 import { getAddress, type Hex } from 'viem';
@@ -9,6 +9,7 @@ import { useAccount, usePublicClient, useSendTransaction, useSwitchChain } from 
 import { canAccessSafeOwnershipAcceptance, hasAdminWorkspaceRole } from '@/lib/admin-access';
 import { AUTH_CHANGED_EVENT } from '@/lib/auth-events';
 import { activeChain, activeDeployment, activeExplorerTransaction } from '@/lib/deployment';
+import { signSafeProposal } from '@/lib/sign-safe-proposal';
 import { ApiError, clientApiJson, clientApiRequest } from '@/lib/http';
 import type {
   AdminGoalDraftInput,
@@ -25,7 +26,6 @@ import type {
   AdminSafePayoutProposal,
   AdminSafeOwnershipAcceptance,
   AdminSafeOwnershipAcceptancePreparation,
-  AdminSafeProposalSubmission,
   AdminSafeStatus,
   AdminSessionPrincipal,
   AdminSubproject,
@@ -425,34 +425,24 @@ export function useAdminWorkspace() {
         requireMatchingTransactionDeployment(transaction, activeDeployment);
       }
       const provider = (await connector.getProvider()) as Eip1193Provider | undefined;
-      if (!provider) throw new Error('The connected wallet provider is unavailable.');
-      const protocolKit = await Safe.init({
+      const submission = await signSafeProposal(
         provider,
-        signer: address,
-        safeAddress: request.safeAddress,
-      });
-      const safeTransaction = await protocolKit.createTransaction({
-        transactions: request.transactions.map((transaction) => ({
-          to: transaction.to,
-          value: transaction.value,
-          data: transaction.data,
-          operation: transaction.operation,
+        address,
+        request.safeAddress,
+        request.safeNonce,
+        request.transactions.map(({ to, value, data, operation }) => ({
+          to,
+          value,
+          data,
+          operation,
         })),
-        options: { nonce: request.safeNonce },
-      });
-      const safeTxHash = (await protocolKit.getTransactionHash(safeTransaction)) as Hex;
-      const signature = await protocolKit.signHash(safeTxHash);
+      );
       const proposal = await clientApiJson<AdminSafeGoalManagerProposal>(
         `/v1/admin/goal-manager-intents/${request.intentId}/submit`,
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            transaction: safeTransaction.data,
-            safeTxHash,
-            senderAddress: address,
-            senderSignature: signature.data as Hex,
-          } satisfies AdminSafeProposalSubmission),
+          body: JSON.stringify(submission),
         },
         'Safe goal manager submission',
       );
@@ -592,7 +582,7 @@ export function useAdminWorkspace() {
       setNotice({
         type: 'success',
         message:
-          'Goal draft saved. It is ready to publish; optional IPFS metadata can be added first.',
+          'Goal draft saved. Create a preview link to share it for feedback, or sign and publish when ready.',
       });
       await load();
       return true;
@@ -679,6 +669,38 @@ export function useAdminWorkspace() {
     }
   }
 
+  async function setPreviewSharing(id: string, enabled: boolean) {
+    try {
+      const { previewPath } = await clientApiJson<{ previewPath: string | null }>(
+        `/v1/admin/expenses/${id}/preview-link`,
+        { method: enabled ? 'POST' : 'DELETE' },
+        'Preview link',
+      );
+      setWorkspace(
+        (current) =>
+          current?.map((subproject) => ({
+            ...subproject,
+            expenses: subproject.expenses.map((draft) =>
+              draft.id === id ? { ...draft, previewPath } : draft,
+            ),
+          })) ?? null,
+      );
+      setNotice({
+        type: 'success',
+        message: enabled
+          ? 'Preview link ready. Anyone with the link can view the latest saved draft.'
+          : 'Preview link revoked. The old link no longer opens this request.',
+      });
+      return true;
+    } catch (error) {
+      setNotice({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Could not update preview sharing.',
+      });
+      return false;
+    }
+  }
+
   function closeGoal(id: string) {
     return requestAndExecute(
       `/v1/admin/goals/${id}/close-proposal`,
@@ -760,14 +782,12 @@ export function useAdminWorkspace() {
       if (chainId !== activeChain.id) await switchChainAsync({ chainId: activeChain.id });
       requireMatchingTransactionDeployment(intent.transactionRequest, activeDeployment);
       const provider = (await connector.getProvider()) as Eip1193Provider | undefined;
-      if (!provider) throw new Error('The connected wallet provider is unavailable.');
-      const protocolKit = await Safe.init({
+      const submission = await signSafeProposal(
         provider,
-        signer: address,
-        safeAddress: intent.safeAddress,
-      });
-      const safeTransaction = await protocolKit.createTransaction({
-        transactions: [
+        address,
+        intent.safeAddress,
+        intent.safeNonce,
+        [
           {
             to: intent.transactionRequest.to,
             value: intent.transactionRequest.value,
@@ -775,16 +795,7 @@ export function useAdminWorkspace() {
             operation: OperationType.Call,
           },
         ],
-        options: { nonce: intent.safeNonce },
-      });
-      const safeTxHash = (await protocolKit.getTransactionHash(safeTransaction)) as Hex;
-      const signature = await protocolKit.signHash(safeTxHash);
-      const submission: AdminSafeProposalSubmission = {
-        transaction: safeTransaction.data,
-        safeTxHash,
-        senderAddress: address,
-        senderSignature: signature.data as Hex,
-      };
+      );
       const proposal = await clientApiJson<AdminSafePayoutProposal>(
         `/v1/admin/safe-payout-intents/${intent.id}/submit`,
         {
@@ -879,14 +890,12 @@ export function useAdminWorkspace() {
       const intent = preparation;
       requireMatchingTransactionDeployment(intent.transactionRequest, activeDeployment);
       const provider = (await connector.getProvider()) as Eip1193Provider | undefined;
-      if (!provider) throw new Error('The connected wallet provider is unavailable.');
-      const protocolKit = await Safe.init({
+      const submission = await signSafeProposal(
         provider,
-        signer: address,
-        safeAddress: intent.safeAddress,
-      });
-      const safeTransaction = await protocolKit.createTransaction({
-        transactions: [
+        address,
+        intent.safeAddress,
+        intent.safeNonce,
+        [
           {
             to: intent.transactionRequest.to,
             value: intent.transactionRequest.value,
@@ -894,21 +903,13 @@ export function useAdminWorkspace() {
             operation: OperationType.Call,
           },
         ],
-        options: { nonce: intent.safeNonce },
-      });
-      const safeTxHash = (await protocolKit.getTransactionHash(safeTransaction)) as Hex;
-      const signature = await protocolKit.signHash(safeTxHash);
+      );
       const proposal = await clientApiJson<AdminSafeGoalActionProposal>(
         `/v1/admin/safe-goal-action-intents/${intent.id}/submit`,
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            transaction: safeTransaction.data,
-            safeTxHash,
-            senderAddress: address,
-            senderSignature: signature.data as Hex,
-          } satisfies AdminSafeProposalSubmission),
+          body: JSON.stringify(submission),
         },
         'Safe lifecycle submission',
       );
@@ -1006,14 +1007,12 @@ export function useAdminWorkspace() {
       }
 
       const provider = (await connector.getProvider()) as Eip1193Provider | undefined;
-      if (!provider) throw new Error('The connected wallet provider is unavailable.');
-      const protocolKit = await Safe.init({
+      const submission = await signSafeProposal(
         provider,
-        signer: address,
-        safeAddress: request.safeAddress,
-      });
-      const safeTransaction = await protocolKit.createTransaction({
-        transactions: [
+        address,
+        request.safeAddress,
+        request.safeNonce,
+        [
           {
             to: request.transactionRequest.to,
             value: request.transactionRequest.value,
@@ -1021,17 +1020,8 @@ export function useAdminWorkspace() {
             operation: OperationType.Call,
           },
         ],
-        options: { nonce: request.safeNonce },
-      });
-      const safeTxHash = (await protocolKit.getTransactionHash(safeTransaction)) as Hex;
-      const signature = await protocolKit.signHash(safeTxHash);
+      );
       signed = true;
-      const submission: AdminSafeProposalSubmission = {
-        transaction: safeTransaction.data,
-        safeTxHash,
-        senderAddress: address,
-        senderSignature: signature.data as Hex,
-      };
       const proposal = await clientApiJson<AdminSafeOwnershipAcceptance>(
         '/v1/admin/safe/ownership-acceptance/submit',
         {
@@ -1158,6 +1148,7 @@ export function useAdminWorkspace() {
     safeGoalActions,
     safeStatus,
     setSafeDelivery,
+    setPreviewSharing,
     state,
     transactionExplorerUrl: proofHash ? activeExplorerTransaction(proofHash) : null,
     transactionPending,

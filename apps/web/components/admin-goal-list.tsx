@@ -13,6 +13,7 @@ import type {
 } from '@/lib/admin-workspace-types';
 import { ActionButton } from './action-button';
 import { AdminGoalEditForm } from './admin-goal-edit-form';
+import { AdminGoalPreviewLink } from './admin-goal-preview-link';
 import { monthlyPeriodPreview } from './monthly-schedule-fields';
 
 interface AdminGoalListProps {
@@ -22,10 +23,12 @@ interface AdminGoalListProps {
   canProposeSafePayout: boolean;
   safeDelivery: AdminSafeDelivery;
   canManageGoals: boolean;
+  canSharePreviews: boolean;
   currentAddress?: string;
   chainAuthorities: Array<'OWNER' | 'GOAL_MANAGER'>;
   onPublish: (id: string) => Promise<void>;
   onUpdateDraft: (id: string, input: AdminGoalDraftUpdateInput) => Promise<boolean>;
+  onPreviewSharingChange: (id: string, enabled: boolean) => Promise<boolean>;
   onCloseGoal: (id: string) => Promise<void>;
   onCancelGoal: (id: string) => Promise<void>;
   onLifecycle: (
@@ -120,10 +123,12 @@ export function AdminGoalList({
   canProposeSafePayout,
   safeDelivery,
   canManageGoals,
+  canSharePreviews,
   currentAddress,
   chainAuthorities,
   onPublish,
   onUpdateDraft,
+  onPreviewSharingChange,
   onCloseGoal,
   onCancelGoal,
   onLifecycle,
@@ -225,6 +230,12 @@ export function AdminGoalList({
                     <Check size={14} /> Chain published
                   </span>
                 )}
+                <AdminGoalPreviewLink
+                  draft={draft}
+                  editing={editingDraftId === draft.id}
+                  canManage={canSharePreviews}
+                  onChange={(enabled) => onPreviewSharingChange(draft.id, enabled)}
+                />
                 {schedule && surplus ? (
                   <div className="col-span-full grid grid-cols-2 gap-x-8 gap-y-3 border-t border-line pt-3 max-sm:grid-cols-1">
                     <span className="flex flex-col">

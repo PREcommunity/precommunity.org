@@ -10,6 +10,7 @@ trap 'rm -rf -- "$TEST_ROOT"' EXIT
 
 mkdir -p "$TEST_ROOT/ops" "$TEST_ROOT/bin"
 install -m 0755 "$DEPLOY_SCRIPT" "$TEST_ROOT/ops/deploy-vps.sh"
+install -m 0644 "$SCRIPT_DIR/runtime-deployment-env.sh" "$TEST_ROOT/ops/runtime-deployment-env.sh"
 
 cat >"$TEST_ROOT/.env" <<'EOF'
 PRECOMMUNITY_NETWORK=base

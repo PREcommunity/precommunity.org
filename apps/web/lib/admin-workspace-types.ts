@@ -57,6 +57,7 @@ export interface AdminGoalDraft {
   discussionUrl?: string | null;
   metadataUri?: string | null;
   metadataDocuments?: GoalDocument[] | null;
+  previewPath?: string | null;
   pendingChainTxHash?: string;
   targets: AdminTarget[];
   goals?: AdminGoal[];

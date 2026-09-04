@@ -11,6 +11,14 @@ export class PublicController {
     return this.service.dashboard(month);
   }
 
+  @Get('goal-previews/:token')
+  goalPreview(@Param('token') token: string, @Res({ passthrough: true }) response: Response) {
+    response.setHeader('Cache-Control', 'private, no-store');
+    response.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    response.setHeader('Referrer-Policy', 'no-referrer');
+    return this.service.goalPreview(token);
+  }
+
   @Get('goals/:slug')
   goal(@Param('slug') slug: string, @Query('month') month?: string) {
     return this.service.goal(slug, month);

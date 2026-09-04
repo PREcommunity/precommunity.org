@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
@@ -7,6 +8,7 @@ import {
   Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { randomBytes } from 'node:crypto';
 import {
   ChainAuthorityKind,
   CommunityProposalStatus,
@@ -612,8 +614,9 @@ export class AdminService {
 
     return workspace.map((subproject) => ({
       ...subproject,
-      expenses: subproject.expenses.map((expense) => ({
+      expenses: subproject.expenses.map(({ previewToken, ...expense }) => ({
         ...expense,
+        previewPath: previewToken ? `/preview/goals/${previewToken}` : null,
         goals: expense.goals.map((goal) => ({ ...goal, fundingTotals: aggregates.get(goal.id)! })),
       })),
     }));
@@ -846,7 +849,7 @@ export class AdminService {
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.expense.update({
         where: { id },
-        data: { status: ExpenseStatus.ARCHIVED, archivedAt: new Date() },
+        data: { status: ExpenseStatus.ARCHIVED, archivedAt: new Date(), previewToken: null },
       });
       await writeAuditEvent(tx, {
         projectId: project.id,
@@ -856,6 +859,68 @@ export class AdminService {
         action: 'ARCHIVE',
       });
       return updated;
+    });
+  }
+
+  async createExpensePreviewLink(id: string, actor: AuthenticatedPrincipal) {
+    const project = await this.project();
+    return this.prisma.$transaction(async (tx) => {
+      // The conditional update lets concurrent requests reuse the same link.
+      const created = await tx.expense.updateMany({
+        where: {
+          id,
+          subproject: { projectId: project.id },
+          status: { in: [ExpenseStatus.DRAFT, ExpenseStatus.PENDING_CHAIN] },
+          archivedAt: null,
+          previewToken: null,
+        },
+        data: { previewToken: randomBytes(32).toString('base64url') },
+      });
+      const draft = await tx.expense.findFirst({
+        where: { id, subproject: { projectId: project.id }, archivedAt: null },
+        select: { status: true, previewToken: true },
+      });
+      if (!draft || draft.status === ExpenseStatus.ARCHIVED)
+        throw new NotFoundException('Goal draft not found');
+      if (draft.status !== ExpenseStatus.DRAFT && draft.status !== ExpenseStatus.PENDING_CHAIN)
+        throw new BadRequestException('Only an unpublished draft can create a preview link');
+      if (!draft.previewToken)
+        throw new ConflictException('Preview sharing changed. Try creating the link again.');
+      if (created.count) {
+        await writeAuditEvent(tx, {
+          projectId: project.id,
+          actor,
+          entityType: 'GoalDraft',
+          entityId: id,
+          action: 'CREATE_PREVIEW_LINK',
+        });
+      }
+      return { previewPath: `/preview/goals/${draft.previewToken}` };
+    });
+  }
+
+  async revokeExpensePreviewLink(id: string, actor: AuthenticatedPrincipal) {
+    const project = await this.project();
+    return this.prisma.$transaction(async (tx) => {
+      const draft = await tx.expense.findFirst({
+        where: { id, subproject: { projectId: project.id } },
+        select: { id: true },
+      });
+      if (!draft) throw new NotFoundException('Goal draft not found');
+      const revoked = await tx.expense.updateMany({
+        where: { id, previewToken: { not: null } },
+        data: { previewToken: null },
+      });
+      if (revoked.count) {
+        await writeAuditEvent(tx, {
+          projectId: project.id,
+          actor,
+          entityType: 'GoalDraft',
+          entityId: id,
+          action: 'REVOKE_PREVIEW_LINK',
+        });
+      }
+      return { previewPath: null };
     });
   }
 

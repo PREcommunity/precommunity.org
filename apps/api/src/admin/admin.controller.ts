@@ -155,6 +155,24 @@ export class AdminController {
     return this.service.archiveExpense(id, request.principal!);
   }
 
+  @Post('expenses/:id/preview-link')
+  @Roles(Role.SUPER_ADMIN, Role.CONTENT_ADMIN)
+  createExpensePreviewLink(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.service.createExpensePreviewLink(id, request.principal!);
+  }
+
+  @Delete('expenses/:id/preview-link')
+  @Roles(Role.SUPER_ADMIN, Role.CONTENT_ADMIN)
+  revokeExpensePreviewLink(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.service.revokeExpensePreviewLink(id, request.principal!);
+  }
+
   @Post('expenses/:id/publish')
   @Roles(Role.SUPER_ADMIN, Role.CONTENT_ADMIN)
   publishExpense(@Param('id', ParseUUIDPipe) id: string, @Req() request: AuthenticatedRequest) {

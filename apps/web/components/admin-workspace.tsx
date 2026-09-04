@@ -217,6 +217,8 @@ export function AdminWorkspace({ requestedTab }: { requestedTab?: string }) {
                 transactionPending={admin.transactionPending}
                 onPublish={admin.publish}
                 onUpdateDraft={admin.updateDraft}
+                onPreviewSharingChange={admin.setPreviewSharing}
+                canSharePreviews={canModerateCommunity}
                 onCloseGoal={admin.closeGoal}
                 onCancelGoal={admin.cancelGoal}
                 onLifecycle={admin.goalLifecycle}

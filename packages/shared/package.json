@@ -12,5 +12,27 @@
   },
   "devDependencies": {
     "vitest": "^3.2.7"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./server-config": {
+      "types": "./dist/server-config.d.ts",
+      "default": "./dist/server-config.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "server-config": [
+        "dist/server-config.d.ts"
+      ]
+    }
+  },
+  "dependencies": {
+    "viem": "^2.55.10",
+    "zod": "^4.4.3"
   }
 }

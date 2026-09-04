@@ -11,7 +11,7 @@ import SafeApiKit from '@safe-global/api-kit';
 import { getAddress } from 'viem';
 import { config } from './config';
 
-function apiKit() {
+export function createSafeApiKit() {
   return new SafeApiKit({
     chainId: BigInt(config.deployment.chainId),
     ...(config.SAFE_TRANSACTION_SERVICE_URL
@@ -63,6 +63,42 @@ export async function executedSafeTransactionsAtNonce(
   nonce: string,
 ): Promise<SafeTransactionAtNonce[]> {
   return (await safeTransactionsAtNonce(service, safeAddress, nonce, true)) ?? [];
+}
+
+export async function resolveSafeTransaction(
+  service: Pick<SafeApiKit, 'getTransaction' | 'getMultisigTransactions'>,
+  safeAddress: string,
+  proposal: { safeTxHash: string; safeNonce: string },
+  currentNonce: bigint,
+) {
+  let transaction = await service.getTransaction(proposal.safeTxHash);
+  let nonceWasReplaced = false;
+  if (!transaction.isExecuted && BigInt(proposal.safeNonce) < currentNonce) {
+    const executed = await executedSafeTransactionsAtNonce(
+      service,
+      safeAddress,
+      proposal.safeNonce,
+    );
+    const own = executed.find(
+      (candidate) => candidate.safeTxHash.toLowerCase() === proposal.safeTxHash.toLowerCase(),
+    );
+    if (own) transaction = own;
+    else nonceWasReplaced = executed.length > 0;
+  }
+  return { transaction, nonceWasReplaced };
+}
+
+export function recoveredSafeTransaction(
+  transactions: SafeTransactionAtNonce[],
+  safeTxHash: string,
+) {
+  const isOwn = (candidate: SafeTransactionAtNonce) =>
+    candidate.safeTxHash.toLowerCase() === safeTxHash.toLowerCase();
+  const ownExecution = transactions.find((candidate) => candidate.isExecuted && isOwn(candidate));
+  const nonceWasReplaced =
+    !ownExecution && transactions.some((candidate) => candidate.isExecuted && !isOwn(candidate));
+  const ownTransaction = ownExecution ?? (!nonceWasReplaced ? transactions.find(isOwn) : undefined);
+  return { ownTransaction, nonceWasReplaced };
 }
 
 export const SAFE_SUBMITTING_RECOVERY_DELAY_MS = 15 * 60_000;
@@ -284,28 +320,19 @@ export async function syncSafePayoutProposals(prisma: PrismaClient) {
     return { status: 'SYNCED' as const, checked: 0, reconciled, expired };
   }
 
-  const service = apiKit();
+  const service = createSafeApiKit();
   const safeInfo = await service.getSafeInfo(getAddress(config.SAFE_ADDRESS));
   const currentNonce = BigInt(safeInfo.nonce);
   let updated = 0;
 
   for (const proposal of pending) {
     try {
-      const transaction = await service.getTransaction(proposal.safeTxHash);
-      let resolvedTransaction = transaction;
-      let nonceWasReplaced = false;
-      if (!transaction.isExecuted && BigInt(proposal.safeNonce) < currentNonce) {
-        const executedAtNonce = await executedSafeTransactionsAtNonce(
-          service,
-          config.SAFE_ADDRESS,
-          proposal.safeNonce,
-        );
-        const ownExecution = executedAtNonce.find(
-          (candidate) => candidate.safeTxHash.toLowerCase() === proposal.safeTxHash.toLowerCase(),
-        );
-        if (ownExecution) resolvedTransaction = ownExecution;
-        else nonceWasReplaced = executedAtNonce.length > 0;
-      }
+      const { transaction: resolvedTransaction, nonceWasReplaced } = await resolveSafeTransaction(
+        service,
+        config.SAFE_ADDRESS,
+        proposal,
+        currentNonce,
+      );
       const next = classifySafeProposal(
         resolvedTransaction,
         proposal.safeNonce,
@@ -351,26 +378,10 @@ export async function syncSafePayoutProposals(prisma: PrismaClient) {
           });
           continue;
         }
-        const ownExecution = transactionsAtNonce.find(
-          (candidate) =>
-            candidate.isExecuted &&
-            candidate.safeTxHash.toLowerCase() === proposal.safeTxHash.toLowerCase(),
+        const { ownTransaction, nonceWasReplaced } = recoveredSafeTransaction(
+          transactionsAtNonce,
+          proposal.safeTxHash,
         );
-        const nonceWasReplaced =
-          !ownExecution &&
-          transactionsAtNonce.some(
-            (candidate) =>
-              candidate.isExecuted &&
-              candidate.safeTxHash.toLowerCase() !== proposal.safeTxHash.toLowerCase(),
-          );
-        const ownTransaction =
-          ownExecution ??
-          (!nonceWasReplaced
-            ? transactionsAtNonce.find(
-                (candidate) =>
-                  candidate.safeTxHash.toLowerCase() === proposal.safeTxHash.toLowerCase(),
-              )
-            : undefined);
         if (ownTransaction) {
           const next = classifySafeProposal(
             ownTransaction,

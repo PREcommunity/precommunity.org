@@ -4,6 +4,7 @@ import {
   FundingGoalStatus,
   MetadataStatus,
   PayoutKind,
+  type Expense,
   type FundingGoal,
   type FundingGoalPeriod,
 } from '@precommunity/database';
@@ -56,7 +57,10 @@ export function metadataFrom(value: unknown): GoalMetadata | undefined {
 }
 
 export function mapPublicFundingGoal(
-  goal: FundingGoal & { periods?: FundingGoalPeriod[] },
+  goal: FundingGoal & {
+    periods?: FundingGoalPeriod[];
+    expense?: Pick<Expense, 'discussionUrl'> | null;
+  },
   fundedByGoal: ReadonlyMap<string, bigint>,
   releasedByGoal: ReadonlyMap<string, bigint>,
   reservedByGoal: ReadonlyMap<string, bigint> = new Map(),
@@ -78,6 +82,9 @@ export function mapPublicFundingGoal(
   const usdcTreasuryReserved = reserved(FundingAsset.USDC, PayoutKind.CANCELLED_FUNDS);
   const metadata =
     goal.metadataStatus === MetadataStatus.AVAILABLE ? metadataFrom(goal.metadata) : undefined;
+  const { discussionUrl } = canonicalGoalMetadata({
+    discussionUrl: metadata?.discussionUrl ?? goal.expense?.discussionUrl ?? undefined,
+  });
   let status = goal.status as GoalStatus;
   if (
     goal.goalType === FundingGoalType.ONE_TIME &&
@@ -246,7 +253,7 @@ export function mapPublicFundingGoal(
         : goal.deadline.toISOString(),
     creationTxHash: goal.creationTxHash as `0x${string}`,
     creationBlock: goal.creationBlock!.toString(),
-    discussionUrl: metadata?.discussionUrl,
+    discussionUrl,
     metadataUri: goal.metadataUri ?? undefined,
     metadataStatus: goal.metadataStatus,
     documents: metadata?.documents ?? [],

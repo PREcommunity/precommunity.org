@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getCommunityProfile, getDashboard, getDashboardAvailability, getGoal } from './api';
+import {
+  getCommunityProfile,
+  getDashboard,
+  getDashboardAvailability,
+  getGoal,
+  getGoalPreview,
+} from './api';
 
 describe('verified API policy', () => {
   afterEach(() => {
@@ -31,6 +37,27 @@ describe('verified API policy', () => {
   it('returns null only for an explicit goal 404', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 404 })));
     await expect(getGoal('missing')).resolves.toBeNull();
+  });
+
+  it('fetches previews without caching or a wallet session', async () => {
+    const response = { kind: 'published', slug: 'confirmed-goal' };
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(response)));
+    vi.stubGlobal('fetch', fetch);
+    await expect(getGoalPreview('secret/token')).resolves.toEqual(response);
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/v1/public/goal-previews/secret%2Ftoken'),
+      { cache: 'no-store' },
+    );
+  });
+
+  it('returns null for unavailable preview links and surfaces API failures', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }));
+    vi.stubGlobal('fetch', fetch);
+    await expect(getGoalPreview('revoked')).resolves.toBeNull();
+    await expect(getGoalPreview('unavailable')).rejects.toThrow('Goal preview API returned 503');
   });
 
   it('reports an empty successful profile response without leaking a JSON parser error', async () => {

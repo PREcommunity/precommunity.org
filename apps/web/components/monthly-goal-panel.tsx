@@ -24,6 +24,7 @@ export function MonthlyGoalPanel({
   periods: FundingGoalPeriodsPage;
 }) {
   const monthly = goal.monthly!;
+  const settlementAvailable = monthly.phase === 'SETTLEMENT_DUE';
   const { address, chainId, isConnected } = useAccount();
   const { openConnectModal } = useConnectModal();
   const { switchChainAsync } = useSwitchChain();
@@ -37,6 +38,7 @@ export function MonthlyGoalPanel({
   const [hash, setHash] = useState<`0x${string}` | null>(null);
   const [periods, setPeriods] = useState(initialPeriods);
   const [historyState, setHistoryState] = useState<'idle' | 'loading' | 'error'>('idle');
+  const showSettlementPanel = settlementAvailable || Boolean(message);
 
   async function loadMorePeriods() {
     if (!periods.nextCursor || historyState === 'loading') return;
@@ -104,7 +106,13 @@ export function MonthlyGoalPanel({
 
   return (
     <section className="border-y border-line py-7" aria-labelledby="monthly-ledger-title">
-      <div className="grid grid-cols-[minmax(0,1fr)_280px] gap-8 max-[800px]:grid-cols-1">
+      <div
+        className={`grid gap-8 ${
+          showSettlementPanel
+            ? 'grid-cols-[minmax(0,1fr)_280px] max-[800px]:grid-cols-1'
+            : 'grid-cols-1'
+        }`}
+      >
         <div>
           <span className="font-mono text-[11px] tracking-[.05em] text-blue uppercase">
             Monthly lifecycle · {monthly.phase.replaceAll('_', ' ')}
@@ -156,45 +164,47 @@ export function MonthlyGoalPanel({
             ))}
           </div>
         </div>
-        <aside className="border-l border-line pl-6 max-[800px]:border-t max-[800px]:border-l-0 max-[800px]:pt-5 max-[800px]:pl-0">
-          <small className="font-mono text-[10px] text-muted uppercase">Public settlement</small>
-          <p className="text-xs text-muted">
-            Any wallet may settle elapsed periods. Settlement updates accounting only and transfers
-            no funds.
-          </p>
-          <ActionButton
-            variant="primary"
-            disabled={
-              monthly.phase !== 'SETTLEMENT_DUE' || state === 'preparing' || state === 'confirming'
-            }
-            onClick={() => void settle()}
-            icon={
-              state === 'preparing' || state === 'confirming' ? (
-                <LoaderCircle className="animate-spin" size={15} />
-              ) : undefined
-            }
-          >
-            {monthly.phase === 'SETTLEMENT_DUE' ? 'Settle due periods' : 'Settlement not due'}
-          </ActionButton>
-          {message ? (
-            <p
-              className={`mt-3 text-xs ${state === 'error' ? 'text-danger' : 'text-muted'}`}
-              role="status"
-            >
-              {message}
-              {hash ? (
-                <a
-                  className="ml-1 inline-flex items-center gap-1 text-blue"
-                  href={activeExplorerTransaction(hash)}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Proof <ArrowUpRight size={12} />
-                </a>
-              ) : null}
+        {showSettlementPanel ? (
+          <aside className="border-l border-line pl-6 max-[800px]:border-t max-[800px]:border-l-0 max-[800px]:pt-5 max-[800px]:pl-0">
+            <small className="font-mono text-[10px] text-muted uppercase">Public settlement</small>
+            <p className="text-xs text-muted">
+              Any wallet may settle elapsed periods. Settlement updates accounting only and
+              transfers no funds.
             </p>
-          ) : null}
-        </aside>
+            {settlementAvailable ? (
+              <ActionButton
+                variant="primary"
+                disabled={state === 'preparing' || state === 'confirming'}
+                onClick={() => void settle()}
+                icon={
+                  state === 'preparing' || state === 'confirming' ? (
+                    <LoaderCircle className="animate-spin" size={15} />
+                  ) : undefined
+                }
+              >
+                Settle due periods
+              </ActionButton>
+            ) : null}
+            {message ? (
+              <p
+                className={`mt-3 text-xs ${state === 'error' ? 'text-danger' : 'text-muted'}`}
+                role="status"
+              >
+                {message}
+                {hash ? (
+                  <a
+                    className="ml-1 inline-flex items-center gap-1 text-blue"
+                    href={activeExplorerTransaction(hash)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Proof <ArrowUpRight size={12} />
+                  </a>
+                ) : null}
+              </p>
+            ) : null}
+          </aside>
+        ) : null}
       </div>
 
       <div className="mt-8">

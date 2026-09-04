@@ -1,16 +1,6 @@
 import { ForbiddenException, Injectable, ServiceUnavailableException } from '@nestjs/common';
-import { createPublicClient, formatUnits, getAddress, http, parseUnits } from 'viem';
+import { erc20Abi, createPublicClient, formatUnits, getAddress, http, parseUnits } from 'viem';
 import { config } from '../config';
-
-const erc20BalanceAbi = [
-  {
-    type: 'function',
-    name: 'balanceOf',
-    stateMutability: 'view',
-    inputs: [{ name: 'account', type: 'address' }],
-    outputs: [{ name: '', type: 'uint256' }],
-  },
-] as const;
 
 const CURRENT_CACHE_MS = 30_000;
 
@@ -36,7 +26,7 @@ export class TokenEligibilityService {
     try {
       return await this.client.readContract({
         address: getAddress(config.deployment.preAddress),
-        abi: erc20BalanceAbi,
+        abi: erc20Abi,
         functionName: 'balanceOf',
         args: [getAddress(address)],
         blockNumber,

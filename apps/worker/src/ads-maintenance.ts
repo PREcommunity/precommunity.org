@@ -1,5 +1,4 @@
 import { AdReportStatus, type PrismaClient } from '@precommunity/database';
-import { adResolutionCounterKey } from '@precommunity/shared';
 import Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
 
@@ -117,8 +116,4 @@ export async function retainAdsData(prisma: PrismaClient, now = new Date()) {
     dailyMetrics: metrics.count,
     metricFlushReceipts: flushReceipts.count,
   };
-}
-
-export function currentAdResolutionCounterKey(date = new Date()) {
-  return adResolutionCounterKey(date.toISOString().slice(0, 10));
 }

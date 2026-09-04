@@ -1,7 +1,8 @@
 import './load-env';
 import { prisma } from '@precommunity/database';
-import { Queue, Worker } from 'bullmq';
+import { Queue, Worker, type Job } from 'bullmq';
 import IORedis from 'ioredis';
+import { scheduleJobs } from './schedule';
 import { config } from './config';
 import { indexEscrow, reconcileEscrow, retryUnavailableMetadata } from './indexer';
 import { syncSafePayoutProposals } from './safe-proposals';
@@ -16,84 +17,6 @@ const queueName = 'precommunity-chain-indexer';
 const safeQueueName = 'precommunity-safe-proposals';
 const queue = new Queue(queueName, { connection });
 const safeQueue = new Queue(safeQueueName, { connection });
-
-async function schedule() {
-  await safeQueue.removeRepeatable(
-    'sync-safe-goal-managers',
-    { every: 30_000 },
-    'sync-safe-goal-managers',
-  );
-  await queue.add(
-    'index-escrow',
-    {},
-    { repeat: { every: 15_000 }, jobId: 'index-escrow', removeOnComplete: 20, removeOnFail: 100 },
-  );
-  await queue.add(
-    'reconcile-escrow',
-    {},
-    {
-      repeat: { every: 5 * 60_000 },
-      jobId: 'reconcile-escrow',
-      removeOnComplete: 20,
-      removeOnFail: 100,
-    },
-  );
-  await queue.add(
-    'refresh-metadata',
-    {},
-    {
-      repeat: { every: 5 * 60_000 },
-      jobId: 'refresh-metadata',
-      removeOnComplete: 20,
-      removeOnFail: 100,
-    },
-  );
-  await queue.add(
-    'index-ads',
-    {},
-    { repeat: { every: 15_000 }, jobId: 'index-ads', removeOnComplete: 20, removeOnFail: 100 },
-  );
-  await queue.add(
-    'flush-ad-metrics',
-    {},
-    {
-      repeat: { every: 60_000 },
-      jobId: 'flush-ad-metrics',
-      removeOnComplete: 20,
-      removeOnFail: 100,
-    },
-  );
-  await queue.add(
-    'retain-ads-data',
-    {},
-    {
-      repeat: { every: 24 * 60 * 60_000 },
-      jobId: 'retain-ads-data',
-      removeOnComplete: 20,
-      removeOnFail: 100,
-    },
-  );
-  await safeQueue.add(
-    'sync-safe-payouts',
-    {},
-    {
-      repeat: { every: 30_000 },
-      jobId: 'sync-safe-payouts',
-      removeOnComplete: 20,
-      removeOnFail: 100,
-    },
-  );
-  await safeQueue.add(
-    'sync-safe-goal-actions',
-    {},
-    {
-      repeat: { every: 30_000 },
-      jobId: 'sync-safe-goal-actions',
-      removeOnComplete: 20,
-      removeOnFail: 100,
-    },
-  );
-}
 
 const worker = new Worker(
   queueName,
@@ -133,7 +56,7 @@ const safeWorker = new Worker(
   { connection, concurrency: 1 },
 );
 
-worker.on('failed', (job, error) => {
+function logFailedJob(job: Job | undefined, error: Error) {
   console.error(
     JSON.stringify({
       level: 'error',
@@ -143,19 +66,10 @@ worker.on('failed', (job, error) => {
       message: error.message,
     }),
   );
-});
+}
 
-safeWorker.on('failed', (job, error) => {
-  console.error(
-    JSON.stringify({
-      level: 'error',
-      service: 'precommunity-worker',
-      job: job?.name,
-      jobId: job?.id,
-      message: error.message,
-    }),
-  );
-});
+worker.on('failed', logFailedJob);
+safeWorker.on('failed', logFailedJob);
 
 async function shutdown() {
   await worker.close();
@@ -168,4 +82,4 @@ async function shutdown() {
 
 process.on('SIGTERM', () => void shutdown());
 process.on('SIGINT', () => void shutdown());
-void schedule();
+void scheduleJobs(queue, safeQueue);

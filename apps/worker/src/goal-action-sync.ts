@@ -1,11 +1,11 @@
 import { Prisma, SafeGoalActionProposalStatus, type PrismaClient } from '@precommunity/database';
-import SafeApiKit from '@safe-global/api-kit';
 import { getAddress } from 'viem';
 import { config } from './config';
 import {
   classifyMissingSafeSubmission,
   classifySafeProposal,
-  executedSafeTransactionsAtNonce,
+  createSafeApiKit,
+  resolveSafeTransaction,
   safeTransactionsAtNonce,
   shouldRecoverMissingSafeSubmission,
 } from './safe-proposals';
@@ -15,18 +15,6 @@ const pendingStatuses: SafeGoalActionProposalStatus[] = [
   SafeGoalActionProposalStatus.AWAITING_CONFIRMATIONS,
   SafeGoalActionProposalStatus.READY_TO_EXECUTE,
 ];
-
-function service() {
-  return new SafeApiKit({
-    chainId: BigInt(config.deployment.chainId),
-    ...(config.SAFE_TRANSACTION_SERVICE_URL
-      ? { txServiceUrl: config.SAFE_TRANSACTION_SERVICE_URL }
-      : {}),
-    ...(config.SAFE_TRANSACTION_SERVICE_API_KEY
-      ? { apiKey: config.SAFE_TRANSACTION_SERVICE_API_KEY }
-      : {}),
-  });
-}
 
 async function applyStatusUpdate(
   prisma: PrismaClient,
@@ -80,7 +68,7 @@ export async function syncSafeGoalActionProposals(prisma: PrismaClient) {
   });
   if (!pending.length) return { status: 'SYNCED' as const, checked: 0, updated: 0 };
 
-  const safe = service();
+  const safe = createSafeApiKit();
   const info = await safe.getSafeInfo(getAddress(config.SAFE_ADDRESS));
   const currentNonce = BigInt(info.nonce);
   const now = new Date();
@@ -88,21 +76,12 @@ export async function syncSafeGoalActionProposals(prisma: PrismaClient) {
 
   for (const proposal of pending) {
     try {
-      const transaction = await safe.getTransaction(proposal.safeTxHash);
-      let resolved = transaction;
-      let nonceWasReplaced = false;
-      if (!transaction.isExecuted && BigInt(proposal.safeNonce) < currentNonce) {
-        const executed = await executedSafeTransactionsAtNonce(
-          safe,
-          config.SAFE_ADDRESS,
-          proposal.safeNonce,
-        );
-        const own = executed.find(
-          (candidate) => candidate.safeTxHash.toLowerCase() === proposal.safeTxHash.toLowerCase(),
-        );
-        if (own) resolved = own;
-        else nonceWasReplaced = executed.length > 0;
-      }
+      const { transaction: resolved, nonceWasReplaced } = await resolveSafeTransaction(
+        safe,
+        config.SAFE_ADDRESS,
+        proposal,
+        currentNonce,
+      );
       const next = classifySafeProposal(
         resolved,
         proposal.safeNonce,

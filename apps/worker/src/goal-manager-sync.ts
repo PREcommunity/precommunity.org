@@ -4,13 +4,14 @@ import {
   reconcileSafeOwnerGoalManagerAssignments,
   type PrismaClient,
 } from '@precommunity/database';
-import SafeApiKit from '@safe-global/api-kit';
 import { createPublicClient, getAddress, http, keccak256, toHex } from 'viem';
 import { config } from './config';
 import {
   classifyMissingSafeSubmission,
   classifySafeProposal,
-  executedSafeTransactionsAtNonce,
+  createSafeApiKit,
+  resolveSafeTransaction,
+  recoveredSafeTransaction,
   safeTransactionsAtNonce,
   shouldRecoverMissingSafeSubmission,
 } from './safe-proposals';
@@ -45,18 +46,6 @@ function currentSafeOwners() {
     address: getAddress(config.SAFE_ADDRESS),
     abi: safeOwnersAbi,
     functionName: 'getOwners',
-  });
-}
-
-function service() {
-  return new SafeApiKit({
-    chainId: BigInt(config.deployment.chainId),
-    ...(config.SAFE_TRANSACTION_SERVICE_URL
-      ? { txServiceUrl: config.SAFE_TRANSACTION_SERVICE_URL }
-      : {}),
-    ...(config.SAFE_TRANSACTION_SERVICE_API_KEY
-      ? { apiKey: config.SAFE_TRANSACTION_SERVICE_API_KEY }
-      : {}),
   });
 }
 
@@ -108,7 +97,7 @@ export async function syncSafeGoalManagerProposals(prisma: PrismaClient) {
   if (!transactionServiceEnabled() || !config.SAFE_ADDRESS) {
     return { status: 'DISABLED' as const, checked: 0 };
   }
-  const safe = service();
+  const safe = createSafeApiKit();
   const [info, safeOwners] = await Promise.all([
     safe.getSafeInfo(getAddress(config.SAFE_ADDRESS)),
     currentSafeOwners(),
@@ -131,21 +120,12 @@ export async function syncSafeGoalManagerProposals(prisma: PrismaClient) {
   for (const proposal of pending) {
     const policyChanged = proposal.intent.desiredStateHash !== desiredHash;
     try {
-      const transaction = await safe.getTransaction(proposal.safeTxHash);
-      let resolvedTransaction = transaction;
-      let nonceWasReplaced = false;
-      if (!transaction.isExecuted && BigInt(proposal.safeNonce) < BigInt(info.nonce)) {
-        const executedAtNonce = await executedSafeTransactionsAtNonce(
-          safe,
-          config.SAFE_ADDRESS,
-          proposal.safeNonce,
-        );
-        const ownExecution = executedAtNonce.find(
-          (candidate) => candidate.safeTxHash.toLowerCase() === proposal.safeTxHash.toLowerCase(),
-        );
-        if (ownExecution) resolvedTransaction = ownExecution;
-        else nonceWasReplaced = executedAtNonce.length > 0;
-      }
+      const { transaction: resolvedTransaction, nonceWasReplaced } = await resolveSafeTransaction(
+        safe,
+        config.SAFE_ADDRESS,
+        proposal,
+        BigInt(info.nonce),
+      );
       const next = classifySafeProposal(
         resolvedTransaction,
         proposal.safeNonce,
@@ -186,26 +166,10 @@ export async function syncSafeGoalManagerProposals(prisma: PrismaClient) {
           });
           continue;
         }
-        const ownExecution = transactionsAtNonce.find(
-          (candidate) =>
-            candidate.isExecuted &&
-            candidate.safeTxHash.toLowerCase() === proposal.safeTxHash.toLowerCase(),
+        const { ownTransaction, nonceWasReplaced } = recoveredSafeTransaction(
+          transactionsAtNonce,
+          proposal.safeTxHash,
         );
-        const nonceWasReplaced =
-          !ownExecution &&
-          transactionsAtNonce.some(
-            (candidate) =>
-              candidate.isExecuted &&
-              candidate.safeTxHash.toLowerCase() !== proposal.safeTxHash.toLowerCase(),
-          );
-        const ownTransaction =
-          ownExecution ??
-          (!nonceWasReplaced
-            ? transactionsAtNonce.find(
-                (candidate) =>
-                  candidate.safeTxHash.toLowerCase() === proposal.safeTxHash.toLowerCase(),
-              )
-            : undefined);
         if (ownTransaction) {
           const next = classifySafeProposal(
             ownTransaction,

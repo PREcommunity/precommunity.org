@@ -155,6 +155,26 @@ export interface GoalMetadata {
   documents?: GoalDocument[];
 }
 
+export interface GoalDraftPreview {
+  title: string;
+  description: string;
+  status: 'DRAFT' | 'PENDING_CHAIN';
+  category: string | null;
+  subproject: { name: string; slug: string } | null;
+  recipientAddress: string;
+  cadence: FundingGoalType;
+  deadline: string | null;
+  monthlySurplusPolicy: MonthlySurplusPolicy | null;
+  firstSettlementAt: string | null;
+  discussionUrl: string | null;
+  metadataUri: string | null;
+  documents: GoalDocument[];
+  targets: Array<{ asset: AssetCode; amount: string }>;
+}
+
+export type GoalPreviewResponse =
+  { kind: 'draft'; draft: GoalDraftPreview } | { kind: 'published'; slug: string };
+
 export interface FundingProgress {
   asset: AssetCode;
   target: string;
