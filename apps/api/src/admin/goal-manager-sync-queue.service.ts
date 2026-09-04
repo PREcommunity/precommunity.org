@@ -16,11 +16,15 @@ export class GoalManagerSyncQueue {
     events.on('error', () => undefined);
 
     try {
-      const job = await queue.add(jobName, {}, {
-        deduplication: { id: jobName },
-        removeOnComplete: 20,
-        removeOnFail: 100,
-      });
+      const job = await queue.add(
+        jobName,
+        {},
+        {
+          deduplication: { id: jobName },
+          removeOnComplete: 20,
+          removeOnFail: 100,
+        },
+      );
       return await job.waitUntilFinished(events, 30_000);
     } catch (error) {
       throw new ServiceUnavailableException(

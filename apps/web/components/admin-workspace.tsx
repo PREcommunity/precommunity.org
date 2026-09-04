@@ -100,7 +100,10 @@ export function AdminWorkspace({ requestedTab }: { requestedTab?: string }) {
         </div>
       ) : null}
 
-      <nav className="mt-7 overflow-x-auto overflow-y-hidden border-b border-navy" aria-label="Admin sections">
+      <nav
+        className="mt-7 overflow-x-auto overflow-y-hidden border-b border-navy"
+        aria-label="Admin sections"
+      >
         <div className="flex min-w-max gap-1">
           {tabs.map((tab) => (
             <Link
