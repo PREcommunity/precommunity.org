@@ -3,34 +3,47 @@
 import type { AdKeywordResponse } from '@precommunity/shared';
 import { ArrowLeft, CircleAlert, LoaderCircle, RefreshCw } from 'lucide-react';
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useKeywordMarketRefresh } from '@/hooks/use-keyword-market-refresh';
 import { getAdKeyword } from '@/lib/keyword-market-api';
 import { ActionButton } from './action-button';
-
-function shortAddress(address: string) {
-  return `${address.slice(0, 8)}…${address.slice(-6)}`;
-}
+import { KeywordMarketRanking } from './keyword-market-ranking';
 
 export function KeywordMarketKeywordWorkspace({ keyword }: { keyword: string }) {
   const [data, setData] = useState<AdKeywordResponse | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
+  const loadInFlight = useRef(false);
 
-  const load = useCallback(async () => {
-    setState('loading');
-    setError('');
-    try {
-      setData(await getAdKeyword(keyword));
-      setState('ready');
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Keyword ranking could not be loaded.');
-      setState('error');
-    }
-  }, [keyword]);
+  const load = useCallback(
+    async (background = false) => {
+      if (loadInFlight.current) return;
+      loadInFlight.current = true;
+      if (!background) {
+        setState('loading');
+        setError('');
+      }
+      try {
+        setData(await getAdKeyword(keyword));
+        setState('ready');
+      } catch (reason) {
+        if (!background) {
+          setError(
+            reason instanceof Error ? reason.message : 'Keyword ranking could not be loaded.',
+          );
+          setState('error');
+        }
+      } finally {
+        loadInFlight.current = false;
+      }
+    },
+    [keyword],
+  );
 
   useEffect(() => {
     void load();
   }, [load]);
+  useKeywordMarketRefresh(load, state === 'ready');
 
   return (
     <main className="keyword-market-app-shell">
@@ -40,7 +53,7 @@ export function KeywordMarketKeywordWorkspace({ keyword }: { keyword: string }) 
             className="keyword-market-back-link"
             href={`/keyword-market?q=${encodeURIComponent(keyword)}`}
           >
-            <ArrowLeft size={14} /> Resolver
+            <ArrowLeft size={14} /> Search
           </Link>
           <span className="keyword-market-eyebrow">Public keyword ledger</span>
           <h1>{data?.keyword ?? keyword}</h1>
@@ -85,58 +98,14 @@ export function KeywordMarketKeywordWorkspace({ keyword }: { keyword: string }) 
             </div>
           </section>
           {data.positions.length ? (
-            <section
-              className="keyword-market-ledger keyword-market-ranking-ledger"
-              aria-label={`Stake ranking for ${data.keyword}`}
-            >
-              <div className="keyword-market-ledger-head">
-                <span>Rank / staker</span>
-                <span>Active stake</span>
-                <span>Amount since</span>
-                <span>Proof</span>
-                <span>Eligible</span>
-              </div>
-              {data.positions.map((position, index) => (
-                <div
-                  className="keyword-market-ledger-row"
-                  key={position.stakerAddress}
-                  style={{ '--keyword-market-row-index': index } as React.CSSProperties}
-                >
-                  <span className="keyword-market-ledger-keyword">
-                    <small>#{position.rank}</small>
-                    <strong title={position.stakerAddress}>
-                      {shortAddress(position.stakerAddress)}
-                    </strong>
-                  </span>
-                  <span>
-                    <strong>{position.stakeRaw}</strong>
-                    <small>raw PRE</small>
-                  </span>
-                  <span>
-                    <strong>{position.amountSinceBlock}</strong>
-                    <small>log {position.amountSinceLogIndex}</small>
-                  </span>
-                  <span>
-                    <strong>{position.positionBlock}</strong>
-                    <small title={position.positionTxHash}>
-                      {position.positionTxHash.slice(0, 12)}…
-                    </small>
-                  </span>
-                  <span
-                    className={`keyword-market-status ${position.hasEligibleAd ? 'keyword-market-status-success' : 'keyword-market-status-muted'}`}
-                  >
-                    {position.hasEligibleAd ? 'Eligible' : 'No approved ad'}
-                  </span>
-                </div>
-              ))}
-            </section>
+            <KeywordMarketRanking data={data} />
           ) : (
             <div className="keyword-market-access-state">
               <span className="keyword-market-empty-index">00</span>
               <strong>No confirmed positions</strong>
               <p>
                 {data.chainStatus === 'AWAITING_CONTRACT'
-                  ? 'The contract adapter is waiting for its reviewed ABI and deployment details.'
+                  ? 'The market contract and deployment block are not configured yet.'
                   : 'This keyword has no active stakes.'}
               </p>
             </div>

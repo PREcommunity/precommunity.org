@@ -7,6 +7,7 @@ readonly DOMAIN="${1:-}"
 readonly APP_USER="${PRECOMMUNITY_APP_USER:-ubuntu}"
 readonly DEPLOYMENT_NETWORK="${PRECOMMUNITY_NETWORK:-base-sepolia}"
 readonly SAFE_ADDRESS="${PRECOMMUNITY_SAFE_ADDRESS:-}"
+readonly BROWSER_RPC_URL_OVERRIDE="${PRECOMMUNITY_BROWSER_RPC_URL:-}"
 readonly BASE_RPC_URL_OVERRIDE="${PRECOMMUNITY_BASE_RPC_URL:-}"
 readonly ESCROW_ADDRESS="${PUBLIC_ESCROW_ADDRESS:-}"
 readonly ESCROW_DEPLOYMENT_BLOCK="${PUBLIC_ESCROW_DEPLOYMENT_BLOCK:-}"
@@ -15,8 +16,8 @@ readonly USDC_ADDRESS="${PUBLIC_USDC_ADDRESS:-}"
 readonly INITIAL_OWNER_ADDRESS="${PUBLIC_INITIAL_OWNER_ADDRESS:-}"
 readonly TREASURY_ADDRESS="${PUBLIC_TREASURY_ADDRESS:-}"
 readonly CHAIN_CONFIRMATIONS="${PUBLIC_CHAIN_CONFIRMATIONS:-}"
-readonly ADS_CONTRACT_ADDRESS_VALUE="${ADS_CONTRACT_ADDRESS:-}"
-readonly ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE="${ADS_CONTRACT_DEPLOYMENT_BLOCK:-}"
+ADS_CONTRACT_ADDRESS_VALUE="${ADS_CONTRACT_ADDRESS:-}"
+ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE="${ADS_CONTRACT_DEPLOYMENT_BLOCK:-}"
 readonly SAFE_TRANSACTION_SERVICE_API_KEY_STDIN="${PRECOMMUNITY_SAFE_TRANSACTION_SERVICE_API_KEY_STDIN:-0}"
 readonly CONFIG_DIR=/etc/precommunity
 readonly SECRET_FILE="${CONFIG_DIR}/app.secrets"
@@ -41,7 +42,8 @@ if [[ "$DEPLOYMENT_NETWORK" != base-sepolia && "$DEPLOYMENT_NETWORK" != base ]];
 fi
 if [[ "$ENV_FILE" != "$ACTIVE_ENV_FILE" &&
   "$ENV_FILE" != "${CONFIG_DIR}/app.env.mainnet-next" &&
-  "$ENV_FILE" != "${CONFIG_DIR}/app.env.escrow-next" ]]; then
+  "$ENV_FILE" != "${CONFIG_DIR}/app.env.escrow-next" &&
+  "$ENV_FILE" != "${CONFIG_DIR}/app.env.next" ]]; then
   echo "Refusing to write an unexpected application environment path: $ENV_FILE" >&2
   exit 2
 fi
@@ -107,13 +109,20 @@ fi
 existing_walletconnect_project_id=''
 existing_network=''
 existing_base_rpc_url=''
+existing_browser_rpc_url=''
+existing_ads_address=''
+existing_ads_block=''
 existing_safe_transaction_service_api_key=''
 existing_safe_transaction_service_url=''
 existing_safe_transaction_service_url_testnet=''
 if run_root test -r "$ACTIVE_ENV_FILE"; then
   existing_walletconnect_project_id="$(run_root sed -n 's/^NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=//p' "$ACTIVE_ENV_FILE")"
   existing_network="$(run_root sed -n 's/^PRECOMMUNITY_NETWORK=//p' "$ACTIVE_ENV_FILE")"
-  existing_base_rpc_url="$(run_root sed -n 's/^BASE_RPC_URL=//p' "$ACTIVE_ENV_FILE")"
+  if [[ "$existing_network" == base ]]; then suffix=''; else suffix=_TESTNET; fi
+  existing_base_rpc_url="$(read_runtime_env_value "BASE_RPC_URL${suffix}" <(run_root cat "$ACTIVE_ENV_FILE"))"
+  existing_browser_rpc_url="$(read_runtime_env_value "NEXT_PUBLIC_BASE_RPC_URL${suffix}" <(run_root cat "$ACTIVE_ENV_FILE"))"
+  existing_ads_address="$(run_root sed -n "s/^ADS_CONTRACT_ADDRESS${suffix}=//p" "$ACTIVE_ENV_FILE")"
+  existing_ads_block="$(run_root sed -n "s/^ADS_CONTRACT_DEPLOYMENT_BLOCK${suffix}=//p" "$ACTIVE_ENV_FILE")"
   existing_safe_transaction_service_api_key="$(run_root sed -n 's/^SAFE_TRANSACTION_SERVICE_API_KEY=//p' "$ACTIVE_ENV_FILE")"
   existing_safe_transaction_service_url="$(run_root sed -n 's/^SAFE_TRANSACTION_SERVICE_URL=//p' "$ACTIVE_ENV_FILE")"
   existing_safe_transaction_service_url_testnet="$(run_root sed -n 's/^SAFE_TRANSACTION_SERVICE_URL_TESTNET=//p' "$ACTIVE_ENV_FILE")"
@@ -139,6 +148,25 @@ else
   base_rpc_url='https://sepolia.base.org'
 fi
 
+if [[ "$existing_network" == "$DEPLOYMENT_NETWORK" && -z "$ADS_CONTRACT_ADDRESS_VALUE" && -z "$ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE" ]]; then
+  ADS_CONTRACT_ADDRESS_VALUE="$existing_ads_address"
+  ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE="$existing_ads_block"
+fi
+validate_runtime_deployment
+browser_rpc_url="$BROWSER_RPC_URL_OVERRIDE"
+# Preserve only a previously separate public URL. A legacy copy of the private
+# backend URL must not carry provider credentials into the browser again.
+if [[ -z "$browser_rpc_url" && "$existing_network" == "$DEPLOYMENT_NETWORK" && "$existing_browser_rpc_url" != "$existing_base_rpc_url" ]]; then
+  browser_rpc_url="$existing_browser_rpc_url"
+fi
+if [[ -z "$browser_rpc_url" ]]; then
+  if [[ "$DEPLOYMENT_NETWORK" == base ]]; then browser_rpc_url=https://mainnet.base.org; else browser_rpc_url=https://sepolia.base.org; fi
+fi
+if [[ ! "$browser_rpc_url" =~ ^https://[A-Za-z0-9._~:/?\&=%+@,#-]+$ || ! "$base_rpc_url" =~ ^https?://[A-Za-z0-9._~:/?\&=%+@,#-]+$ ]]; then
+  echo 'RPC URLs must be shell-safe URLs; the browser requires HTTPS.' >&2
+  exit 2
+fi
+
 env_tmp="$(mktemp)"
 trap 'rm -f "${secret_tmp:-}" "${env_tmp:-}"' EXIT
 {
@@ -158,7 +186,8 @@ trap 'rm -f "${secret_tmp:-}" "${env_tmp:-}"' EXIT
     "$CHAIN_CONFIRMATIONS" \
     "$base_rpc_url" \
     "$ADS_CONTRACT_ADDRESS_VALUE" \
-    "$ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE"
+    "$ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE" \
+    "$browser_rpc_url"
   printf '%s\n' \
     "SAFE_TRANSACTION_SERVICE_API_KEY=${safe_transaction_service_api_key}" \
     "SAFE_TRANSACTION_SERVICE_URL=${existing_safe_transaction_service_url}" \

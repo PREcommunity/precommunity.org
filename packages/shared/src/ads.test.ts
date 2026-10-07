@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { AdsTextValidationError, adsKeywordCandidates, normalizeAdKeyword } from './ads';
+import {
+  AdsTextValidationError,
+  adKeywordId,
+  adsKeywordCandidates,
+  normalizeAdKeyword,
+} from './ads';
+import keywordHashVectors from './ads-keyword-hash-vectors.json';
 
 describe('PRE Keyword Market keyword normalization', () => {
   it('normalizes Unicode compatibility forms, case and separators', () => {
@@ -13,6 +19,15 @@ describe('PRE Keyword Market keyword normalization', () => {
     expect(() => normalizeAdKeyword('one two three four five six')).toThrow(
       'Keyword must contain at most 5 tokens.',
     );
+  });
+});
+
+describe('PRE Keyword Market keyword identity', () => {
+  it('matches the shared TypeScript/Solidity keyword hash vectors', () => {
+    for (const vector of keywordHashVectors) {
+      expect(normalizeAdKeyword(vector.input)).toBe(vector.canonical);
+      expect(adKeywordId(vector.input)).toBe(vector.keywordId);
+    }
   });
 });
 

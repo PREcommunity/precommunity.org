@@ -1,8 +1,15 @@
 import { AdReportStatus, type PrismaClient } from '@precommunity/database';
+import { adMetricCounterKey } from '@precommunity/shared';
 import Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
 
-const ACTIVE_COUNTER_PATTERN = 'precommunity:ads:resolutions:*';
+const metricTypes = ['resolutions', 'views', 'clicks'] as const;
+type MetricType = (typeof metricTypes)[number];
+const lifetimeField = {
+  resolutions: 'lifetimeResolutions',
+  views: 'lifetimeViews',
+  clicks: 'lifetimeClicks',
+} as const;
 const FLUSH_MARKER = ':flush:';
 const RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
 
@@ -17,10 +24,8 @@ async function scanKeys(redis: Redis, pattern: string) {
   return keys;
 }
 
-async function rollActiveCounters(redis: Redis) {
-  const activeKeys = (await scanKeys(redis, ACTIVE_COUNTER_PATTERN)).filter(
-    (key) => !key.includes(FLUSH_MARKER),
-  );
+async function rollActiveCounters(redis: Redis, pattern: string) {
+  const activeKeys = (await scanKeys(redis, pattern)).filter((key) => !key.includes(FLUSH_MARKER));
   const batches: string[] = [];
   for (const activeKey of activeKeys) {
     const batchKey = `${activeKey}${FLUSH_MARKER}${randomUUID()}`;
@@ -35,25 +40,27 @@ async function rollActiveCounters(redis: Redis) {
   return batches;
 }
 
-function dayFromBatchKey(key: string) {
-  const match = /^precommunity:ads:resolutions:(\d{4}-\d{2}-\d{2}):flush:/.exec(key);
-  return match ? new Date(`${match[1]}T00:00:00.000Z`) : null;
+function bucketFromBatchKey(key: string) {
+  const match = /^precommunity:ads:(resolutions|views|clicks):(\d{4}-\d{2}-\d{2}):flush:/.exec(key);
+  return match
+    ? { type: match[1] as MetricType, day: new Date(`${match[2]}T00:00:00.000Z`) }
+    : null;
 }
 
 async function persistBatch(prisma: PrismaClient, redis: Redis, batchKey: string) {
-  const day = dayFromBatchKey(batchKey);
-  if (!day) {
+  const bucket = bucketFromBatchKey(batchKey);
+  if (!bucket || Number.isNaN(bucket.day.getTime())) {
     await redis.del(batchKey);
-    return { batchKey, applied: false, discarded: true, resolutions: 0n };
+    return { batchKey, applied: false, type: null, total: 0n };
   }
+  const { day, type } = bucket;
   const counters = await redis.hgetall(batchKey);
   let total = 0n;
   const entries = Object.entries(counters).flatMap(([revisionId, value]) => {
     try {
-      const resolutions = BigInt(value);
-      if (resolutions <= 0n) return [];
-      total += resolutions;
-      return [{ revisionId, resolutions }];
+      const count = BigInt(value);
+      if (count <= 0n) return [];
+      return [{ revisionId, count }];
     } catch {
       return [];
     }
@@ -70,32 +77,42 @@ async function persistBatch(prisma: PrismaClient, redis: Redis, batchKey: string
         select: { id: true },
       });
       if (!revision) continue;
+      total += entry.count;
       await tx.adDailyMetric.upsert({
         where: { revisionId_day: { revisionId: entry.revisionId, day } },
-        update: { resolutions: { increment: entry.resolutions } },
-        create: { revisionId: entry.revisionId, day, resolutions: entry.resolutions },
+        update: { [type]: { increment: entry.count } },
+        create: { revisionId: entry.revisionId, day, [type]: entry.count },
       });
       await tx.adCreativeRevision.update({
         where: { id: entry.revisionId },
-        data: { lifetimeResolutions: { increment: entry.resolutions } },
+        data: { [lifetimeField[type]]: { increment: entry.count } },
       });
     }
     return true;
   });
   await redis.del(batchKey);
-  return { batchKey, applied, discarded: false, resolutions: total };
+  return { batchKey, applied, type, total };
 }
 
 /** Atomically rolls Redis hashes and persists each batch exactly once. */
 export async function flushAdResolutionMetrics(prisma: PrismaClient, redis: Redis) {
-  await rollActiveCounters(redis);
-  const batches = await scanKeys(redis, `${ACTIVE_COUNTER_PATTERN}${FLUSH_MARKER}*`);
   const results = [];
-  for (const batch of batches) results.push(await persistBatch(prisma, redis, batch));
+  for (const type of metricTypes) {
+    const pattern = adMetricCounterKey(type, '*');
+    await rollActiveCounters(redis, pattern);
+    const batches = await scanKeys(redis, `${pattern}${FLUSH_MARKER}*`);
+    for (const batch of batches) results.push(await persistBatch(prisma, redis, batch));
+  }
+  const totals = { resolutions: 0n, views: 0n, clicks: 0n };
+  for (const result of results) {
+    if (result.applied && result.type) totals[result.type] += result.total;
+  }
   return {
     batches: results.length,
     applied: results.filter((result) => result.applied).length,
-    resolutions: results.reduce((sum, result) => sum + result.resolutions, 0n).toString(),
+    resolutions: totals.resolutions.toString(),
+    views: totals.views.toString(),
+    clicks: totals.clicks.toString(),
   };
 }
 

@@ -3,20 +3,26 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useWalletSession } from '@/hooks/use-wallet-session';
-import { canModerateKeywordMarket } from '@/lib/session-access';
+import { canManageKeywordMarketApiKeys, canModerateKeywordMarket } from '@/lib/session-access';
 import { BrandMark } from './brand-mark';
 
 const publicLinks = [
-  { href: '/keyword-market', label: 'Resolver' },
+  { href: '/keyword-market', label: 'Search' },
   { href: '/keyword-market/campaigns', label: 'Campaigns' },
 ];
 
 export function KeywordMarketSubnavigation() {
   const pathname = usePathname();
   const { sessionRoles } = useWalletSession();
-  const links = canModerateKeywordMarket(sessionRoles)
-    ? [...publicLinks, { href: '/keyword-market/admin', label: 'Moderation' }]
-    : publicLinks;
+  const links = [
+    ...publicLinks,
+    ...(canModerateKeywordMarket(sessionRoles)
+      ? [{ href: '/keyword-market/admin', label: 'Moderation' }]
+      : []),
+    ...(canManageKeywordMarketApiKeys(sessionRoles)
+      ? [{ href: '/keyword-market/api-keys', label: 'API keys' }]
+      : []),
+  ];
 
   return (
     <div className="keyword-market-subnav">
@@ -58,7 +64,9 @@ export function KeywordMarketFooter() {
       <span className="flex items-center gap-2 font-bold text-navy">
         <BrandMark className="size-6 max-sm:size-6" /> PRE Keyword Market
       </span>
-      <span className="font-mono text-[10px]">Longest keyword match · highest eligible stake</span>
+      <span className="font-mono text-[10px]">
+        Longest keyword match · highest eligible USD bid
+      </span>
     </footer>
   );
 }

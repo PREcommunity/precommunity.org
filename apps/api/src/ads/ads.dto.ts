@@ -10,6 +10,7 @@ import {
   IsUUID,
   Max,
   MaxLength,
+  Matches,
   Min,
 } from 'class-validator';
 import { AdReportReason, AdReportStatus } from '@precommunity/database';
@@ -33,9 +34,23 @@ export class CreateAdCampaignDto extends AdCreativeInputDto {
 
 export class CreateAdRevisionDto extends AdCreativeInputDto {}
 
+export class CreateAdApiKeyDto {
+  @Trimmed() @IsString() @IsNotEmpty() @MaxLength(80) name!: string;
+}
+
 export class UpdateAdCampaignDto {
   @IsBoolean()
   paused!: boolean;
+}
+
+export class PrepareAdStakeDto {
+  @IsString()
+  @Matches(/^(?:0|[1-9]\d*)$/, { message: 'amountRaw must be a non-negative integer' })
+  amountRaw!: string;
+
+  @IsString()
+  @Matches(/^[1-9]\d*$/, { message: 'bidUsdRaw must be a positive integer in micro USD' })
+  bidUsdRaw!: string;
 }
 
 export class ReportAdDto {

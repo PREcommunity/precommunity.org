@@ -1211,6 +1211,76 @@ describe('Safe payout preparation', () => {
     });
   });
 
+  it('allows another payout after the prior Safe proposal is queued, but not while it is submitting', async () => {
+    const previous = {
+      proposal: {
+        status: SafePayoutProposalStatus.AWAITING_CONFIRMATIONS as SafePayoutProposalStatus,
+      },
+    };
+    const findFirst = vi.fn(
+      ({
+        where,
+      }: {
+        where: {
+          goalId?: string;
+          OR: Array<{ proposal?: { is?: { status?: SafePayoutProposalStatus } } }>;
+        };
+      }) => {
+        if (where.goalId) return null;
+        return where.OR.some((filter) => filter.proposal?.is?.status === previous.proposal.status)
+          ? previous
+          : null;
+      },
+    );
+    const transaction = {
+      payout: { create: vi.fn().mockResolvedValue({ id: 'payout-id' }) },
+      safePayoutIntent: {
+        create: vi.fn().mockImplementation(({ data }) => ({ id: 'intent-id', ...data })),
+      },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      project: { findUnique: vi.fn().mockResolvedValue({ id: 'project-id' }) },
+      fundingGoal: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'goal-id',
+          chainGoalId: `0x${'44'.repeat(32)}`,
+          status: FundingGoalStatus.CLOSED,
+          goalType: FundingGoalType.ONE_TIME,
+          recipientAddress: '0x1111111111111111111111111111111111111111',
+          preRecipientEntitlementRaw: '100',
+          usdcRecipientEntitlementRaw: '0',
+          preTreasuryEntitlementRaw: '0',
+          usdcTreasuryEntitlementRaw: '0',
+          payouts: [],
+        }),
+      },
+      safePayoutIntent: { findMany: vi.fn().mockResolvedValue([]), findFirst },
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => unknown) =>
+        callback(transaction),
+      ),
+    } as unknown as PrismaService;
+    const safe = {
+      assertPayoutReady: vi.fn().mockResolvedValue({
+        address: getAddress('0x2222222222222222222222222222222222222222'),
+        threshold: 2,
+        queueUrl: 'https://app.safe.global/transactions/queue?safe=basesep:test',
+      }),
+      nextNonce: vi.fn().mockResolvedValue(8),
+    } as unknown as SafeService;
+    const service = new AdminService(prisma, safe);
+    const request = { asset: FundingAsset.PRE, kind: 'EXPENSE' as const, amountRaw: '50' };
+
+    await expect(service.createSafePayoutIntent('goal-id', request, actor)).resolves.toMatchObject({
+      safeNonce: 8,
+    });
+    previous.proposal.status = SafePayoutProposalStatus.SUBMITTING;
+    await expect(service.createSafePayoutIntent('goal-id', request, actor)).rejects.toThrow(
+      'Another payout is being prepared or submitted for this Safe',
+    );
+    expect(safe.nextNonce).toHaveBeenCalledTimes(1);
+  });
+
   it('creates and idempotently re-exports a durable manual payout without Safe API calls', async () => {
     const chainGoalId = `0x${'44'.repeat(32)}`;
     const safeAddress = getAddress('0x2222222222222222222222222222222222222222');

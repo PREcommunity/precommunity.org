@@ -9,6 +9,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.prisma.json --noEmit",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate deploy",
+    "db:migrate:sepolia": "env -i PATH=\"$PATH\" HOME=\"$HOME\" node --env-file=../../.env.keyword-rehearsal node_modules/prisma/build/index.js migrate deploy",
+    "db:seed:sepolia": "env -i PATH=\"$PATH\" HOME=\"$HOME\" node --env-file=../../.env.keyword-rehearsal node_modules/tsx/dist/cli.mjs prisma/seed.ts",
     "db:deploy": "prisma migrate deploy",
     "db:migrate:dev": "prisma migrate dev",
     "db:cutover-escrow": "tsx prisma/cutover-escrow.ts",

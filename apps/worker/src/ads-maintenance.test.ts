@@ -8,7 +8,11 @@ describe('PRE Keyword Market metric flushing', () => {
     const redis = {
       scan: vi.fn(async (_cursor: string, _match: string, pattern: string) => [
         '0',
-        pattern.includes(':flush:*') ? [batchKey] : [activeKey],
+        pattern.includes(':resolutions:')
+          ? pattern.includes(':flush:*')
+            ? [batchKey]
+            : [activeKey]
+          : [],
       ]),
       eval: vi.fn(async (_script: string, _keys: number, _source: string, target: string) => {
         batchKey = target;
@@ -33,6 +37,8 @@ describe('PRE Keyword Market metric flushing', () => {
       batches: 1,
       applied: 1,
       resolutions: '3',
+      views: '0',
+      clicks: '0',
     });
     expect(dailyUpsert).toHaveBeenCalledWith({
       where: {
@@ -56,7 +62,10 @@ describe('PRE Keyword Market metric flushing', () => {
     const batchKey = 'precommunity:ads:resolutions:2026-08-24:flush:retry';
     let scans = 0;
     const redis = {
-      scan: vi.fn(async () => ['0', scans++ === 0 ? [] : [batchKey]]),
+      scan: vi.fn(async (_cursor: string, _match: string, pattern: string) => [
+        '0',
+        pattern.includes(':resolutions:') && scans++ > 0 ? [batchKey] : [],
+      ]),
       eval: vi.fn(),
       hgetall: vi.fn().mockResolvedValue({ 'revision-1': '7' }),
       del: vi.fn().mockResolvedValue(1),
@@ -74,6 +83,59 @@ describe('PRE Keyword Market metric flushing', () => {
     expect(tx.adDailyMetric.upsert).not.toHaveBeenCalled();
     expect(tx.adCreativeRevision.update).not.toHaveBeenCalled();
   });
+
+  it.each(['views', 'clicks'] as const)(
+    'persists %s separately and skips a retried batch',
+    async (type) => {
+      const batchKey = `precommunity:ads:${type}:2026-10-07:flush:batch-1`;
+      let applied = false;
+      const redis = {
+        scan: vi.fn(async (_cursor: string, _match: string, pattern: string) => [
+          '0',
+          pattern === `precommunity:ads:${type}:*:flush:*` ? [batchKey] : [],
+        ]),
+        eval: vi.fn(),
+        hgetall: vi.fn().mockResolvedValue({ 'revision-1': '2', missing: '4', invalid: '-1' }),
+        del: vi.fn().mockRejectedValueOnce(new Error('Redis unavailable')).mockResolvedValue(1),
+      };
+      const tx = {
+        adMetricFlush: {
+          createMany: vi.fn(async () => {
+            if (applied) return { count: 0 };
+            applied = true;
+            return { count: 1 };
+          }),
+        },
+        adCreativeRevision: {
+          findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
+            where.id === 'missing' ? null : { id: where.id },
+          ),
+          update: vi.fn(),
+        },
+        adDailyMetric: { upsert: vi.fn() },
+      };
+      const prisma = { $transaction: (callback: (client: typeof tx) => unknown) => callback(tx) };
+      await expect(flushAdResolutionMetrics(prisma as never, redis as never)).rejects.toThrow(
+        'Redis unavailable',
+      );
+      expect(tx.adDailyMetric.upsert).toHaveBeenCalledOnce();
+      expect(tx.adDailyMetric.upsert).toHaveBeenCalledWith({
+        where: {
+          revisionId_day: { revisionId: 'revision-1', day: new Date('2026-10-07T00:00:00.000Z') },
+        },
+        update: { [type]: { increment: 2n } },
+        create: { revisionId: 'revision-1', day: new Date('2026-10-07T00:00:00.000Z'), [type]: 2n },
+      });
+      expect(tx.adCreativeRevision.update).toHaveBeenCalledWith({
+        where: { id: 'revision-1' },
+        data: { [type === 'views' ? 'lifetimeViews' : 'lifetimeClicks']: { increment: 2n } },
+      });
+      const retry = await flushAdResolutionMetrics(prisma as never, redis as never);
+      expect(retry).toMatchObject({ applied: 0, views: '0', clicks: '0' });
+      expect(tx.adDailyMetric.upsert).toHaveBeenCalledOnce();
+      expect(redis.del).toHaveBeenLastCalledWith(batchKey);
+    },
+  );
 });
 
 describe('PRE Keyword Market retention', () => {

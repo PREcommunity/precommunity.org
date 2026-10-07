@@ -14,6 +14,13 @@ const runtimeConfig = serverConfigSchema
     SIWE_URI: z.string().url().default('http://localhost:3011'),
     SESSION_SECRET: z.string().min(32).default(developmentSessionSecret),
     ADS_REPORT_FINGERPRINT_SECRET: z.string().min(32).default(developmentAdsReportSecret),
+    ADS_OPERATOR_PRIVATE_KEY: z.preprocess(
+      (value) => (value === '' ? undefined : value),
+      z
+        .string()
+        .regex(/^0x[a-fA-F0-9]{64}$/)
+        .optional(),
+    ),
     COMMUNITY_MIN_PRE: z
       .string()
       .regex(/^(?:0|[1-9]\d*)(?:\.\d+)?$/)

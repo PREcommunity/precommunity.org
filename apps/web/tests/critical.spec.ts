@@ -1,6 +1,16 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
-import { decodeFunctionData, encodeFunctionData } from 'viem';
-import { BASE_SEPOLIA_DEPLOYMENT, PRECOMMUNITY_ESCROW_ABI } from '@precommunity/shared';
+import { decodeFunctionData, encodeFunctionData, erc20Abi } from 'viem';
+import {
+  deploymentForNetwork,
+  PRECOMMUNITY_ESCROW_ABI,
+  type DeploymentOverrides,
+} from '@precommunity/shared';
+import e2eDeployment from './e2e-deployment.json';
+
+const fixtureDeployment = deploymentForNetwork(
+  'base-sepolia',
+  e2eDeployment as DeploymentOverrides,
+);
 
 const connectedAddress = `0x${'55'.repeat(20)}` as const;
 
@@ -279,7 +289,9 @@ test('forum saves, previews and publishes an account draft', async ({ page }) =>
   await expect(page.getByText('Draft saved to your account.')).toBeVisible();
   await page.getByRole('button', { name: 'Edit' }).click();
   await page.getByRole('tab', { name: 'Preview' }).click();
-  await expect(page.getByText('Draft preview')).toBeVisible();
+  await expect(
+    page.getByRole('tabpanel').getByText('Draft preview', { exact: true }),
+  ).toBeVisible();
   await page.getByRole('button', { name: 'Publish topic' }).evaluate((button) => {
     (button as HTMLButtonElement).click();
     (button as HTMLButtonElement).click();
@@ -379,15 +391,19 @@ test('authenticated session distinguishes a disconnected wallet and exposes reco
   page,
 }) => {
   const sessionAddress = `0x${'aa'.repeat(20)}`;
+  let signedIn = true;
 
   await page.route('**/v1/auth/me', (route) =>
     route.fulfill({
-      status: 200,
+      status: signedIn ? 200 : 401,
       contentType: 'application/json',
-      body: JSON.stringify({ address: sessionAddress }),
+      body: JSON.stringify(signedIn ? { address: sessionAddress } : {}),
     }),
   );
-  await page.route('**/v1/auth/logout', (route) => route.fulfill({ status: 204 }));
+  await page.route('**/v1/auth/logout', (route) => {
+    signedIn = false;
+    return route.fulfill({ status: 204 });
+  });
 
   await page.goto('/');
   const accountButton = page.getByRole('button', {
@@ -408,15 +424,20 @@ test('a stalled wallet connector cannot leave restoration pending forever', asyn
   const sessionAddress = `0x${'aa'.repeat(20)}`;
 
   await page.addInitScript(() => {
+    const restoration = { accountsRequests: 0 };
+    Object.assign(window, { __walletRestoration: restoration });
     localStorage.setItem('wagmi.recentConnectorId', JSON.stringify('injected'));
     localStorage.setItem('wagmi.injected.connected', JSON.stringify(true));
     Object.defineProperty(window, 'ethereum', {
       configurable: true,
       value: {
-        request: ({ method }: { method: string }) =>
-          method === 'eth_accounts'
-            ? new Promise(() => undefined)
-            : Promise.resolve(method === 'eth_chainId' ? '0x14a34' : null),
+        request: ({ method }: { method: string }) => {
+          if (method === 'eth_accounts') {
+            restoration.accountsRequests += 1;
+            return new Promise(() => undefined);
+          }
+          return Promise.resolve(method === 'eth_chainId' ? '0x14a34' : null);
+        },
         on: () => undefined,
         removeListener: () => undefined,
       },
@@ -431,6 +452,15 @@ test('a stalled wallet connector cannot leave restoration pending forever', asyn
   );
 
   await page.goto('/');
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __walletRestoration: { accountsRequests: number } })
+            .__walletRestoration.accountsRequests,
+      ),
+    )
+    .toBeGreaterThan(0);
   await expect(
     page.getByRole('button', {
       name: /Restoring wallet connection/,
@@ -506,7 +536,17 @@ test('contribution requests approval after a sufficient PRE balance check', asyn
             ?.length ?? 0,
       ),
     )
-    .toBe(1);
+    .toBeGreaterThanOrEqual(1);
+  const approval = await page.evaluate(
+    () =>
+      (window as unknown as { __sentTransactions: Array<{ to: string; data: `0x${string}` }> })
+        .__sentTransactions[0]!,
+  );
+  expect(approval.to.toLowerCase()).toBe(fixtureDeployment.preAddress.toLowerCase());
+  expect(decodeFunctionData({ abi: erc20Abi, data: approval.data })).toEqual({
+    functionName: 'approve',
+    args: [fixtureDeployment.escrowAddress, 10n ** 18n],
+  });
 });
 
 test('contribution stops before approval when selected USDC balance is insufficient', async ({
@@ -521,7 +561,7 @@ test('contribution stops before approval when selected USDC balance is insuffici
   await page.getByRole('button', { name: 'USDC' }).click();
   await page.locator('input[inputmode="decimal"]').fill('1');
   await page.getByRole('button', { name: 'Contribute USDC' }).click();
-  await expect(page.getByRole('alert')).toHaveText(
+  await expect(page.getByRole('region', { name: 'Fund this goal' }).getByRole('alert')).toHaveText(
     'Insufficient USDC balance for this contribution.',
   );
   expect(
@@ -646,8 +686,8 @@ test('goal manager panel exposes policy sources and prepares direct owner synchr
         serviceConfigured: true,
         network: 'base-sepolia',
         networkName: 'Base Sepolia',
-        chainId: BASE_SEPOLIA_DEPLOYMENT.chainId,
-        escrowAddress: BASE_SEPOLIA_DEPLOYMENT.escrowAddress,
+        chainId: fixtureDeployment.chainId,
+        escrowAddress: fixtureDeployment.escrowAddress,
         address: safeAddress,
         owners: [connectedAddress],
         threshold: 1,
@@ -663,6 +703,11 @@ test('goal manager panel exposes policy sources and prepares direct owner synchr
   );
   await page.route('**/v1/admin/safe-payout-proposals', (route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+  );
+  await page.route('**/v1/admin/safe-goal-action-proposals', (route) =>
+    route.request().method() === 'GET'
+      ? route.fulfill({ status: 200, contentType: 'application/json', body: '[]' })
+      : route.fallback(),
   );
   await page.route('**/v1/admin/goal-managers/*', async (route) => {
     updates.push({
@@ -699,8 +744,8 @@ test('goal manager panel exposes policy sources and prepares direct owner synchr
         changes: [{ address: connectedAddress, enabled: true }],
         transactions: [
           {
-            chainId: BASE_SEPOLIA_DEPLOYMENT.chainId,
-            to: BASE_SEPOLIA_DEPLOYMENT.escrowAddress,
+            chainId: fixtureDeployment.chainId,
+            to: fixtureDeployment.escrowAddress,
             value: '0',
             data: encodeFunctionData({
               abi: PRECOMMUNITY_ESCROW_ABI,

@@ -24,6 +24,8 @@ load_repository_env() {
     SAFE_ADDRESS
     SAFE_TRANSACTION_SERVICE_API_KEY
     PRECOMMUNITY_BASE_RPC_URL
+    PRECOMMUNITY_BROWSER_RPC_URL
+    PRECOMMUNITY_KEYWORD_MARKET_RELEASE
     BASE_RPC_URL
     PUBLIC_ESCROW_ADDRESS
     PUBLIC_ESCROW_DEPLOYMENT_BLOCK
@@ -77,6 +79,8 @@ readonly APP_USER="${PRECOMMUNITY_APP_USER:-ubuntu}"
 readonly DEPLOYMENT_NETWORK="${PRECOMMUNITY_NETWORK:-base-sepolia}"
 readonly DEPLOY_SAFE_ADDRESS="${PRECOMMUNITY_SAFE_ADDRESS:-${SAFE_ADDRESS:-}}"
 readonly SAFE_TRANSACTION_SERVICE_API_KEY_VALUE="${SAFE_TRANSACTION_SERVICE_API_KEY:-}"
+readonly BROWSER_RPC_URL_OVERRIDE="${PRECOMMUNITY_BROWSER_RPC_URL:-}"
+readonly KEYWORD_MARKET_RELEASE="${PRECOMMUNITY_KEYWORD_MARKET_RELEASE:-0}"
 readonly BASE_RPC_URL_OVERRIDE="${PRECOMMUNITY_BASE_RPC_URL:-${BASE_RPC_URL:-}}"
 readonly ESCROW_ADDRESS="${PUBLIC_ESCROW_ADDRESS:-}"
 readonly ESCROW_DEPLOYMENT_BLOCK="${PUBLIC_ESCROW_DEPLOYMENT_BLOCK:-}"
@@ -118,6 +122,18 @@ if [[ "$ESCROW_CUTOVER" != 0 && "$ESCROW_CUTOVER" != 1 ]]; then
   echo 'PRECOMMUNITY_ESCROW_CUTOVER must be 0 or 1.' >&2
   exit 2
 fi
+if [[ "$KEYWORD_MARKET_RELEASE" != 0 && "$KEYWORD_MARKET_RELEASE" != 1 ]]; then
+  echo 'PRECOMMUNITY_KEYWORD_MARKET_RELEASE must be 0 or 1.' >&2
+  exit 2
+fi
+if [[ "$KEYWORD_MARKET_RELEASE" == 1 && ( "$RESET_DATABASE" == 1 || "$ESCROW_CUTOVER" == 1 ) ]]; then
+  echo 'Keyword Market release cannot reset the database or replace escrow.' >&2
+  exit 2
+fi
+if [[ "$KEYWORD_MARKET_RELEASE" == 1 && ( -z "$ADS_CONTRACT_ADDRESS_VALUE" || -z "$ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE" ) ]]; then
+  echo 'Keyword Market release requires the confirmed market address and deployment block.' >&2
+  exit 2
+fi
 if [[ "$RESET_DATABASE" != 0 && "$RESET_DATABASE" != 1 ]]; then
   echo 'PRECOMMUNITY_RESET_DATABASE must be 0 or 1.' >&2
   exit 2
@@ -137,6 +153,10 @@ fi
 
 validate_runtime_deployment
 
+release_manifest="$(mktemp)"
+trap 'rm -f "$release_manifest"' EXIT
+node "$REPO_ROOT/ops/write-release-manifest.mjs" "$release_manifest"
+
 printf 'Creating release %s on %s...\n' "$RELEASE_ID" "$SSH_HOST"
 ssh "$SSH_HOST" sudo install -d -o "$APP_USER" -g "$APP_USER" -m 0755 "$RELEASE_DIR"
 
@@ -145,6 +165,11 @@ rsync -az \
   --exclude=.DS_Store \
   --exclude=.env \
   --exclude=.env.local \
+  --exclude=.env.* \
+  --exclude=.aws/ \
+  --exclude=.agents/ \
+  --exclude=.codex/ \
+  --exclude=.keystore* \
   --exclude=.pnpm-store/ \
   --exclude=node_modules/ \
   --exclude='**/dist/' \
@@ -153,7 +178,12 @@ rsync -az \
   --exclude='apps/*/test-results/' \
   "$REPO_ROOT/" "$SSH_HOST:$RELEASE_DIR/"
 
+rsync -az "$release_manifest" "$SSH_HOST:$RELEASE_DIR/release-manifest.json"
+
 runtime_env_file=/etc/precommunity/app.env
+if [[ "$KEYWORD_MARKET_RELEASE" == 1 ]]; then
+  runtime_env_file=/etc/precommunity/app.env.next
+fi
 if [[ "$RESET_DATABASE" == 1 ]]; then
   runtime_env_file=/etc/precommunity/app.env.mainnet-next
 elif [[ "$ESCROW_CUTOVER" == 1 ]]; then
@@ -164,6 +194,7 @@ runtime_configuration=(
   "PRECOMMUNITY_ENV_FILE=$runtime_env_file"
   "PRECOMMUNITY_SAFE_ADDRESS=$DEPLOY_SAFE_ADDRESS"
   "PRECOMMUNITY_BASE_RPC_URL=$BASE_RPC_URL_OVERRIDE"
+  "PRECOMMUNITY_BROWSER_RPC_URL=$BROWSER_RPC_URL_OVERRIDE"
   "PRECOMMUNITY_WALLETCONNECT_PROJECT_ID=$WALLETCONNECT_PROJECT_ID"
   "PUBLIC_ESCROW_ADDRESS=$ESCROW_ADDRESS"
   "PUBLIC_ESCROW_DEPLOYMENT_BLOCK=$ESCROW_DEPLOYMENT_BLOCK"
@@ -175,6 +206,10 @@ runtime_configuration=(
   "ADS_CONTRACT_ADDRESS=$ADS_CONTRACT_ADDRESS_VALUE"
   "ADS_CONTRACT_DEPLOYMENT_BLOCK=$ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE"
 )
+# SSH joins arguments into a command parsed by the remote login shell.
+for ((configuration_index = 0; configuration_index < ${#runtime_configuration[@]}; configuration_index++)); do
+  runtime_configuration[$configuration_index]="'${runtime_configuration[$configuration_index]//\'/\'\\\'\'}'"
+done
 if [[ -n "$SAFE_TRANSACTION_SERVICE_API_KEY_VALUE" ]]; then
   printf '%s\n' "$SAFE_TRANSACTION_SERVICE_API_KEY_VALUE" |
     ssh "$SSH_HOST" env \
@@ -187,14 +222,19 @@ else
     bash "$RELEASE_DIR/ops/configure-app-runtime.sh" "$DOMAIN"
 fi
 skip_database_deploy=0
-if [[ "$ESCROW_CUTOVER" == 1 || "$RESET_DATABASE" == 1 ]]; then
+if [[ "$ESCROW_CUTOVER" == 1 || "$RESET_DATABASE" == 1 || "$KEYWORD_MARKET_RELEASE" == 1 ]]; then
   skip_database_deploy=1
 fi
 ssh "$SSH_HOST" env \
   "PRECOMMUNITY_APP_ENV_FILE=$runtime_env_file" \
   "PRECOMMUNITY_SKIP_DATABASE_DEPLOY=$skip_database_deploy" \
   bash "$RELEASE_DIR/ops/build-release.sh" "$RELEASE_DIR"
-if [[ "$RESET_DATABASE" == 1 ]]; then
+if [[ "$KEYWORD_MARKET_RELEASE" == 1 ]]; then
+  printf 'Release %s is built with staged configuration; active services and database are unchanged.\n' "$RELEASE_ID"
+  printf 'Operator: enable maintenance and stop application services, then run on the VPS:\n'
+  printf 'PRECOMMUNITY_MAINTENANCE_CONFIRMED=1 bash %s/ops/cutover-keyword-market.sh %s\n' "$RELEASE_DIR" "$RELEASE_DIR"
+  exit 0
+elif [[ "$RESET_DATABASE" == 1 ]]; then
   ssh "$SSH_HOST" bash "$RELEASE_DIR/ops/cutover-fresh-database.sh" "$RELEASE_DIR"
 elif [[ "$ESCROW_CUTOVER" == 1 ]]; then
   ssh "$SSH_HOST" bash "$RELEASE_DIR/ops/cutover-escrow.sh" "$RELEASE_DIR"

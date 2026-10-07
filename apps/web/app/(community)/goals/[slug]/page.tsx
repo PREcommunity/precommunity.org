@@ -35,6 +35,7 @@ export default async function GoalPage({
     goal.goalType === 'MONTHLY' ? getGoalPeriods(slug) : Promise.resolve(null),
   ]);
   const transactionUrl = activeExplorerTransaction(goal.creationTxHash);
+  const settlementDue = goal.monthly?.phase === 'SETTLEMENT_DUE';
   const hasSupportingMaterial = Boolean(
     goal.discussionUrl || goal.metadataUri || goal.documents.length,
   );
@@ -56,7 +57,7 @@ export default async function GoalPage({
             </span>
             <h2 className="mt-1.5 text-2xl leading-[1.15] tracking-[-.025em]">Funding progress</h2>
           </div>
-          {goal.status === 'OPEN' ? (
+          {goal.status === 'OPEN' && !settlementDue ? (
             <a
               className="ml-auto inline-flex min-h-11 shrink-0 items-center justify-center gap-1.5 rounded-md border border-navy bg-navy px-4 font-bold text-white transition-colors duration-150 hover:border-blue hover:bg-blue hover:text-navy dark:hover:bg-blue-soft dark:hover:text-white"
               href="#contribute"
@@ -144,7 +145,13 @@ export default async function GoalPage({
         </div>
       </section>
 
-      <div className="grid grid-cols-[minmax(0,1fr)_340px] items-start gap-10 py-9 max-[900px]:grid-cols-1">
+      <div
+        className={
+          settlementDue
+            ? 'py-9'
+            : 'grid grid-cols-[minmax(0,1fr)_340px] items-start gap-10 py-9 max-[900px]:grid-cols-1'
+        }
+      >
         <GoalContributions slug={slug} initialPage={contributions} />
         {goal.status === 'SETTLED' ? (
           <aside
@@ -200,9 +207,9 @@ export default async function GoalPage({
               </div>
             ) : null}
           </aside>
-        ) : (
+        ) : !settlementDue ? (
           <ContributionPanel goal={goal} />
-        )}
+        ) : null}
       </div>
 
       {goal.monthly && periods ? <MonthlyGoalPanel goal={goal} periods={periods} /> : null}

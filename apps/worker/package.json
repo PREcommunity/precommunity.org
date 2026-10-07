@@ -7,6 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "backfill": "tsx src/backfill.ts",
     "check-chain-source": "tsx src/check-chain-source.ts",
+    "check-keyword-market": "tsx src/check-keyword-market.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"

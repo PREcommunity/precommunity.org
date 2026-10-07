@@ -1,7 +1,13 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { PRECOMMUNITY_ESCROW_ABI } from '@precommunity/shared';
-import { decodeEventLog, encodeAbiParameters, encodeEventTopics, parseAbiParameters } from 'viem';
+import { PRECOMMUNITY_ESCROW_ABI, PRE_KEYWORD_MARKET_ABI } from '@precommunity/shared';
+import {
+  decodeEventLog,
+  encodeAbiParameters,
+  encodeEventTopics,
+  encodeFunctionData,
+  parseAbiParameters,
+} from 'viem';
 import { describe, expect, it } from 'vitest';
 const compiledArtifactPath = process.env.ESCROW_ARTIFACT_PATH
   ? resolve(process.env.ESCROW_ARTIFACT_PATH)
@@ -13,6 +19,17 @@ const compareCompiledArtifact = existsSync(compiledArtifactPath) ? it : it.skip;
 const pinnedArtifactPath = resolve(
   __dirname,
   '../../../packages/shared/abi/PREcommunityEscrowV1.json',
+);
+const compiledKeywordMarketArtifactPath = resolve(
+  __dirname,
+  '../../../../escrow/artifacts/contracts/PREKeywordMarketV1.sol/PREKeywordMarketV1.json',
+);
+const compareCompiledKeywordMarketArtifact = existsSync(compiledKeywordMarketArtifactPath)
+  ? it
+  : it.skip;
+const pinnedKeywordMarketArtifactPath = resolve(
+  __dirname,
+  '../../../packages/shared/abi/PREKeywordMarketV1.json',
 );
 
 describe('escrow ABI stability', () => {
@@ -123,5 +140,120 @@ describe('escrow ABI stability', () => {
         usdcRecipientEntitlement: 250n,
       },
     });
+  });
+});
+
+describe('PRE Keyword Market ABI stability', () => {
+  it('exposes the reviewed immutable market surface', () => {
+    const names = new Set<string>(
+      PRE_KEYWORD_MARKET_ABI.flatMap((item) => ('name' in item ? [item.name] : [])),
+    );
+    for (const name of [
+      'PRE',
+      'stake',
+      'requestUnstake',
+      'unstake',
+      'chargeStake',
+      'withdrawAccrued',
+      'positionOf',
+      'stakeDetailsOf',
+      'topStakeOf',
+      'minimumStake',
+      'setMinimumStake',
+      'operator',
+      'setOperator',
+      'pause',
+      'unpause',
+      'Staked',
+      'UnstakeRequested',
+      'Unstaked',
+      'StakeCharged',
+      'PositionChanged',
+      'MinimumStakeUpdated',
+    ]) {
+      expect(names.has(name)).toBe(true);
+    }
+    expect(names.has('quoteNonce')).toBe(false);
+    expect(names.has('setQuoteSigner')).toBe(false);
+  });
+
+  it('projects the complete on-chain position state from one event', () => {
+    const event = PRE_KEYWORD_MARKET_ABI.find(
+      (item) => item.type === 'event' && item.name === 'PositionChanged',
+    );
+    if (!event || event.type !== 'event') throw new Error('PositionChanged ABI event is missing');
+    expect(event.inputs.map((input) => input.name)).toEqual([
+      'keywordId',
+      'staker',
+      'bidUsd',
+      'eligible',
+      'newStake',
+      'positionVersion',
+      'previousStake',
+      'requiredCoveragePre',
+      'withdrawAvailableAt',
+    ]);
+  });
+
+  it('uses the three-argument stake selector of the current sibling contract', () => {
+    const data = encodeFunctionData({
+      abi: PRE_KEYWORD_MARKET_ABI,
+      functionName: 'stake',
+      args: [`0x${'11'.repeat(32)}`, 100n, 2_500_000n],
+    });
+    expect(data.slice(0, 10)).toBe('0x2daedd52');
+    expect((data.length - 2) / 2).toBe(4 + 3 * 32);
+  });
+
+  it('decodes raw PositionChanged log data using the Solidity parameter order', () => {
+    const keywordId = `0x${'11'.repeat(32)}` as const;
+    const staker = `0x${'22'.repeat(20)}` as const;
+    const topics = encodeEventTopics({
+      abi: PRE_KEYWORD_MARKET_ABI,
+      eventName: 'PositionChanged',
+      args: { keywordId, staker },
+    });
+    const data = encodeAbiParameters(
+      parseAbiParameters('uint256,bool,uint256,uint256,uint256,uint256,uint256'),
+      [2_500_000n, false, 80n, 3n, 100n, 90n, 2_000_000_000n],
+    );
+    expect(topics[0]).toBe('0x7f77a4ff3b0a8fde7d6b8228a7127eb7ff94b616309daf707c3b093d4a9b841f');
+    expect(
+      decodeEventLog({
+        abi: PRE_KEYWORD_MARKET_ABI,
+        data,
+        topics: topics as [`0x${string}`, ...`0x${string}`[]],
+      }),
+    ).toEqual({
+      eventName: 'PositionChanged',
+      args: {
+        keywordId,
+        staker,
+        bidUsd: 2_500_000n,
+        eligible: false,
+        newStake: 80n,
+        positionVersion: 3n,
+        previousStake: 100n,
+        requiredCoveragePre: 90n,
+        withdrawAvailableAt: 2_000_000_000n,
+      },
+    });
+  });
+
+  compareCompiledKeywordMarketArtifact(
+    'matches the separately compiled market artifact when it is available',
+    () => {
+      const artifact = JSON.parse(readFileSync(compiledKeywordMarketArtifactPath, 'utf8')) as {
+        abi: unknown[];
+      };
+      expect(PRE_KEYWORD_MARKET_ABI).toEqual(artifact.abi);
+    },
+  );
+
+  it('matches the market ABI artifact pinned in the application repository', () => {
+    const artifact = JSON.parse(readFileSync(pinnedKeywordMarketArtifactPath, 'utf8')) as {
+      abi: unknown[];
+    };
+    expect(PRE_KEYWORD_MARKET_ABI).toEqual(artifact.abi);
   });
 });

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { canAccessAdmin, canModerateKeywordMarket, type SessionRole } from './session-access';
+import {
+  canAccessAdmin,
+  canManageKeywordMarketApiKeys,
+  canModerateKeywordMarket,
+  type SessionRole,
+} from './session-access';
 
 describe('canAccessAdmin', () => {
   it.each<SessionRole>(['SUPER_ADMIN', 'CONTENT_ADMIN', 'FINANCE_ADMIN'])(
@@ -16,6 +21,16 @@ describe('canAccessAdmin', () => {
 
   it('allows a pending Safe owner to reach the ownership acceptance flow', () => {
     expect(canAccessAdmin([], true)).toBe(true);
+  });
+});
+
+describe('canManageKeywordMarketApiKeys', () => {
+  it('limits API key management to super admins', () => {
+    expect(canManageKeywordMarketApiKeys(['SUPER_ADMIN'])).toBe(true);
+    expect(canManageKeywordMarketApiKeys(['SUPER_ADMIN', 'CONTENT_ADMIN'])).toBe(true);
+    expect(canManageKeywordMarketApiKeys(['CONTENT_ADMIN'])).toBe(false);
+    expect(canManageKeywordMarketApiKeys(['FINANCE_ADMIN'])).toBe(false);
+    expect(canManageKeywordMarketApiKeys()).toBe(false);
   });
 });
 

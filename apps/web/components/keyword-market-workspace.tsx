@@ -1,151 +1,175 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowRight, LoaderCircle, Pencil, Plus, Search, ShieldAlert } from 'lucide-react';
 import {
-  ArrowDown,
-  ArrowRight,
-  Check,
-  LoaderCircle,
-  Plus,
-  Search,
-  ShieldAlert,
-} from 'lucide-react';
-import {
-  AD_REPORT_REASONS,
-  tokenizeAdsText,
-  type AdReportReasonCode,
-  type AdResolveResponse,
+  normalizeAdKeyword,
+  type AdCampaignView,
+  type AdKeywordResponse,
 } from '@precommunity/shared';
-import { ActionButton } from './action-button';
-import { KeywordMarketCreativePreview } from './keyword-market-creative-preview';
+import { useWalletSession } from '@/hooks/use-wallet-session';
+import { AUTH_CHANGED_EVENT } from '@/lib/auth-events';
 import {
+  getAdKeyword,
   getKeywordMarketStatus,
-  reportAd,
-  resolveAd,
+  getMyAdCampaigns,
   type KeywordMarketChainSnapshot,
 } from '@/lib/keyword-market-api';
-
-const reasonLabels: Record<AdReportReasonCode, string> = {
-  SCAM_PHISHING: 'Scam or phishing',
-  MISLEADING: 'Misleading',
-  INAPPROPRIATE: 'Inappropriate',
-  BROKEN_LINK: 'Broken link',
-  OTHER: 'Other',
-};
-
-function QueryMatch({ query, keyword }: { query: string; keyword?: string }) {
-  const tokens = tokenizeAdsText(query).map((token) => token.value);
-  const matched = keyword?.split(' ') ?? [];
-  const start = tokens.findIndex((_, index) =>
-    matched.every((token, offset) => tokens[index + offset] === token),
-  );
-  if (!tokens.length) return <span className="text-muted">Waiting for a query</span>;
-  return (
-    <span className="keyword-market-token-line">
-      {tokens.map((token, index) => (
-        <span
-          className={
-            start >= 0 && index >= start && index < start + matched.length ? 'matched' : ''
-          }
-          key={`${token}-${index}`}
-        >
-          {token}
-        </span>
-      ))}
-    </span>
-  );
-}
+import { ActionButton } from './action-button';
+import { KeywordMarketRanking } from './keyword-market-ranking';
 
 export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: string }) {
   const [query, setQuery] = useState(initialQuery);
-  const [result, setResult] = useState<AdResolveResponse | null>(null);
+  const [result, setResult] = useState<AdKeywordResponse | null>(null);
   const [status, setStatus] = useState<KeywordMarketChainSnapshot | null>(null);
   const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [error, setError] = useState('');
-  const [reportOpen, setReportOpen] = useState(false);
-  const [reportReason, setReportReason] = useState<AdReportReasonCode>('SCAM_PHISHING');
-  const [reportComment, setReportComment] = useState('');
-  const [reportState, setReportState] = useState<'idle' | 'sending' | 'sent'>('idle');
+  const [ownership, setOwnership] = useState<{
+    address: string;
+    state: 'ready' | 'error';
+    campaigns: AdCampaignView[];
+    error: string;
+  } | null>(null);
+  const [ownershipVersion, setOwnershipVersion] = useState(0);
+  const searchRequest = useRef(0);
+  const ownershipRequest = useRef(0);
+  const { sessionAddress, sessionReady } = useWalletSession();
+  const normalized = useMemo(() => {
+    if (!query.trim()) return { keyword: '', error: '' };
+    try {
+      return { keyword: normalizeAdKeyword(query), error: '' };
+    } catch (reason) {
+      return { keyword: '', error: reason instanceof Error ? reason.message : 'Invalid keyword.' };
+    }
+  }, [query]);
 
   useEffect(() => {
+    let active = true;
     getKeywordMarketStatus()
-      .then(setStatus)
+      .then((response) => {
+        if (active) setStatus(response);
+      })
       .catch(() => undefined);
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
-    if (!initialQuery.trim()) return;
+    const refresh = () => {
+      ownershipRequest.current += 1;
+      setOwnership(null);
+      setOwnershipVersion((version) => version + 1);
+    };
+    window.addEventListener(AUTH_CHANGED_EVENT, refresh);
+    return () => window.removeEventListener(AUTH_CHANGED_EVENT, refresh);
+  }, []);
+
+  useEffect(() => {
+    const request = ++ownershipRequest.current;
+    setOwnership(null);
+    if (!sessionReady || !sessionAddress) return;
     let active = true;
-    setState('loading');
-    resolveAd(initialQuery)
-      .then((response) => {
-        if (!active) return;
-        setResult(response);
-        setState('ready');
+    getMyAdCampaigns()
+      .then((campaigns) => {
+        if (!active || request !== ownershipRequest.current) return;
+        setOwnership({ address: sessionAddress, state: 'ready', campaigns, error: '' });
       })
       .catch((reason) => {
-        if (!active) return;
-        setError(reason instanceof Error ? reason.message : 'The resolver could not complete.');
-        setState('error');
+        if (!active || request !== ownershipRequest.current) return;
+        setOwnership({
+          address: sessionAddress,
+          state: 'error',
+          campaigns: [],
+          error: reason instanceof Error ? reason.message : 'Your campaigns could not be checked.',
+        });
       });
     return () => {
       active = false;
     };
-  }, [initialQuery]);
+  }, [sessionAddress, sessionReady, ownershipVersion]);
 
-  const endpoint = '/v1/keyword-market/resolve';
-  const resultStateLabel =
-    state === 'idle'
-      ? 'No query'
-      : state === 'loading'
-        ? 'Resolving'
-        : state === 'error'
-          ? 'Error'
-          : result?.ad
-            ? 'Selected'
-            : 'No match';
-
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
+  const searchKeyword = useCallback(async (keyword: string) => {
+    const request = ++searchRequest.current;
     setError('');
-    setReportOpen(false);
-    setReportState('idle');
-    setState('loading');
     setResult(null);
+    setState('loading');
     try {
-      setResult(await resolveAd(query));
+      const response = await getAdKeyword(keyword);
+      if (request !== searchRequest.current) return;
+      setResult(response);
       setState('ready');
     } catch (reason) {
+      if (request !== searchRequest.current) return;
+      setError(
+        reason instanceof Error ? reason.message : 'The keyword ranking could not be loaded.',
+      );
       setState('error');
-      setError(reason instanceof Error ? reason.message : 'The resolver could not complete.');
     }
+  }, []);
+
+  useEffect(() => {
+    setQuery(initialQuery);
+    setResult(null);
+    setError('');
+    setState('idle');
+    if (initialQuery.trim()) {
+      try {
+        void searchKeyword(normalizeAdKeyword(initialQuery));
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : 'Invalid keyword.');
+        setState('error');
+      }
+    }
+    return () => {
+      searchRequest.current += 1;
+    };
+  }, [initialQuery, searchKeyword]);
+
+  const currentOwnership = ownership?.address === sessionAddress ? ownership : null;
+  const ownedCampaign =
+    currentOwnership?.state === 'ready'
+      ? currentOwnership.campaigns.find((campaign) => campaign.keyword === normalized.keyword)
+      : undefined;
+  const ownershipLoading = !sessionReady || Boolean(sessionAddress && !currentOwnership);
+  const ownershipError =
+    sessionAddress && currentOwnership?.state === 'error' ? currentOwnership.error : '';
+  const actionLabel = ownedCampaign ? 'Edit' : 'New stake';
+  const actionIcon = ownedCampaign ? (
+    <Pencil size={16} aria-hidden="true" />
+  ) : (
+    <Plus size={16} aria-hidden="true" />
+  );
+  const actionHref =
+    normalized.keyword && !ownershipLoading && !ownershipError
+      ? ownedCampaign
+        ? `/keyword-market/campaigns/${encodeURIComponent(ownedCampaign.id)}`
+        : `/keyword-market/campaigns/new?keyword=${encodeURIComponent(normalized.keyword)}`
+      : null;
+  const noPositions = state === 'ready' && result?.positions.length === 0;
+
+  function changeQuery(value: string) {
+    searchRequest.current += 1;
+    setQuery(value);
+    setResult(null);
+    setState('idle');
+    setError('');
   }
 
-  async function sendReport() {
-    if (!result?.ad) return;
-    setReportState('sending');
-    try {
-      await reportAd(result.ad.revisionId, {
-        reason: reportReason,
-        comment: reportComment.trim() || undefined,
-      });
-      setReportState('sent');
-    } catch (reason) {
-      setReportState('idle');
-      setError(reason instanceof Error ? reason.message : 'The report could not be sent.');
-    }
+  function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (normalized.keyword) void searchKeyword(normalized.keyword);
   }
 
   return (
     <main className="keyword-market-app-shell keyword-market-resolver-shell">
       <section className="keyword-market-resolver-stage">
         <div className="keyword-market-stage-copy">
-          <span className="keyword-market-eyebrow">Public resolver · algorithm v1</span>
+          <span className="keyword-market-eyebrow">Keyword search · public stake ranking</span>
           <h1>Stake on a keyword.</h1>
           <p>
-            The longest whole-token keyword wins first. The highest eligible PRE stake wins inside
-            that keyword.
+            Find a search phrase, inspect its stake ranking, and create or manage your campaign.
           </p>
         </div>
         <form className="keyword-market-search-form" onSubmit={submit}>
@@ -156,203 +180,146 @@ export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: s
           <input
             id="keyword-market-query"
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => changeQuery(event.target.value)}
             placeholder="Try: bitcoin"
             maxLength={256}
             autoComplete="off"
+            aria-invalid={Boolean(normalized.error)}
+            aria-describedby="keyword-market-query-inspector"
           />
           <button
             className="keyword-market-resolve-button"
             type="submit"
-            disabled={state === 'loading' || !query.trim()}
+            disabled={state === 'loading' || !normalized.keyword}
           >
             {state === 'loading' ? <LoaderCircle className="animate-spin" size={16} /> : null}
-            <span>{state === 'loading' ? 'Resolving…' : 'Resolve'}</span>
+            <span>{state === 'loading' ? 'Searching…' : 'Search'}</span>
             {state !== 'loading' ? <ArrowRight size={16} aria-hidden="true" /> : null}
           </button>
         </form>
-        <div className="keyword-market-query-inspector" aria-live="polite">
+        <div
+          id="keyword-market-query-inspector"
+          className="keyword-market-query-inspector"
+          aria-live="polite"
+        >
           <span className="keyword-market-query-dot" aria-hidden="true" />
-          <QueryMatch query={query} keyword={result?.ad?.matchedKeyword} />
-          <span className="keyword-market-query-separator" aria-hidden="true">
-            /
-          </span>
-          <span className="keyword-market-inspector-label">Whole-token match</span>
+          <span>{normalized.error || normalized.keyword || 'Enter a keyword'}</span>
+          {!normalized.error ? (
+            <span className="keyword-market-inspector-label">1–5 tokens · 64 characters</span>
+          ) : null}
         </div>
       </section>
-
       <section className="keyword-market-result-grid">
-        <div className="keyword-market-result-main">
+        <div className="keyword-market-result-main min-w-0">
           <header className="keyword-market-section-heading">
             <div>
-              <span className="keyword-market-eyebrow">Resolver output</span>
-              <h2>Selected ad</h2>
+              <span className="keyword-market-eyebrow">Public keyword ledger</span>
+              <h2>Keyword ranking</h2>
             </div>
             <div className="keyword-market-result-heading-actions">
-              <span className="keyword-market-result-state" aria-live="polite">
-                {resultStateLabel}
-              </span>
-              {result?.ad ? (
-                <button
-                  className="keyword-market-report-trigger"
-                  type="button"
-                  onClick={() => setReportOpen(true)}
+              {actionHref ? (
+                <Link className="keyword-market-primary-link" href={actionHref}>
+                  {actionIcon}
+                  {actionLabel}
+                </Link>
+              ) : (
+                <ActionButton
+                  disabled
+                  icon={
+                    ownershipLoading && normalized.keyword ? (
+                      <LoaderCircle className="animate-spin" size={16} />
+                    ) : (
+                      actionIcon
+                    )
+                  }
                 >
-                  <ShieldAlert size={14} /> Report ad
-                </button>
-              ) : null}
+                  {ownershipLoading && normalized.keyword ? 'Checking ownership…' : actionLabel}
+                </ActionButton>
+              )}
             </div>
           </header>
-          {state === 'idle' ? (
+          {ownershipError ? (
+            <div className="keyword-market-inline-error" role="alert">
+              <p>{ownershipError}</p>
+              <ActionButton onClick={() => setOwnershipVersion((version) => version + 1)}>
+                Check campaigns again
+              </ActionButton>
+            </div>
+          ) : null}
+          {state === 'idle' || noPositions ? (
             <div className="keyword-market-resolver-empty-state">
-              <span className="keyword-market-resolver-empty-icon" aria-hidden="true">
-                <Plus size={18} />
-              </span>
+              {actionHref ? (
+                <Link
+                  className="keyword-market-resolver-empty-icon"
+                  href={actionHref}
+                  aria-label={`${actionLabel} for ${normalized.keyword}`}
+                >
+                  {actionIcon}
+                </Link>
+              ) : (
+                <span className="keyword-market-resolver-empty-icon" aria-hidden="true">
+                  {actionIcon}
+                </span>
+              )}
               <div>
-                <strong>Enter a keyword to inspect the result</strong>
+                <strong>
+                  {noPositions
+                    ? 'No confirmed positions'
+                    : 'Search a keyword to inspect its stake ranking'}
+                </strong>
                 <p>
-                  The resolver deterministically selects the eligible campaign with the highest
-                  stake for the winning token.
+                  {noPositions
+                    ? 'Create a campaign for this phrase, or manage your existing campaign.'
+                    : 'You can create or edit a campaign as soon as you enter a valid phrase.'}
                 </p>
               </div>
-              <span className="keyword-market-resolver-empty-arrow" aria-hidden="true">
-                <ArrowDown size={19} />
-              </span>
             </div>
           ) : null}
           {state === 'loading' ? (
             <div className="keyword-market-resolver-empty-state">
-              <span className="keyword-market-resolver-empty-icon" aria-hidden="true">
-                <LoaderCircle className="animate-spin" size={18} />
-              </span>
+              <LoaderCircle className="animate-spin" aria-hidden="true" />
               <div>
-                <strong>Resolving candidates…</strong>
-                <p>Checking whole-token matches and their eligible campaign stakes.</p>
+                <strong>Reading indexed positions…</strong>
+                <p>Checking stake and bids for this keyword.</p>
               </div>
             </div>
           ) : null}
           {state === 'error' ? (
             <div className="keyword-market-resolver-empty-state keyword-market-resolver-error-state">
-              <span className="keyword-market-resolver-empty-icon" aria-hidden="true">
-                <ShieldAlert size={18} />
-              </span>
+              <ShieldAlert aria-hidden="true" />
               <div>
-                <strong>The query could not be resolved</strong>
+                <strong>Ranking unavailable</strong>
                 <p>{error}</p>
-              </div>
-            </div>
-          ) : null}
-          {state === 'ready' && !result?.ad ? (
-            <div className="keyword-market-resolver-empty-state">
-              <span className="keyword-market-resolver-empty-icon" aria-hidden="true">
-                <Plus size={18} />
-              </span>
-              <div>
-                <strong>No eligible ad</strong>
-                <p>
-                  {status?.status === 'AWAITING_CONTRACT'
-                    ? 'The staking contract adapter is awaiting its reviewed ABI.'
-                    : 'No matched keyword has an approved creative and active stake.'}
-                </p>
-              </div>
-            </div>
-          ) : null}
-          {result?.ad ? (
-            <>
-              <KeywordMarketCreativePreview
-                creative={result.ad}
-                keyword={result.ad.matchedKeyword}
-                interactive
-              />
-              <dl className="keyword-market-proof-list">
-                <div>
-                  <dt>Stake</dt>
-                  <dd>{result.ad.proof.stakeRaw} raw PRE</dd>
-                </div>
-                <div>
-                  <dt>Advertiser</dt>
-                  <dd>{result.ad.proof.stakerAddress}</dd>
-                </div>
-                <div>
-                  <dt>Position block</dt>
-                  <dd>{result.ad.proof.positionBlock}</dd>
-                </div>
-                <div>
-                  <dt>Indexed through</dt>
-                  <dd>{result.ad.proof.indexedThroughBlock ?? 'Syncing'}</dd>
-                </div>
-              </dl>
-            </>
-          ) : null}
-          {reportOpen && result?.ad ? (
-            <div className="keyword-market-report-form">
-              <div>
-                <span className="keyword-market-eyebrow">Anonymous report</span>
-                <h3>What is wrong with this ad?</h3>
-              </div>
-              <select
-                value={reportReason}
-                onChange={(event) => setReportReason(event.target.value as AdReportReasonCode)}
-              >
-                {AD_REPORT_REASONS.map((reason) => (
-                  <option value={reason} key={reason}>
-                    {reasonLabels[reason]}
-                  </option>
-                ))}
-              </select>
-              <textarea
-                value={reportComment}
-                onChange={(event) => setReportComment(event.target.value)}
-                maxLength={500}
-                placeholder="Optional context for the moderator"
-              />
-              <div className="flex flex-wrap items-center gap-2">
                 <ActionButton
-                  variant="primary"
-                  onClick={() => void sendReport()}
-                  disabled={reportState !== 'idle'}
+                  disabled={!normalized.keyword}
+                  onClick={() => normalized.keyword && void searchKeyword(normalized.keyword)}
                 >
-                  {reportState === 'sending'
-                    ? 'Sending…'
-                    : reportState === 'sent'
-                      ? 'Report received'
-                      : 'Submit report'}
+                  Try again
                 </ActionButton>
-                <ActionButton onClick={() => setReportOpen(false)}>Close</ActionButton>
-                {reportState === 'sent' ? (
-                  <span className="inline-flex items-center gap-1 text-xs text-success">
-                    <Check size={14} /> Awaiting moderator review
-                  </span>
-                ) : null}
               </div>
             </div>
+          ) : null}
+          {state === 'ready' && result && result.positions.length > 0 ? (
+            <KeywordMarketRanking data={result} />
           ) : null}
         </div>
-
         <aside className="keyword-market-context-rail">
           <div>
             <span className="keyword-market-eyebrow">Chain status</span>
             <strong className="keyword-market-rail-value">
               <span className="keyword-market-chain-dot" aria-hidden="true" />
-              {status?.status.replaceAll('_', ' ') ?? 'Checking'}
+              {(result?.chainStatus ?? status?.status)?.replaceAll('_', ' ') ?? 'Checking'}
             </strong>
-            <p>
-              Stake controls stay disabled until the contract ABI, deployment block and event map
-              are reviewed.
-            </p>
+            <p>Stake controls use the finalized blockchain index.</p>
           </div>
           <dl>
             <div>
               <dt>Network</dt>
-              <dd>{status?.chainId ?? '—'}</dd>
+              <dd>{result?.chainId ?? status?.chainId ?? '—'}</dd>
             </div>
             <div>
               <dt>Contract</dt>
-              <dd>{status?.contractAddress ?? 'Not configured'}</dd>
-            </div>
-            <div>
-              <dt>Resolver API</dt>
-              <dd className="break-all">{endpoint}</dd>
+              <dd>{result?.contractAddress ?? status?.contractAddress ?? 'Not configured'}</dd>
             </div>
           </dl>
           <Link className="keyword-market-text-link" href="/keyword-market/campaigns">

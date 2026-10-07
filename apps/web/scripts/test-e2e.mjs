@@ -6,6 +6,7 @@ import { runNodeCli } from './run-node-cli.mjs';
 const require = createRequire(import.meta.url);
 const playwrightCli = require.resolve('@playwright/test/cli');
 const webRoot = fileURLToPath(new URL('..', import.meta.url));
+const externalServers = process.env.PLAYWRIGHT_EXTERNAL_SERVERS === '1';
 
 async function cleanE2eCache(stage) {
   try {
@@ -16,7 +17,7 @@ async function cleanE2eCache(stage) {
   }
 }
 
-await cleanE2eCache('before');
+if (!externalServers) await cleanE2eCache('before');
 
 let exitCode = 1;
 try {
@@ -27,7 +28,7 @@ try {
 } catch (error) {
   console.error(`Failed to run Playwright: ${error.message}`);
 } finally {
-  await cleanE2eCache('after');
+  if (!externalServers) await cleanE2eCache('after');
 }
 
 process.exitCode = exitCode;

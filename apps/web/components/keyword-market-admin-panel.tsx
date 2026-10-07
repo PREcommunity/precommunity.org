@@ -1,5 +1,7 @@
 'use client';
 
+import { PRE_DECIMALS } from '@precommunity/shared';
+import { formatUnits } from 'viem';
 import type {
   AdAdminAuditView,
   AdAdminReportGroup,
@@ -89,7 +91,11 @@ function AdReviewEvidence({ revision }: { revision: AdAdminRevisionView }) {
             </div>
             <div>
               <dt>Stake</dt>
-              <dd>{revision.proof.stakeRaw}</dd>
+              <dd>{formatUnits(BigInt(revision.proof.stakeRaw), PRE_DECIMALS)} PRE</dd>
+            </div>
+            <div>
+              <dt>Bid USD (6 decimals)</dt>
+              <dd>{revision.proof.bidUsdRaw}</dd>
             </div>
             <div>
               <dt>Position block</dt>
@@ -311,7 +317,7 @@ export function KeywordMarketAdminPanel() {
                           </ActionButton>
                         </>
                       ) : null}
-                      {revision.status === 'APPROVED' ? (
+                      {revision.canSuspend ? (
                         <ActionButton
                           variant="danger"
                           onClick={() => void moderate(revision.id, 'SUSPEND')}

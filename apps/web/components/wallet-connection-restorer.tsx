@@ -29,7 +29,6 @@ export function WalletConnectionRestorer() {
 
   useEffect(() => {
     if (attemptedRef.current) return;
-    attemptedRef.current = true;
     let active = true;
     let reconnectTimeout: number | undefined;
 
@@ -67,7 +66,11 @@ export function WalletConnectionRestorer() {
     // Wagmi hydrates persisted state in its own mount effect. Yield once so
     // injected EIP-6963 connectors can be registered before selecting the
     // connector that was actually used last time.
-    const start = window.setTimeout(() => void restoreRecentConnector(), 0);
+    const start = window.setTimeout(() => {
+      if (!active || attemptedRef.current) return;
+      attemptedRef.current = true;
+      void restoreRecentConnector();
+    }, 0);
     return () => {
       active = false;
       window.clearTimeout(start);

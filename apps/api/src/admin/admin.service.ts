@@ -2315,7 +2315,13 @@ export class AdminService {
       where: {
         chainId: config.deployment.chainId,
         safeAddress: safeInfo.address.toLowerCase(),
-        payout: { status: PayoutStatus.PROPOSED },
+        goalId,
+        payout: {
+          asset: dto.asset,
+          kind: dto.kind,
+          amountRaw: dto.amountRaw,
+          status: PayoutStatus.PROPOSED,
+        },
         OR: [
           { delivery: SafePayoutDelivery.MANUAL },
           {
@@ -2330,17 +2336,6 @@ export class AdminService {
       orderBy: { createdAt: 'desc' },
     });
     if (activeIntent) {
-      const sameRequest =
-        activeIntent.goalId === goalId &&
-        activeIntent.payout.asset === dto.asset &&
-        activeIntent.payout.kind === dto.kind &&
-        activeIntent.payout.amountRaw === dto.amountRaw;
-      if (!sameRequest) {
-        throw new BadRequestException(
-          'Another payout is being prepared or submitted for this Safe. Finish it before starting a new one.',
-        );
-      }
-
       if (delivery === 'MANUAL') {
         const project = await this.project();
         if (activeIntent.delivery !== SafePayoutDelivery.MANUAL) {
@@ -2429,6 +2424,29 @@ export class AdminService {
         };
       }
       throw new BadRequestException('This Safe payout intent is no longer usable.');
+    }
+
+    const blockingIntent = await this.prisma.safePayoutIntent.findFirst({
+      where: {
+        chainId: config.deployment.chainId,
+        safeAddress: safeInfo.address.toLowerCase(),
+        payout: { status: PayoutStatus.PROPOSED },
+        OR: [
+          { delivery: SafePayoutDelivery.MANUAL },
+          {
+            delivery: SafePayoutDelivery.SERVICE,
+            consumedAt: null,
+            expiresAt: { gt: now },
+          },
+          { proposal: { is: { status: SafePayoutProposalStatus.SUBMITTING } } },
+        ],
+      },
+      select: { id: true },
+    });
+    if (blockingIntent) {
+      throw new BadRequestException(
+        'Another payout is being prepared or submitted for this Safe. Finish it before starting a new one.',
+      );
     }
 
     const to = deploymentAddress();

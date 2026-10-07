@@ -5,12 +5,15 @@ node_modules/
 # Local environment files
 .env
 .env.*
+.rehearsal/
 !.env.example
 !**/.env.example
 
 # Framework and build output
 .next/
 .next-social/
+.next-keyword-release/
+.next-rehearsal/
 .next-e2e/
 dist/
 coverage/
@@ -34,3 +37,5 @@ packages/database/prisma/dev.db
 /AGENTS.md
 /.agents/
 /.codex/
+
+packages/shared/scripts/

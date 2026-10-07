@@ -1,4 +1,6 @@
-export const ADS_ALGORITHM_VERSION = 'keyword-longest-v1' as const;
+import { keccak256, toBytes } from 'viem';
+
+export const ADS_ALGORITHM_VERSION = 'keyword-longest-v2' as const;
 export const ADS_MAX_QUERY_CHARACTERS = 256;
 export const ADS_MAX_QUERY_TOKENS = 32;
 export const ADS_MAX_KEYWORD_CHARACTERS = 64;
@@ -65,6 +67,10 @@ export function normalizeAdKeyword(value: string): string {
   return keyword;
 }
 
+export function adKeywordId(value: string): `0x${string}` {
+  return keccak256(toBytes(normalizeAdKeyword(value)));
+}
+
 export function adsKeywordCandidates(query: string): AdsKeywordCandidate[] {
   const normalized = query.normalize('NFKC');
   if (characterCount(normalized) > ADS_MAX_QUERY_CHARACTERS) {
@@ -112,7 +118,11 @@ export function adsUtcDay(date = new Date()) {
 }
 
 export function adResolutionCounterKey(day: string) {
-  return `precommunity:ads:resolutions:${day}`;
+  return adMetricCounterKey('resolutions', day);
+}
+
+export function adMetricCounterKey(type: 'resolutions' | 'views' | 'clicks', day: string) {
+  return `precommunity:ads:${type}:${day}`;
 }
 
 export interface AdStakeProof {
@@ -120,6 +130,11 @@ export interface AdStakeProof {
   contractAddress: string;
   stakerAddress: string;
   stakeRaw: string;
+  bidUsdRaw: string;
+  requiredCoveragePreRaw: string;
+  eligible: boolean;
+  withdrawAvailableAt: string;
+  positionVersion: string;
   positionBlock: string;
   positionTxHash: string;
   indexedThroughBlock: string | null;
@@ -130,6 +145,7 @@ export interface AdResolveCreative {
   headline: string;
   description: string;
   destinationUrl: string;
+  clickUrl: string;
   displayDomain: string;
   matchedKeyword: string;
   proof: AdStakeProof;
@@ -145,6 +161,11 @@ export interface AdKeywordPositionView {
   rank: number;
   stakerAddress: string;
   stakeRaw: string;
+  bidUsdRaw: string;
+  requiredCoveragePreRaw: string;
+  eligible: boolean;
+  withdrawAvailableAt: string;
+  positionVersion: string;
   amountSinceBlock: string;
   amountSinceLogIndex: number;
   positionBlock: string;
@@ -181,16 +202,32 @@ export interface AdCampaignView {
   paused: boolean;
   chainStatus: AdsChainStatus;
   position: AdKeywordPositionView | null;
-  leaderStakeRaw: string | null;
-  stakeNeededToLeadRaw: string | null;
+  leaderBidUsdRaw: string | null;
+  bidNeededToLeadUsdRaw: string | null;
   activeRevision: AdRevisionView | null;
   pendingRevision: AdRevisionView | null;
   revisions: AdRevisionView[];
+  lifetimeViews: string;
+  lifetimeClicks: string;
   createdAt: string;
   updatedAt: string;
 }
 
+export interface AdApiKeyView {
+  id: string;
+  name: string;
+  prefix: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface AdApiKeyCreateResponse extends AdApiKeyView {
+  apiKey: string;
+}
+
 export interface AdAdminRevisionView extends AdRevisionView {
+  canSuspend: boolean;
   keyword: string;
   advertiserAddress: string;
   reportCount: string;

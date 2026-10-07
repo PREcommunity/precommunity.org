@@ -1,4 +1,5 @@
 export { PRECOMMUNITY_ESCROW_ABI } from './precommunity-escrow-abi';
+export { PRE_KEYWORD_MARKET_ABI } from './pre-keyword-market-abi';
 export * from './ads';
 export * from './monthly-schedule';
 export {

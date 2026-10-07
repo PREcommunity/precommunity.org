@@ -21,3 +21,7 @@ export function canAccessAdmin(
 export function canModerateKeywordMarket(roles: readonly SessionRole[] = []) {
   return roles.includes('SUPER_ADMIN') || roles.includes('CONTENT_ADMIN');
 }
+
+export function canManageKeywordMarketApiKeys(roles: readonly SessionRole[] = []) {
+  return roles.includes('SUPER_ADMIN');
+}

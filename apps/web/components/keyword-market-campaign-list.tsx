@@ -1,9 +1,19 @@
 'use client';
 
-import type { AdCampaignView, AdCreativeStatusCode } from '@precommunity/shared';
-import { ArrowRight, CircleAlert, LoaderCircle, Plus, RefreshCw, WalletCards } from 'lucide-react';
+import { PRE_DECIMALS, type AdCampaignView, type AdCreativeStatusCode } from '@precommunity/shared';
+import {
+  ArrowRight,
+  CircleAlert,
+  LoaderCircle,
+  Plus,
+  RefreshCw,
+  Search,
+  WalletCards,
+} from 'lucide-react';
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { formatUnits } from 'viem';
+import { useKeywordMarketRefresh } from '@/hooks/use-keyword-market-refresh';
 import { AUTH_CHANGED_EVENT, AUTH_SIGN_IN_REQUESTED_EVENT } from '@/lib/auth-events';
 import { getMyAdCampaigns } from '@/lib/keyword-market-api';
 import { ApiError } from '@/lib/http';
@@ -16,6 +26,8 @@ const statusLabel: Record<AdCreativeStatusCode, string> = {
   SUSPENDED: 'Suspended',
   SUPERSEDED: 'Superseded',
 };
+
+const PAGE_SIZE = 20;
 
 function campaignStatus(campaign: AdCampaignView) {
   if (campaign.paused) return { label: 'Paused', tone: 'muted' };
@@ -44,28 +56,74 @@ export function KeywordMarketCampaignList() {
   const [campaigns, setCampaigns] = useState<AdCampaignView[]>([]);
   const [state, setState] = useState<'loading' | 'ready' | 'signed-out' | 'error'>('loading');
   const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const loadInFlight = useRef(false);
+  const pendingLoad = useRef<(() => Promise<void>) | null>(null);
+  const sessionGeneration = useRef(0);
 
-  const load = useCallback(async () => {
-    setState('loading');
-    setError('');
+  const load = useCallback(async function loadCampaigns(background = false): Promise<void> {
+    if (loadInFlight.current) {
+      if (!background) pendingLoad.current = () => loadCampaigns();
+      return;
+    }
+    loadInFlight.current = true;
+    const generation = sessionGeneration.current;
+    if (!background) {
+      setState('loading');
+      setError('');
+    }
     try {
-      setCampaigns(await getMyAdCampaigns());
+      const nextCampaigns = await getMyAdCampaigns();
+      if (generation !== sessionGeneration.current) return;
+      setCampaigns(nextCampaigns);
       setState('ready');
     } catch (reason) {
+      if (generation !== sessionGeneration.current) return;
       if (reason instanceof ApiError && reason.status === 401) {
+        setCampaigns([]);
         setState('signed-out');
         return;
       }
-      setError(reason instanceof Error ? reason.message : 'Campaigns could not be loaded.');
-      setState('error');
+      if (!background) {
+        setError(reason instanceof Error ? reason.message : 'Campaigns could not be loaded.');
+        setState('error');
+      }
+    } finally {
+      loadInFlight.current = false;
+      const pending = pendingLoad.current;
+      pendingLoad.current = null;
+      void pending?.();
     }
   }, []);
 
   useEffect(() => {
     void load();
-    window.addEventListener(AUTH_CHANGED_EVENT, load);
-    return () => window.removeEventListener(AUTH_CHANGED_EVENT, load);
+    const refresh = () => {
+      sessionGeneration.current += 1;
+      setCampaigns([]);
+      setSearch('');
+      setPage(1);
+      setState('loading');
+      setError('');
+      void load();
+    };
+    window.addEventListener(AUTH_CHANGED_EVENT, refresh);
+    return () => window.removeEventListener(AUTH_CHANGED_EVENT, refresh);
   }, [load]);
+  useKeywordMarketRefresh(load, state === 'ready');
+
+  const filteredCampaigns = campaigns.filter((campaign) =>
+    campaign.keyword.toLowerCase().includes(search.trim().toLowerCase()),
+  );
+  const pageCount = Math.max(1, Math.ceil(filteredCampaigns.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const pageStart = (currentPage - 1) * PAGE_SIZE;
+  const visibleCampaigns = filteredCampaigns.slice(pageStart, pageStart + PAGE_SIZE);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, pageCount));
+  }, [pageCount]);
 
   return (
     <main className="keyword-market-app-shell">
@@ -123,51 +181,124 @@ export function KeywordMarketCampaignList() {
         </div>
       ) : null}
       {state === 'ready' && campaigns.length > 0 ? (
-        <section className="keyword-market-ledger" aria-label="Campaigns">
-          <div className="keyword-market-ledger-head">
-            <span>Keyword</span>
-            <span>Status</span>
-            <span>Rank / stake</span>
-            <span>30 day resolves</span>
-            <span aria-hidden="true" />
-          </div>
-          {campaigns.map((campaign, index) => {
-            const status = campaignStatus(campaign);
-            return (
-              <Link
-                className="keyword-market-ledger-row"
-                href={`/keyword-market/campaigns/${campaign.id}`}
-                key={campaign.id}
-                style={{ '--keyword-market-row-index': index } as React.CSSProperties}
+        <>
+          <div className="keyword-market-campaign-search">
+            <label className="keyword-market-campaign-search-input">
+              <Search size={16} aria-hidden="true" />
+              <input
+                type="search"
+                aria-label="Search keywords"
+                placeholder="Search keywords"
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  setPage(1);
+                }}
+              />
+            </label>
+            {search ? (
+              <ActionButton
+                size="compact"
+                onClick={() => {
+                  setSearch('');
+                  setPage(1);
+                }}
               >
-                <span className="keyword-market-ledger-keyword">
-                  <small>{String(index + 1).padStart(2, '0')}</small>
-                  <strong>{campaign.keyword}</strong>
-                </span>
-                <span className={`keyword-market-status keyword-market-status-${status.tone}`}>
-                  {status.label}
-                </span>
-                <span>
-                  {campaign.position ? (
-                    <>
-                      <strong>#{campaign.position.rank}</strong>
-                      <small>{campaign.position.stakeRaw} raw</small>
-                    </>
-                  ) : (
-                    <small>No chain position</small>
-                  )}
-                </span>
-                <span>
-                  <strong>{metric(campaign.activeRevision?.last30DaysResolutions ?? '0')}</strong>
-                  <small>
-                    lifetime {metric(campaign.activeRevision?.lifetimeResolutions ?? '0')}
-                  </small>
-                </span>
-                <ArrowRight size={16} />
-              </Link>
-            );
-          })}
-        </section>
+                Clear search
+              </ActionButton>
+            ) : null}
+            <span aria-live="polite">
+              {filteredCampaigns.length} {filteredCampaigns.length === 1 ? 'campaign' : 'campaigns'}
+            </span>
+          </div>
+          {filteredCampaigns.length === 0 ? (
+            <div className="keyword-market-access-state">
+              <strong>No matching campaigns</strong>
+              <p>Try another keyword or clear the search.</p>
+            </div>
+          ) : (
+            <section
+              className="keyword-market-ledger keyword-market-campaign-ledger"
+              aria-label="Campaigns"
+            >
+              <div className="keyword-market-ledger-head">
+                <span>Keyword</span>
+                <span>Status</span>
+                <span>Rank / USD bid</span>
+                <span>Stake</span>
+                <span title="Total ad views across all campaign creatives">Views</span>
+                <span title="Total ad clicks across all campaign creatives">Clicks</span>
+                <span aria-hidden="true" />
+              </div>
+              {visibleCampaigns.map((campaign, index) => {
+                const status = campaignStatus(campaign);
+                return (
+                  <Link
+                    className="keyword-market-ledger-row"
+                    href={`/keyword-market/campaigns/${campaign.id}`}
+                    key={campaign.id}
+                    style={{ '--keyword-market-row-index': index } as React.CSSProperties}
+                  >
+                    <span className="keyword-market-ledger-keyword">
+                      <small>{String(pageStart + index + 1).padStart(2, '0')}</small>
+                      <strong>{campaign.keyword}</strong>
+                    </span>
+                    <span className={`keyword-market-status keyword-market-status-${status.tone}`}>
+                      {status.label}
+                    </span>
+                    <span>
+                      {campaign.position ? (
+                        <>
+                          <strong>
+                            {campaign.position.eligible ? `#${campaign.position.rank}` : 'Inactive'}
+                          </strong>
+                          <small>
+                            ${formatUnits(BigInt(campaign.position.bidUsdRaw), 6)} / click
+                          </small>
+                        </>
+                      ) : (
+                        <small>No chain position</small>
+                      )}
+                    </span>
+                    <span>
+                      <strong>
+                        {formatUnits(BigInt(campaign.position?.stakeRaw ?? '0'), PRE_DECIMALS)} PRE
+                      </strong>
+                    </span>
+                    <span>
+                      <strong>{metric(campaign.lifetimeViews)}</strong>
+                    </span>
+                    <span>
+                      <strong>{metric(campaign.lifetimeClicks)}</strong>
+                    </span>
+                    <ArrowRight size={16} />
+                  </Link>
+                );
+              })}
+            </section>
+          )}
+          {pageCount > 1 ? (
+            <nav className="keyword-market-campaign-pagination" aria-label="Campaign pagination">
+              <ActionButton
+                size="compact"
+                disabled={currentPage === 1}
+                onClick={() => setPage(currentPage - 1)}
+              >
+                Previous
+              </ActionButton>
+              <span aria-live="polite">
+                Page {currentPage} of {pageCount}
+              </span>
+              <ActionButton
+                size="compact"
+                disabled={currentPage === pageCount}
+                onClick={() => setPage(currentPage + 1)}
+              >
+                Next
+              </ActionButton>
+            </nav>
+          ) : null}
+        </>
       ) : null}
     </main>
   );

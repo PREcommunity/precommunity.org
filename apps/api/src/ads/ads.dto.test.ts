@@ -2,9 +2,23 @@ import 'reflect-metadata';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { describe, expect, it } from 'vitest';
-import { CreateAdCampaignDto, ListAdAdminReportsDto, ReportAdDto } from './ads.dto';
+import {
+  CreateAdCampaignDto,
+  CreateAdApiKeyDto,
+  ListAdAdminReportsDto,
+  PrepareAdStakeDto,
+  ReportAdDto,
+} from './ads.dto';
 
 describe('PRE Keyword Market request validation', () => {
+  it('trims integration names and rejects missing or oversized API key names', async () => {
+    const named = plainToInstance(CreateAdApiKeyDto, { name: '  Search engine  ' });
+    await expect(validate(named)).resolves.toHaveLength(0);
+    expect(named.name).toBe('Search engine');
+    for (const name of [undefined, '   ', 'x'.repeat(81)]) {
+      expect((await validate(plainToInstance(CreateAdApiKeyDto, { name }))).map((error) => error.property)).toContain('name');
+    }
+  });
   it('trims a valid creative and accepts an HTTPS destination', async () => {
     const dto = plainToInstance(CreateAdCampaignDto, {
       keyword: '  Bitcoin Poland  ',
@@ -74,5 +88,25 @@ describe('PRE Keyword Market request validation', () => {
     expect((await validate(invalid)).map((error) => error.property)).toEqual(
       expect.arrayContaining(['status', 'cursor', 'limit']),
     );
+  });
+
+  it('accepts zero-deposit bid updates and requires positive micro-USD bids', async () => {
+    await expect(
+      validate(plainToInstance(PrepareAdStakeDto, { amountRaw: '0', bidUsdRaw: '1000000' })),
+    ).resolves.toHaveLength(0);
+    for (const amountRaw of ['-1', '1.5', '1e18', '']) {
+      expect(
+        (await validate(plainToInstance(PrepareAdStakeDto, { amountRaw, bidUsdRaw: '1' }))).map(
+          (error) => error.property,
+        ),
+      ).toContain('amountRaw');
+    }
+    for (const bidUsdRaw of ['0', '-1', '1.5', '1e6', '']) {
+      expect(
+        (await validate(plainToInstance(PrepareAdStakeDto, { amountRaw: '1', bidUsdRaw }))).map(
+          (error) => error.property,
+        ),
+      ).toContain('bidUsdRaw');
+    }
   });
 });

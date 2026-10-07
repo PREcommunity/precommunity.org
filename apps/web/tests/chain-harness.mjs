@@ -1,14 +1,16 @@
 import { createServer } from 'node:http';
-import { BASE_SEPOLIA_DEPLOYMENT } from '@precommunity/shared';
-import { encodeAbiParameters } from 'viem';
+import { deploymentForNetwork } from '@precommunity/shared';
+import { decodeFunctionData, encodeAbiParameters, encodeFunctionResult, multicall3Abi } from 'viem';
+import overrides from './e2e-deployment.json' with { type: 'json' };
 
+const deployment = deploymentForNetwork('base-sepolia', overrides);
 const apiPort = 4100;
 const month = '2099-08';
 const goalId = `0x${'11'.repeat(32)}`;
 const creationHash = `0x${'22'.repeat(32)}`;
 const contributionHash = `0x${'33'.repeat(32)}`;
-const escrowAddress = `0x${'44'.repeat(20)}`;
-const recipient = `0x${'55'.repeat(20)}`;
+const escrowAddress = deployment.escrowAddress;
+const recipient = deployment.treasury;
 const slug = `local-chain-infrastructure-${goalId.slice(2, 10)}`;
 const preProgress = {
   asset: 'PRE',
@@ -47,11 +49,11 @@ const dashboard = {
   project: { name: 'precommunity', slug: 'precommunity', description: 'Deterministic E2E ledger.' },
   month,
   generatedAt: '2099-08-15T12:00:00.000Z',
-  chainId: 84532,
-  network: 'Base Sepolia',
+  chainId: deployment.chainId,
+  network: deployment.networkName,
   escrowAddress,
   indexedThroughBlock: '120',
-  confirmations: 12,
+  confirmations: deployment.confirmations,
   lastIndexedAt: '2099-08-15T12:00:00.000Z',
   syncStatus: 'SYNCED',
   totals: [preProgress, usdcProgress],
@@ -248,19 +250,6 @@ const profileResult = encodeAbiParameters(
     },
   ],
 );
-const multicallProfileResult = encodeAbiParameters(
-  [
-    {
-      type: 'tuple[]',
-      components: [
-        { name: 'success', type: 'bool' },
-        { name: 'returnData', type: 'bytes' },
-      ],
-    },
-  ],
-  [[{ success: true, returnData: profileResult }]],
-);
-
 let lastReceiptHash = '';
 let blockPolls = 0;
 
@@ -269,14 +258,22 @@ function rpcResult(method, params = []) {
   if (method === 'eth_call') {
     const call = params[0] ?? {};
     if (String(call.data ?? '').startsWith('0x70a08231')) {
-      return String(call.to ?? '').toLowerCase() ===
-        BASE_SEPOLIA_DEPLOYMENT.preAddress.toLowerCase()
+      return String(call.to ?? '').toLowerCase() === deployment.preAddress.toLowerCase()
         ? `0x${(1_000n * 10n ** 18n).toString(16).padStart(64, '0')}`
         : `0x${'0'.repeat(64)}`;
     }
-    return String(call.to ?? '').toLowerCase() === '0xca11bde05977b3631167028862be2a173976ca11'
-      ? multicallProfileResult
-      : profileResult;
+    if (String(call.to ?? '').toLowerCase() === '0xca11bde05977b3631167028862be2a173976ca11') {
+      const { args } = decodeFunctionData({ abi: multicall3Abi, data: call.data });
+      return encodeFunctionResult({
+        abi: multicall3Abi,
+        functionName: 'aggregate3',
+        result: args[0].map(({ target, callData }) => ({
+          success: true,
+          returnData: rpcResult('eth_call', [{ to: target, data: callData }]),
+        })),
+      });
+    }
+    return profileResult;
   }
   if (method === 'eth_gasPrice' || method === 'eth_maxPriorityFeePerGas') return '0x3b9aca00';
   if (method === 'eth_estimateGas') return '0x249f0';
@@ -462,7 +459,7 @@ createServer((request, response) => {
         network: 'base-sepolia',
         networkName: 'Base Sepolia',
         chainId: 84532,
-        escrowAddress: BASE_SEPOLIA_DEPLOYMENT.escrowAddress,
+        escrowAddress: deployment.escrowAddress,
         safeOwner: false,
       }),
     );

@@ -28,7 +28,8 @@ if [[ ! -r /etc/precommunity/data-services.env || ! -r "$APP_ENV_FILE" ]]; then
 fi
 if [[ "$APP_ENV_FILE" != /etc/precommunity/app.env &&
   "$APP_ENV_FILE" != /etc/precommunity/app.env.mainnet-next &&
-  "$APP_ENV_FILE" != /etc/precommunity/app.env.escrow-next ]]; then
+  "$APP_ENV_FILE" != /etc/precommunity/app.env.escrow-next &&
+  "$APP_ENV_FILE" != /etc/precommunity/app.env.next ]]; then
   echo "Refusing to source an unexpected application environment path: $APP_ENV_FILE" >&2
   exit 2
 fi
@@ -75,6 +76,8 @@ rsync -a --delete "$RELEASE_DIR/apps/web/.next/static/" "$STATIC_DEST/"
 if [[ "$SKIP_DATABASE_DEPLOY" == 1 ]]; then
   printf 'Database migrations are deferred to the controlled cutover.\n'
 else
+  node ops/check-keyword-market-migration.mjs
+
   printf 'Applying production database migrations...\n'
   pnpm db:deploy
 

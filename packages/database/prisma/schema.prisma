@@ -230,6 +230,18 @@ model WalletSession {
   @@index([address, nonceExpiresAt])
 }
 
+/// Server integration credentials. Only a digest of the generated secret is persisted.
+model AdApiKey {
+  id               String    @id @default(uuid()) @db.Uuid
+  name             String
+  keyPrefix        String
+  keyHash          String    @unique
+  createdByAddress String
+  createdAt        DateTime  @default(now())
+  lastUsedAt       DateTime?
+  revokedAt        DateTime?
+}
+
 /// Durable off-chain campaign owned by one wallet for one canonical keyword.
 model AdCampaign {
   id               String               @id @default(uuid()) @db.Uuid
@@ -262,6 +274,8 @@ model AdCreativeRevision {
   moderationNote      String?
   moderatedAt         DateTime?
   lifetimeResolutions BigInt              @default(0)
+  lifetimeViews       BigInt              @default(0)
+  lifetimeClicks      BigInt              @default(0)
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
   campaign            AdCampaign          @relation("AdCampaignRevisions", fields: [campaignId], references: [id], onDelete: Cascade)
@@ -277,24 +291,29 @@ model AdCreativeRevision {
 
 /// Rebuildable, confirmation-aware projection of the ads staking contract.
 model AdStakePosition {
-  id                  String   @id @default(uuid()) @db.Uuid
-  chainId             Int
-  contractAddress     String
-  canonicalKeyword    String
-  stakerAddress       String
-  stakeRaw            String
-  amountSinceBlock    BigInt
-  amountSinceLogIndex Int
-  positionBlock       BigInt
-  positionBlockHash   String
-  positionTxHash      String
-  positionLogIndex    Int
-  active              Boolean  @default(true)
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  id                     String   @id @default(uuid()) @db.Uuid
+  chainId                Int
+  contractAddress        String
+  keywordId              String
+  stakerAddress          String
+  stakeRaw               String
+  bidUsdRaw              String
+  requiredCoveragePreRaw String
+  eligible               Boolean
+  withdrawAvailableAt    BigInt
+  positionVersion        BigInt
+  amountSinceBlock       BigInt
+  amountSinceLogIndex    Int
+  positionBlock          BigInt
+  positionBlockHash      String
+  positionTxHash         String
+  positionLogIndex       Int
+  active                 Boolean  @default(true)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
 
-  @@unique([chainId, contractAddress, canonicalKeyword, stakerAddress])
-  @@index([chainId, contractAddress, canonicalKeyword, active])
+  @@unique([chainId, contractAddress, keywordId, stakerAddress])
+  @@index([chainId, contractAddress, keywordId, active])
   @@index([stakerAddress, active])
 }
 
@@ -315,12 +334,16 @@ model AdChainEvent {
 }
 
 model AdIndexerState {
-  key             String   @id
-  chainId         Int
-  contractAddress String
-  lastBlockNumber BigInt
-  lastBlockHash   String
-  updatedAt       DateTime @updatedAt
+  key               String   @id
+  chainId           Int
+  contractAddress   String
+  lastBlockNumber   BigInt
+  lastBlockHash     String
+  minimumStakeRaw   String?
+  paused            Boolean?
+  operatorAddress   String?
+  configBlockNumber BigInt?
+  updatedAt         DateTime @updatedAt
 
   @@index([chainId, contractAddress])
 }
@@ -360,6 +383,8 @@ model AdDailyMetric {
   revisionId  String             @db.Uuid
   day         DateTime           @db.Date
   resolutions BigInt             @default(0)
+  views       BigInt             @default(0)
+  clicks      BigInt             @default(0)
   updatedAt   DateTime           @updatedAt
   revision    AdCreativeRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
 
@@ -417,35 +442,35 @@ model Subproject {
 
 /// Administrative goal draft. It never becomes part of the public ledger by itself.
 model Expense {
-  id                   String                @id @default(uuid()) @db.Uuid
-  subprojectId         String                @db.Uuid
-  communityProposalId  String?               @unique @db.Uuid
-  slug                 String                @unique
-  name                 String
-  description          String
-  purpose              String
-  category             String?
-  cadence              ExpenseCadence        @default(ONE_TIME)
-  monthlySurplusPolicy MonthlySurplusPolicy?
+  id                        String                @id @default(uuid()) @db.Uuid
+  subprojectId              String                @db.Uuid
+  communityProposalId       String?               @unique @db.Uuid
+  slug                      String                @unique
+  name                      String
+  description               String
+  purpose                   String
+  category                  String?
+  cadence                   ExpenseCadence        @default(ONE_TIME)
+  monthlySurplusPolicy      MonthlySurplusPolicy?
   firstSettlementAtOverride DateTime?
-  status               ExpenseStatus         @default(DRAFT)
-  recipientAddress     String
-  deadline             DateTime?
-  discussionUrl        String?
-  metadataUri          String?
-  metadataDocuments    Json?
-  previewToken         String?               @unique
-  pendingChainGoalId   String?               @unique
-  pendingChainTxHash   String?
-  activeFrom           DateTime?
-  activeUntil          DateTime?
-  archivedAt           DateTime?
-  createdAt            DateTime              @default(now())
-  updatedAt            DateTime              @updatedAt
-  subproject           Subproject            @relation(fields: [subprojectId], references: [id], onDelete: Restrict)
-  communityProposal    CommunityProposal?    @relation(fields: [communityProposalId], references: [id], onDelete: SetNull)
-  targets              FundingTarget[]
-  goals                FundingGoal[]
+  status                    ExpenseStatus         @default(DRAFT)
+  recipientAddress          String
+  deadline                  DateTime?
+  discussionUrl             String?
+  metadataUri               String?
+  metadataDocuments         Json?
+  previewToken              String?               @unique
+  pendingChainGoalId        String?               @unique
+  pendingChainTxHash        String?
+  activeFrom                DateTime?
+  activeUntil               DateTime?
+  archivedAt                DateTime?
+  createdAt                 DateTime              @default(now())
+  updatedAt                 DateTime              @updatedAt
+  subproject                Subproject            @relation(fields: [subprojectId], references: [id], onDelete: Restrict)
+  communityProposal         CommunityProposal?    @relation(fields: [communityProposalId], references: [id], onDelete: SetNull)
+  targets                   FundingTarget[]
+  goals                     FundingGoal[]
 }
 
 /// Off-chain community idea. Only a converted Expense can enter the escrow publication flow.

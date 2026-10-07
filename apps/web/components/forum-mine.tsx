@@ -48,7 +48,7 @@ export function ForumMine({ submitted, config }: { submitted?: string; config: F
         setState('signed-out');
         return;
       }
-      setLoadError(error instanceof Error ? error.message : 'Your topics could not be loaded.');
+      setLoadError('Your topics could not be loaded.');
       setState('error');
     }
   }

@@ -35,4 +35,11 @@ describe('API-only secret validation', () => {
     expect(config.allowedWebOrigins).toEqual(['https://community.example']);
     expect(config.BASE_CHAIN_ID).toBe(config.deployment.chainId);
   });
+
+  it('validates the optional operator signing key format', async () => {
+    vi.resetModules();
+    vi.stubEnv('NODE_ENV', 'test');
+    vi.stubEnv('ADS_OPERATOR_PRIVATE_KEY', 'not-a-private-key');
+    await expect(import('./config')).rejects.toThrow('ADS_OPERATOR_PRIVATE_KEY');
+  });
 });

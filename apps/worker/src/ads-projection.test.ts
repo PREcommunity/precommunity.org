@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
+import { adKeywordId } from '@precommunity/shared';
 import {
   applyAdPositionChange,
+  advanceAdsIndexerState,
   finalizedAdsBlock,
   projectFinalizedAdPositionChange,
   resetAdsProjectionAfterReorg,
@@ -10,9 +12,15 @@ import {
 const baseChange: AdPositionChange = {
   chainId: 8453,
   contractAddress: '0x0000000000000000000000000000000000000099',
-  keyword: 'BITCOIN—Poland',
+  keywordId: adKeywordId('BITCOIN—Poland'),
   stakerAddress: '0x0000000000000000000000000000000000000001',
   stakeRaw: '100',
+  previousStakeRaw: '0',
+  bidUsdRaw: '2500000',
+  requiredCoveragePreRaw: '80',
+  eligible: true,
+  withdrawAvailableAt: 0n,
+  positionVersion: 1n,
   blockNumber: 10n,
   blockHash: `0x${'1'.repeat(64)}`,
   txHash: `0x${'2'.repeat(64)}`,
@@ -33,8 +41,13 @@ describe('PRE Keyword Market position projection', () => {
     expect(upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({
-          canonicalKeyword: 'bitcoin poland',
+          keywordId: adKeywordId('bitcoin poland'),
           stakeRaw: '100',
+          bidUsdRaw: '2500000',
+          requiredCoveragePreRaw: '80',
+          eligible: true,
+          withdrawAvailableAt: 0n,
+          positionVersion: 1n,
           amountSinceBlock: 10n,
           amountSinceLogIndex: 3,
           active: true,
@@ -59,11 +72,26 @@ describe('PRE Keyword Market position projection', () => {
     } as never;
 
     await expect(
-      applyAdPositionChange(database, { ...baseChange, blockNumber: 11n, logIndex: 0 }),
+      applyAdPositionChange(database, {
+        ...baseChange,
+        bidUsdRaw: '3500000',
+        eligible: false,
+        withdrawAvailableAt: 123n,
+        positionVersion: 2n,
+        blockNumber: 11n,
+        logIndex: 0,
+      }),
     ).resolves.toEqual({ applied: true, amountChanged: false });
     expect(upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        update: expect.objectContaining({ amountSinceBlock: 10n, amountSinceLogIndex: 3 }),
+        update: expect.objectContaining({
+          bidUsdRaw: '3500000',
+          eligible: false,
+          withdrawAvailableAt: 123n,
+          positionVersion: 2n,
+          amountSinceBlock: 10n,
+          amountSinceLogIndex: 3,
+        }),
       }),
     );
   });
@@ -95,12 +123,18 @@ describe('PRE Keyword Market position projection', () => {
     await applyAdPositionChange(database, {
       ...baseChange,
       stakeRaw: '0',
+      bidUsdRaw: '0',
+      eligible: false,
+      withdrawAvailableAt: 0n,
+      positionVersion: 2n,
       blockNumber: 13n,
       logIndex: 0,
     });
 
     expect(upsert).toHaveBeenCalledWith(
-      expect.objectContaining({ update: expect.objectContaining({ active: false }) }),
+      expect.objectContaining({
+        update: expect.objectContaining({ active: false, bidUsdRaw: '0', eligible: false }),
+      }),
     );
   });
 
@@ -127,6 +161,18 @@ describe('PRE Keyword Market position projection', () => {
       reason: 'DUPLICATE_EVENT',
     });
     expect(upsert).toHaveBeenCalledOnce();
+    expect(createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [
+          expect.objectContaining({
+            payload: expect.objectContaining({
+              previousStakeRaw: '0',
+              requiredCoveragePreRaw: '80',
+            }),
+          }),
+        ],
+      }),
+    );
   });
 
   it('calculates a confirmation boundary and resets only ads projection tables after a reorg', async () => {
@@ -152,5 +198,22 @@ describe('PRE Keyword Market position projection', () => {
     expect(tx.adStakePosition.deleteMany).toHaveBeenCalledWith({
       where: { chainId: 8453, contractAddress: baseChange.contractAddress },
     });
+  });
+
+  it('does not let a delayed concurrent poll overwrite a newer checkpoint and configuration', async () => {
+    const current = { lastBlockNumber: 120n, minimumStakeRaw: '200', configBlockNumber: 120n };
+    const upsert = vi.fn();
+    const database = {
+      adIndexerState: { findUnique: vi.fn().mockResolvedValue(current), upsert },
+    } as never;
+    await expect(
+      advanceAdsIndexerState(database, baseChange, 119n, baseChange.blockHash, {
+        minimumStakeRaw: '100',
+        paused: false,
+        operatorAddress: baseChange.stakerAddress,
+        configBlockNumber: 119n,
+      }),
+    ).resolves.toBe(current);
+    expect(upsert).not.toHaveBeenCalled();
   });
 });

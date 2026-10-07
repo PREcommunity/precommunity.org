@@ -640,12 +640,25 @@ describe('funding dashboard queries', () => {
           },
           {
             goalType: FundingGoalType.MONTHLY,
-            periods: {
-              some: {
-                startsAt: { lt: new Date('2026-09-01T00:00:00.000Z') },
-                endsAt: { gt: new Date('2026-08-01T00:00:00.000Z') },
+            OR: [
+              {
+                periods: {
+                  some: {
+                    startsAt: { lt: new Date('2026-09-01T00:00:00.000Z') },
+                    endsAt: { gt: new Date('2026-08-01T00:00:00.000Z') },
+                  },
+                },
               },
-            },
+              {
+                status: FundingGoalStatus.OPEN,
+                periods: {
+                  some: {
+                    startsAt: { lt: new Date('2026-09-01T00:00:00.000Z') },
+                    settledAt: null,
+                  },
+                },
+              },
+            ],
           },
         ]),
       },
@@ -654,7 +667,7 @@ describe('funding dashboard queries', () => {
         periods: {
           where: {
             startsAt: { lt: new Date('2026-09-01T00:00:00.000Z') },
-            endsAt: { gt: new Date('2026-08-01T00:00:00.000Z') },
+            OR: [{ endsAt: { gt: new Date('2026-08-01T00:00:00.000Z') } }, { settledAt: null }],
           },
           orderBy: { periodIndex: 'desc' },
           take: 1,
@@ -665,5 +678,38 @@ describe('funding dashboard queries', () => {
     expect(contributionFindMany).toHaveBeenCalledWith(expect.objectContaining({ take: 20 }));
     expect(payoutFindMany).toHaveBeenCalledTimes(2);
     expect(payoutFindMany.mock.calls.every(([query]) => query.take === 20)).toBe(true);
+  });
+
+  it('opens an overdue monthly goal in the current month and a closed one in its last period', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-01T12:00:00.000Z'));
+    try {
+      const indexedGoal = {
+        goalType: FundingGoalType.MONTHLY,
+        status: FundingGoalStatus.OPEN,
+        monthStart: new Date('2026-08-01T00:00:00.000Z'),
+        periods: [{ startsAt: new Date('2026-09-04T00:00:00.000Z') }],
+      };
+      const service = new PublicService({
+        fundingGoal: {
+          findUnique: vi
+            .fn()
+            .mockResolvedValueOnce(indexedGoal)
+            .mockResolvedValueOnce({ ...indexedGoal, status: FundingGoalStatus.CLOSED }),
+        },
+        payout: { findMany: vi.fn().mockResolvedValue([]) },
+      } as never);
+      const dashboard = vi.spyOn(service, 'dashboard').mockResolvedValue({
+        goals: [{ id: 'goal-1', slug: 'monthly-goal' }],
+      } as never);
+
+      await service.goal('monthly-goal');
+      expect(dashboard).toHaveBeenLastCalledWith('2026-10');
+
+      await service.goal('monthly-goal');
+      expect(dashboard).toHaveBeenLastCalledWith('2026-09');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

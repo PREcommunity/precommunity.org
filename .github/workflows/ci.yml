@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, 'codex/keyword-market-mainnet-*']
 
 permissions:
   contents: read
@@ -38,4 +38,5 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @precommunity/web exec playwright install --with-deps chromium webkit
-      - run: pnpm test:e2e:critical
+      - name: Critical community and Keyword Market browser flows
+        run: pnpm test:e2e:critical critical.spec.ts keyword-market.spec.ts

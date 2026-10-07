@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 render_runtime_deployment_env() {
-  if (( $# != 12 )); then
-    echo 'render_runtime_deployment_env requires 12 arguments.' >&2
+  if (( $# != 12 && $# != 13 )); then
+    echo 'render_runtime_deployment_env requires 12 arguments and an optional public browser RPC URL.' >&2
     return 2
   fi
 
@@ -18,6 +18,10 @@ render_runtime_deployment_env() {
   local base_rpc_url="${10}"
   local ads_contract_address="${11}"
   local ads_contract_deployment_block="${12}"
+  local browser_rpc_url="${13:-}"
+  if [[ -z "$browser_rpc_url" ]]; then
+    if [[ "$deployment_network" == base ]]; then browser_rpc_url=https://mainnet.base.org; else browser_rpc_url=https://sepolia.base.org; fi
+  fi
 
   case "$deployment_network" in
     base)
@@ -30,8 +34,8 @@ render_runtime_deployment_env() {
         "PUBLIC_INITIAL_OWNER_ADDRESS=${initial_owner_address}" \
         "PUBLIC_TREASURY_ADDRESS=${treasury_address}" \
         "PUBLIC_CHAIN_CONFIRMATIONS=${chain_confirmations}" \
-        "BASE_RPC_URL=${base_rpc_url}" \
-        "NEXT_PUBLIC_BASE_RPC_URL=${base_rpc_url}" \
+        "BASE_RPC_URL=\"${base_rpc_url}\"" \
+        "NEXT_PUBLIC_BASE_RPC_URL=\"${browser_rpc_url}\"" \
         "ADS_CONTRACT_ADDRESS=${ads_contract_address}" \
         "ADS_CONTRACT_DEPLOYMENT_BLOCK=${ads_contract_deployment_block}"
       ;;
@@ -45,8 +49,8 @@ render_runtime_deployment_env() {
         "INITIAL_OWNER_ADDRESS_TESTNET=${initial_owner_address}" \
         "TREASURY_ADDRESS_TESTNET=${treasury_address}" \
         "CHAIN_CONFIRMATIONS_TESTNET=${chain_confirmations}" \
-        "BASE_RPC_URL_TESTNET=${base_rpc_url}" \
-        "NEXT_PUBLIC_BASE_RPC_URL_TESTNET=${base_rpc_url}" \
+        "BASE_RPC_URL_TESTNET=\"${base_rpc_url}\"" \
+        "NEXT_PUBLIC_BASE_RPC_URL_TESTNET=\"${browser_rpc_url}\"" \
         "ADS_CONTRACT_ADDRESS_TESTNET=${ads_contract_address}" \
         "ADS_CONTRACT_DEPLOYMENT_BLOCK_TESTNET=${ads_contract_deployment_block}"
       ;;
@@ -135,4 +139,13 @@ validate_runtime_deployment() {
     echo 'ADS_CONTRACT_ADDRESS and ADS_CONTRACT_DEPLOYMENT_BLOCK must be configured together.' >&2
     exit 2
   fi
+}
+
+# Values in generated files must work identically in Bash and EnvironmentFile.
+read_runtime_env_value() {
+  local name="$1" file="$2" value
+  value="$(sed -n "s/^${name}=//p" "$file")"
+  if [[ "$value" == \"*\" ]]; then value="${value:1:${#value}-2}"; fi
+  if [[ "$value" == \'*\' ]]; then value="${value:1:${#value}-2}"; fi
+  printf '%s' "$value"
 }

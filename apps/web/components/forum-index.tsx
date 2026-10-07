@@ -71,11 +71,13 @@ export function ForumIndex({
       setError(
         error instanceof ApiError && error.status === 401
           ? 'Connect and sign in with your wallet first.'
-          : error instanceof Error
-            ? error.message
-            : saveDraft
-              ? 'The draft could not be saved.'
-              : 'The topic could not be published.',
+          : error instanceof ApiError && error.status === 0
+            ? 'The forum service could not be reached. Try again.'
+            : error instanceof Error
+              ? error.message
+              : saveDraft
+                ? 'The draft could not be saved.'
+                : 'The topic could not be published.',
       );
     } finally {
       setPending(false);

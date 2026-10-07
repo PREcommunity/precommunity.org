@@ -12,6 +12,7 @@ import { getAddress } from 'viem';
 import { useAccount, usePublicClient, useSendTransaction, useSwitchChain } from 'wagmi';
 import { useRouter } from 'next/navigation';
 import { activeChain, activeDeployment, activeExplorerTransaction } from '@/lib/deployment';
+import { formatAmount } from '@/lib/format';
 import { clientApiJson } from '@/lib/http';
 import { requireMatchingTransactionDeployment, requireSuccessfulReceipt } from '@/lib/transactions';
 import { ActionButton } from './action-button';
@@ -244,11 +245,12 @@ export function MonthlyGoalPanel({
       <div className="mt-8">
         <h3 className="mb-2 text-lg">Period history</h3>
         <div className="overflow-x-auto border-t border-navy">
-          <table className="w-full min-w-[680px] border-collapse text-left text-xs">
+          <table className="w-full min-w-[800px] border-collapse text-left text-xs">
             <thead className="font-mono text-[10px] text-muted uppercase">
               <tr>
                 <th className="border-b border-line py-2">Period</th>
                 <th className="border-b border-line py-2">UTC range</th>
+                <th className="border-b border-line py-2">Contributions</th>
                 <th className="border-b border-line py-2">Policy</th>
                 <th className="border-b border-line py-2">Status</th>
                 <th className="border-b border-line py-2">Proof</th>
@@ -263,6 +265,15 @@ export function MonthlyGoalPanel({
                   <td className="border-b border-line py-2.5">#{period.periodIndex}</td>
                   <td className="border-b border-line py-2.5">
                     {period.startsAt.slice(0, 10)} → {period.endsAt.slice(0, 10)}
+                  </td>
+                  <td className="border-b border-line py-2.5">
+                    {period.assets.length
+                      ? period.assets.map((asset) => (
+                          <div key={asset.asset}>
+                            {formatAmount(asset.contributed, asset.asset)}
+                          </div>
+                        ))
+                      : '—'}
                   </td>
                   <td className="border-b border-line py-2.5">
                     {period.surplusPolicy.replaceAll('_', ' ')}

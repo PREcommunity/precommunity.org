@@ -19,9 +19,9 @@ const initialCreative = {
   destinationUrl: '',
 };
 
-export function KeywordMarketCampaignForm() {
+export function KeywordMarketCampaignForm({ initialKeyword = '' }: { initialKeyword?: string }) {
   const router = useRouter();
-  const [form, setForm] = useState(initialCreative);
+  const [form, setForm] = useState(() => ({ ...initialCreative, keyword: initialKeyword }));
   const [state, setState] = useState<'idle' | 'saving' | 'signed-out' | 'saved'>('idle');
   const [error, setError] = useState('');
   const validation = useFormValidation();
@@ -73,7 +73,7 @@ export function KeywordMarketCampaignForm() {
           <span className="keyword-market-eyebrow">New campaign</span>
           <h1>Claim a search phrase.</h1>
           <p>
-            Create and submit the ad now. The stake transaction remains locked until ABI review.
+            Create and submit the ad now. Add a PRE deposit and a USD bid when the market is synced.
           </p>
         </div>
       </header>

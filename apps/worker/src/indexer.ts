@@ -14,7 +14,7 @@ import {
 } from '@precommunity/shared';
 import { erc20Abi, createPublicClient, getAddress, http } from 'viem';
 import { z } from 'zod';
-import { config } from './config';
+import { config, INDEXER_LOG_BLOCK_RANGE } from './config';
 import {
   handleDecodedEscrowEvent,
   isIndexableProfileEventArgs,
@@ -230,8 +230,11 @@ export async function indexEscrow(prisma: PrismaClient) {
       indexedThroughBlock: state?.lastBlockNumber.toString() ?? null,
     };
   let processed = 0;
-  for (let start = fromBlock; start <= safeHead; start += 2_000n) {
-    const end = start + 1_999n > safeHead ? safeHead : start + 1_999n;
+  for (let start = fromBlock; start <= safeHead; start += INDEXER_LOG_BLOCK_RANGE) {
+    const end =
+      start + INDEXER_LOG_BLOCK_RANGE - 1n > safeHead
+        ? safeHead
+        : start + INDEXER_LOG_BLOCK_RANGE - 1n;
     const logs = (
       await client.getContractEvents({
         address: getAddress(config.deployment.escrowAddress),

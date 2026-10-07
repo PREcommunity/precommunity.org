@@ -375,12 +375,25 @@ export class PublicService {
           },
           {
             goalType: FundingGoalType.MONTHLY,
-            periods: {
-              some: {
-                startsAt: { lt: nextMonth },
-                endsAt: { gt: month },
+            OR: [
+              {
+                periods: {
+                  some: {
+                    startsAt: { lt: nextMonth },
+                    endsAt: { gt: month },
+                  },
+                },
               },
-            },
+              {
+                status: FundingGoalStatus.OPEN,
+                periods: {
+                  some: {
+                    startsAt: { lt: nextMonth },
+                    settledAt: null,
+                  },
+                },
+              },
+            ],
           },
         ],
         creationTxHash: { not: null },
@@ -399,7 +412,7 @@ export class PublicService {
         periods: {
           where: {
             startsAt: { lt: nextMonth },
-            endsAt: { gt: month },
+            OR: [{ endsAt: { gt: month } }, { settledAt: null }],
           },
           orderBy: { periodIndex: 'desc' },
           take: 1,
@@ -578,16 +591,21 @@ export class PublicService {
         },
         select: {
           monthStart: true,
+          goalType: true,
+          status: true,
           periods: {
             orderBy: { periodIndex: 'desc' },
             take: 1,
-            select: { endsAt: true },
+            select: { startsAt: true },
           },
         },
       });
-      goalMonth = (indexedGoal?.periods[0]?.endsAt ?? indexedGoal?.monthStart)
-        ?.toISOString()
-        .slice(0, 7);
+      const defaultDate =
+        indexedGoal?.goalType === FundingGoalType.MONTHLY &&
+        indexedGoal.status === FundingGoalStatus.OPEN
+          ? new Date()
+          : (indexedGoal?.periods[0]?.startsAt ?? indexedGoal?.monthStart);
+      goalMonth = defaultDate?.toISOString().slice(0, 7);
     }
     const dashboard = await this.dashboard(goalMonth);
     const goal = dashboard.goals.find((item) => item.slug === slug);

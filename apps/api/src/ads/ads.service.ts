@@ -15,12 +15,15 @@ import {
   ADS_ALGORITHM_VERSION,
   AdsTextValidationError,
   PROJECT_SLUG,
+  adKeywordId,
   adsKeywordCandidates,
   adsUtcDay,
   normalizeAdKeyword,
   type AdAdminReportGroup,
   type AdAdminReportPage,
   type AdAdminRevisionView,
+  type AdApiKeyView,
+  type AdApiKeyCreateResponse,
   type AdCampaignView,
   type AdsKeywordCandidate,
   type AdKeywordPositionView,
@@ -29,7 +32,7 @@ import {
   type AdResolveResponse,
   type AdRevisionView,
 } from '@precommunity/shared';
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import type { AuthenticatedPrincipal } from '../common/request-context';
 import { PrismaService } from '../common/prisma.service';
 import { writeAuditEvent } from '../common/audit';
@@ -44,15 +47,50 @@ import {
   AdReportResolutionAction,
   type AdCreativeInputDto,
   type CreateAdCampaignDto,
+  type CreateAdApiKeyDto,
   type ReportAdDto,
 } from './ads.dto';
 import { AdsMetricsService } from './ads-metrics.service';
+import { hashAdApiKey } from './ads-api-key.guard';
 
 const RESOLVER_CACHE_MS = 15_000;
 const RESOLVER_CACHE_MAX = 5_000;
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const ADMIN_REPORT_PREVIEW_LIMIT = 25;
 const DESTINATION_URL_MAX_CHARACTERS = 2_048;
+const API_KEY_METADATA_SELECT = {
+  id: true,
+  name: true,
+  keyPrefix: true,
+  createdAt: true,
+  lastUsedAt: true,
+  revokedAt: true,
+} as const;
+
+function canSuspendRevision(revision: { status: AdCreativeStatus; moderatedAt: Date | null }) {
+  return (
+    revision.status === AdCreativeStatus.APPROVED ||
+    (revision.status === AdCreativeStatus.SUPERSEDED && revision.moderatedAt !== null)
+  );
+}
+
+function apiKeyView(key: {
+  id: string;
+  name: string;
+  keyPrefix: string;
+  createdAt: Date;
+  lastUsedAt: Date | null;
+  revokedAt: Date | null;
+}): AdApiKeyView {
+  return {
+    id: key.id,
+    name: key.name,
+    prefix: key.keyPrefix,
+    createdAt: key.createdAt.toISOString(),
+    lastUsedAt: key.lastUsedAt?.toISOString() ?? null,
+    revokedAt: key.revokedAt?.toISOString() ?? null,
+  };
+}
 
 type EligibleCampaign = {
   canonicalKeyword: string;
@@ -77,17 +115,16 @@ function rawStake(value: string) {
 }
 
 export function compareAdStakePositions(left: AdStakePosition, right: AdStakePosition) {
-  const amountDifference = rawStake(right.stakeRaw) - rawStake(left.stakeRaw);
-  if (amountDifference !== 0n) return amountDifference > 0n ? 1 : -1;
-  if (left.amountSinceBlock !== right.amountSinceBlock)
-    return left.amountSinceBlock < right.amountSinceBlock ? -1 : 1;
-  if (left.amountSinceLogIndex !== right.amountSinceLogIndex)
-    return left.amountSinceLogIndex - right.amountSinceLogIndex;
-  return left.stakerAddress.localeCompare(right.stakerAddress, 'en');
+  if (left.eligible !== right.eligible) return left.eligible ? -1 : 1;
+  const bidDifference = rawStake(right.bidUsdRaw) - rawStake(left.bidUsdRaw);
+  if (bidDifference !== 0n) return bidDifference > 0n ? 1 : -1;
+  const leftAddress = left.stakerAddress.toLowerCase();
+  const rightAddress = right.stakerAddress.toLowerCase();
+  return leftAddress < rightAddress ? -1 : leftAddress > rightAddress ? 1 : 0;
 }
 
-function campaignKey(keyword: string, address: string) {
-  return `${keyword}\u0000${address.toLowerCase()}`;
+function campaignKey(keywordId: string, address: string) {
+  return `${keywordId}\u0000${address.toLowerCase()}`;
 }
 
 export function selectEligibleAd(
@@ -101,22 +138,24 @@ export function selectEligibleAd(
         (campaign) =>
           !campaign.pausedAt && campaign.activeRevision?.status === AdCreativeStatus.APPROVED,
       )
-      .map((campaign) => [campaignKey(campaign.canonicalKeyword, campaign.user.address), campaign]),
+      .map((campaign) => [
+        campaignKey(adKeywordId(campaign.canonicalKeyword), campaign.user.address),
+        campaign,
+      ]),
   );
   const positionsByKeyword = new Map<string, AdStakePosition[]>();
   for (const position of positions) {
-    if (!position.active || rawStake(position.stakeRaw) <= 0n) continue;
-    const group = positionsByKeyword.get(position.canonicalKeyword) ?? [];
+    if (!position.active || !position.eligible || rawStake(position.stakeRaw) <= 0n) continue;
+    const group = positionsByKeyword.get(position.keywordId) ?? [];
     group.push(position);
-    positionsByKeyword.set(position.canonicalKeyword, group);
+    positionsByKeyword.set(position.keywordId, group);
   }
   for (const group of positionsByKeyword.values()) group.sort(compareAdStakePositions);
 
   for (const candidate of candidates) {
-    for (const position of positionsByKeyword.get(candidate.keyword) ?? []) {
-      const campaign = campaignByPosition.get(
-        campaignKey(candidate.keyword, position.stakerAddress),
-      );
+    const keywordId = adKeywordId(candidate.keyword);
+    for (const position of positionsByKeyword.get(keywordId) ?? []) {
+      const campaign = campaignByPosition.get(campaignKey(keywordId, position.stakerAddress));
       if (campaign?.activeRevision) return { candidate, position, campaign };
     }
   }
@@ -230,9 +269,66 @@ export class AdsService {
     return this.chain.snapshot();
   }
 
-  async resolve(query?: string): Promise<AdResolveResponse> {
+  async apiKeys(): Promise<AdApiKeyView[]> {
+    const keys = await this.prisma.adApiKey.findMany({
+      select: API_KEY_METADATA_SELECT,
+      orderBy: { createdAt: 'desc' },
+    });
+    return keys.map(apiKeyView);
+  }
+
+  async createApiKey(
+    body: CreateAdApiKeyDto,
+    principal: AuthenticatedPrincipal,
+  ): Promise<AdApiKeyCreateResponse> {
+    const name = body.name.trim();
+    if (!name || name.length > 80) {
+      throw new BadRequestException('Key name must contain 1–80 characters');
+    }
+    const apiKey = `pkm_${randomBytes(32).toString('base64url')}`;
+    const created = await this.prisma.$transaction(async (tx) => {
+      const key = await tx.adApiKey.create({
+        data: {
+          name,
+          keyPrefix: apiKey.slice(0, 12),
+          keyHash: hashAdApiKey(apiKey),
+          createdByAddress: principal.address,
+        },
+        select: API_KEY_METADATA_SELECT,
+      });
+      const metadata = apiKeyView(key);
+      await this.audit(tx, principal, key.id, 'AD_API_KEY_CREATE', null, metadata, 'AD_API_KEY');
+      return metadata;
+    });
+    return { ...created, apiKey };
+  }
+
+  async revokeApiKey(id: string, principal: AuthenticatedPrincipal) {
+    await this.prisma.$transaction(async (tx) => {
+      const key = await tx.adApiKey.findUnique({ where: { id }, select: API_KEY_METADATA_SELECT });
+      if (!key) throw new NotFoundException('API key not found');
+      const revokedAt = new Date();
+      const updated = await tx.adApiKey.updateMany({
+        where: { id, revokedAt: null },
+        data: { revokedAt },
+      });
+      if (updated.count) {
+        await this.audit(
+          tx,
+          principal,
+          id,
+          'AD_API_KEY_REVOKE',
+          apiKeyView(key),
+          apiKeyView({ ...key, revokedAt }),
+          'AD_API_KEY',
+        );
+      }
+    });
+  }
+
+  async resolve(query?: string, countMetrics = true): Promise<AdResolveResponse> {
     const candidates = queryCandidates(query);
-    const snapshot = this.chain.snapshot();
+    const snapshot = await this.chain.snapshot();
     const cacheKey = createHash('sha256')
       .update(
         candidates.map((candidate) => `${candidate.startToken}:${candidate.keyword}`).join('|'),
@@ -247,8 +343,27 @@ export class AdsService {
       ad = snapshot.status === 'SYNCED' ? await this.resolveCandidates(candidates, snapshot) : null;
       this.cache(cacheKey, ad, now);
     }
-    if (ad) void this.metrics.increment(ad.revisionId);
+    if (ad && countMetrics) {
+      void this.metrics.increment(ad.revisionId);
+      void this.metrics.incrementView(ad.revisionId);
+    }
     return { requestId: randomUUID(), algorithmVersion: ADS_ALGORITHM_VERSION, ad };
+  }
+
+  async click(revisionId: string, countMetrics = true) {
+    const revision = await this.prisma.adCreativeRevision.findFirst({
+      where: {
+        id: revisionId,
+        OR: [
+          { status: AdCreativeStatus.APPROVED },
+          { status: AdCreativeStatus.SUPERSEDED, moderatedAt: { not: null } },
+        ],
+      },
+      select: { destinationUrl: true },
+    });
+    if (!revision) throw new NotFoundException('Ad revision not found');
+    if (countMetrics) await this.metrics.incrementClick(revisionId);
+    return revision.destinationUrl;
   }
 
   private async resolveCandidates(
@@ -257,11 +372,12 @@ export class AdsService {
   ): Promise<AdResolveCreative | null> {
     if (!snapshot.contractAddress) return null;
     const keywords = candidates.map((candidate) => candidate.keyword);
+    const keywordIds = candidates.map((candidate) => adKeywordId(candidate.keyword));
     const positions = await this.prisma.adStakePosition.findMany({
       where: {
         chainId: snapshot.chainId,
         contractAddress: snapshot.contractAddress,
-        canonicalKeyword: { in: keywords },
+        keywordId: { in: keywordIds },
         active: true,
       },
     });
@@ -287,6 +403,10 @@ export class AdsService {
       headline: selected.campaign.activeRevision.headline,
       description: selected.campaign.activeRevision.description,
       destinationUrl: selected.campaign.activeRevision.destinationUrl,
+      clickUrl: new URL(
+        `/api/v1/keyword-market/revisions/${selected.campaign.activeRevision.id}/click`,
+        config.WEB_ORIGIN,
+      ).toString(),
       displayDomain: selected.campaign.activeRevision.displayDomain,
       matchedKeyword: selected.candidate.keyword,
       proof: this.proof(selected.position, indexedThroughBlock),
@@ -295,7 +415,7 @@ export class AdsService {
 
   async keyword(rawKeyword: string): Promise<AdKeywordResponse> {
     const keyword = normalizedKeyword(rawKeyword);
-    const snapshot = this.chain.snapshot();
+    const snapshot = await this.chain.snapshot();
     if (snapshot.status !== 'SYNCED' || !snapshot.contractAddress) {
       return {
         keyword,
@@ -310,12 +430,12 @@ export class AdsService {
       where: {
         chainId: snapshot.chainId,
         contractAddress: snapshot.contractAddress,
-        canonicalKeyword: keyword,
+        keywordId: adKeywordId(keyword),
         active: true,
       },
     });
     positions.sort(compareAdStakePositions);
-    const eligible = await this.eligibleCampaignKeys(positions);
+    const eligible = await this.eligibleCampaignKeys(positions, keyword);
     return {
       keyword,
       chainStatus: snapshot.status,
@@ -329,7 +449,7 @@ export class AdsService {
         this.positionView(
           position,
           index + 1,
-          eligible.has(campaignKey(keyword, position.stakerAddress)),
+          eligible.has(campaignKey(adKeywordId(keyword), position.stakerAddress)),
         ),
       ),
     };
@@ -346,42 +466,46 @@ export class AdsService {
       },
       orderBy: { updatedAt: 'desc' },
     });
-    const snapshot = this.chain.snapshot();
+    const snapshot = await this.chain.snapshot();
     const keywords = campaigns.map((campaign) => campaign.canonicalKeyword);
+    const keywordIds = keywords.map(adKeywordId);
     const positions =
-      snapshot.status === 'SYNCED' && snapshot.contractAddress && keywords.length
+      snapshot.contractAddress && keywords.length
         ? await this.prisma.adStakePosition.findMany({
             where: {
               chainId: snapshot.chainId,
               contractAddress: snapshot.contractAddress,
-              canonicalKeyword: { in: keywords },
+              keywordId: { in: keywordIds },
               active: true,
             },
           })
         : [];
     const positionsByKeyword = new Map<string, AdStakePosition[]>();
     for (const position of positions) {
-      const group = positionsByKeyword.get(position.canonicalKeyword) ?? [];
+      const group = positionsByKeyword.get(position.keywordId) ?? [];
       group.push(position);
-      positionsByKeyword.set(position.canonicalKeyword, group);
+      positionsByKeyword.set(position.keywordId, group);
     }
     for (const group of positionsByKeyword.values()) group.sort(compareAdStakePositions);
 
     return campaigns.map((campaign) => {
-      const ranking = positionsByKeyword.get(campaign.canonicalKeyword) ?? [];
+      const ranking = positionsByKeyword.get(adKeywordId(campaign.canonicalKeyword)) ?? [];
       const ownIndex = ranking.findIndex(
         (position) => position.stakerAddress === principal.address.toLowerCase(),
       );
       const own = ownIndex >= 0 ? ranking[ownIndex]! : null;
-      const leader = ranking[0] ?? null;
+      const leader = ranking.find((position) => position.eligible) ?? null;
       const active = campaign.revisions.find(
         (revision) => revision.id === campaign.activeRevisionId,
       );
       const pending = campaign.revisions.find(
         (revision) => revision.status === AdCreativeStatus.PENDING_REVIEW,
       );
-      const ownStake = own ? rawStake(own.stakeRaw) : 0n;
-      const leaderStake = leader ? rawStake(leader.stakeRaw) : null;
+      const ownBid = own ? rawStake(own.bidUsdRaw) : 0n;
+      const leaderBid = leader ? rawStake(leader.bidUsdRaw) : null;
+      const targetBid = leader
+        ? leaderBid! + (principal.address.toLowerCase() < leader.stakerAddress ? 0n : 1n)
+        : null;
       return {
         id: campaign.id,
         keyword: campaign.canonicalKeyword,
@@ -394,20 +518,57 @@ export class AdsService {
               !campaign.pausedAt && active?.status === AdCreativeStatus.APPROVED,
             )
           : null,
-        leaderStakeRaw: leaderStake?.toString() ?? null,
-        stakeNeededToLeadRaw:
-          leaderStake === null
+        leaderBidUsdRaw: leaderBid?.toString() ?? null,
+        bidNeededToLeadUsdRaw:
+          targetBid === null
             ? null
-            : ownIndex === 0
+            : own?.eligible && own.stakerAddress === leader?.stakerAddress
               ? '0'
-              : (leaderStake - ownStake + 1n).toString(),
+              : (targetBid > ownBid ? targetBid - ownBid : 0n).toString(),
         activeRevision: active ? revisionView(active) : null,
         pendingRevision: pending ? revisionView(pending) : null,
+        lifetimeViews: campaign.revisions
+          .reduce((sum, revision) => sum + revision.lifetimeViews, 0n)
+          .toString(),
+        lifetimeClicks: campaign.revisions
+          .reduce((sum, revision) => sum + revision.lifetimeClicks, 0n)
+          .toString(),
         revisions: campaign.revisions.map(revisionView),
         createdAt: campaign.createdAt.toISOString(),
         updatedAt: campaign.updatedAt.toISOString(),
       };
     });
+  }
+
+  async transaction(txHash: string, principal: AuthenticatedPrincipal) {
+    if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) {
+      throw new BadRequestException('Invalid transaction hash');
+    }
+    const snapshot = await this.chain.snapshot();
+    const event =
+      snapshot.status === 'SYNCED' &&
+      snapshot.contractAddress &&
+      snapshot.indexedThroughBlock !== null
+        ? await this.prisma.adChainEvent.findFirst({
+            where: {
+              chainId: snapshot.chainId,
+              contractAddress: snapshot.contractAddress,
+              txHash: txHash.toLowerCase(),
+              eventName: 'PositionChanged',
+              blockNumber: { lte: BigInt(snapshot.indexedThroughBlock) },
+              payload: { path: ['stakerAddress'], equals: principal.address.toLowerCase() },
+            },
+            select: { blockNumber: true, blockHash: true },
+          })
+        : null;
+    return {
+      chainStatus: snapshot.status,
+      chainId: snapshot.chainId,
+      contractAddress: snapshot.contractAddress,
+      indexed: event !== null,
+      blockNumber: event?.blockNumber.toString() ?? null,
+      blockHash: event?.blockHash ?? null,
+    };
   }
 
   async createCampaign(body: CreateAdCampaignDto, principal: AuthenticatedPrincipal) {
@@ -474,6 +635,46 @@ export class AdsService {
     return { ok: true, paused };
   }
 
+  async prepareStake(
+    campaignId: string,
+    amountRaw: string,
+    bidUsdRaw: string,
+    principal: AuthenticatedPrincipal,
+  ) {
+    const campaign = await this.ownedCampaign(campaignId, principal);
+    return this.chain.stake({
+      canonicalKeyword: campaign.canonicalKeyword,
+      stakerAddress: principal.address,
+      amountRaw,
+      bidUsdRaw,
+    });
+  }
+
+  async prepareRequestUnstake(campaignId: string, principal: AuthenticatedPrincipal) {
+    const campaign = await this.ownedCampaign(campaignId, principal);
+    return this.chain.requestUnstake({
+      canonicalKeyword: campaign.canonicalKeyword,
+      stakerAddress: principal.address,
+    });
+  }
+
+  async prepareUnstake(campaignId: string, principal: AuthenticatedPrincipal) {
+    const campaign = await this.ownedCampaign(campaignId, principal);
+    return this.chain.unstake({
+      canonicalKeyword: campaign.canonicalKeyword,
+      stakerAddress: principal.address,
+    });
+  }
+
+  private async ownedCampaign(campaignId: string, principal: AuthenticatedPrincipal) {
+    const campaign = await this.prisma.adCampaign.findFirst({
+      where: { id: campaignId, userId: principal.userId },
+      select: { canonicalKeyword: true },
+    });
+    if (!campaign) throw new NotFoundException('Ad campaign not found');
+    return campaign;
+  }
+
   async report(revisionId: string, body: ReportAdDto, ip: string) {
     const dayValue = adsUtcDay();
     const fingerprintDay = new Date(`${dayValue}T00:00:00.000Z`);
@@ -522,6 +723,7 @@ export class AdsService {
     return Promise.all(
       revisions.map(async (revision) => ({
         ...revisionView(revision),
+        canSuspend: canSuspendRevision(revision),
         keyword: revision.campaign.canonicalKeyword,
         advertiserAddress: revision.campaign.user.address,
         reportCount: revision.reportAggregates
@@ -564,6 +766,7 @@ export class AdsService {
         return {
           revision: {
             ...revisionView(revision),
+            canSuspend: canSuspendRevision(revision),
             keyword: revision.campaign.canonicalKeyword,
             advertiserAddress: revision.campaign.user.address,
             reportCount: revision.reportAggregates
@@ -660,10 +863,16 @@ export class AdsService {
         });
         this.assertModerationStateUnchanged(rejected);
       } else if (action === AdModerationAction.SUSPEND) {
-        if (revision.status !== AdCreativeStatus.APPROVED)
-          throw new ConflictException('Only an approved revision can be suspended');
+        if (!canSuspendRevision(revision))
+          throw new ConflictException('Only a published revision can be suspended');
         const suspended = await tx.adCreativeRevision.updateMany({
-          where: { id: revisionId, status: AdCreativeStatus.APPROVED },
+          where: {
+            id: revisionId,
+            status: revision.status,
+            ...(revision.status === AdCreativeStatus.SUPERSEDED
+              ? { moderatedAt: { not: null } }
+              : {}),
+          },
           data: { status: AdCreativeStatus.SUSPENDED, ...moderation },
         });
         this.assertModerationStateUnchanged(suspended);
@@ -722,9 +931,15 @@ export class AdsService {
       if (!openReports) throw new ConflictException('This revision has no open reports');
       const resolvedAt = new Date();
       if (action === AdReportResolutionAction.SUSPEND_AD) {
-        if (revision.status === AdCreativeStatus.APPROVED) {
+        if (canSuspendRevision(revision)) {
           const suspended = await tx.adCreativeRevision.updateMany({
-            where: { id: revisionId, status: AdCreativeStatus.APPROVED },
+            where: {
+              id: revisionId,
+              status: revision.status,
+              ...(revision.status === AdCreativeStatus.SUPERSEDED
+                ? { moderatedAt: { not: null } }
+                : {}),
+            },
             data: {
               status: AdCreativeStatus.SUSPENDED,
               moderatedByAddress: principal.address,
@@ -771,11 +986,11 @@ export class AdsService {
     return { ok: true };
   }
 
-  private async eligibleCampaignKeys(positions: AdStakePosition[]) {
+  private async eligibleCampaignKeys(positions: AdStakePosition[], keyword: string) {
     if (!positions.length) return new Set<string>();
     const campaigns = await this.prisma.adCampaign.findMany({
       where: {
-        canonicalKeyword: { in: [...new Set(positions.map((item) => item.canonicalKeyword))] },
+        canonicalKeyword: keyword,
         pausedAt: null,
         activeRevision: { status: AdCreativeStatus.APPROVED },
         user: { address: { in: [...new Set(positions.map((item) => item.stakerAddress))] } },
@@ -783,7 +998,9 @@ export class AdsService {
       include: { user: { select: { address: true } } },
     });
     return new Set(
-      campaigns.map((campaign) => campaignKey(campaign.canonicalKeyword, campaign.user.address)),
+      campaigns.map((campaign) =>
+        campaignKey(adKeywordId(campaign.canonicalKeyword), campaign.user.address),
+      ),
     );
   }
 
@@ -796,6 +1013,11 @@ export class AdsService {
       rank,
       stakerAddress: position.stakerAddress,
       stakeRaw: position.stakeRaw,
+      bidUsdRaw: position.bidUsdRaw,
+      requiredCoveragePreRaw: position.requiredCoveragePreRaw,
+      eligible: position.eligible,
+      withdrawAvailableAt: position.withdrawAvailableAt.toString(),
+      positionVersion: position.positionVersion.toString(),
       amountSinceBlock: position.amountSinceBlock.toString(),
       amountSinceLogIndex: position.amountSinceLogIndex,
       positionBlock: position.positionBlock.toString(),
@@ -810,6 +1032,11 @@ export class AdsService {
       contractAddress: position.contractAddress,
       stakerAddress: position.stakerAddress,
       stakeRaw: position.stakeRaw,
+      bidUsdRaw: position.bidUsdRaw,
+      requiredCoveragePreRaw: position.requiredCoveragePreRaw,
+      eligible: position.eligible,
+      withdrawAvailableAt: position.withdrawAvailableAt.toString(),
+      positionVersion: position.positionVersion.toString(),
       positionBlock: position.positionBlock.toString(),
       positionTxHash: position.positionTxHash,
       indexedThroughBlock,
@@ -817,19 +1044,19 @@ export class AdsService {
   }
 
   private async proofForCampaign(keyword: string, address: string) {
-    const snapshot = this.chain.snapshot();
+    const snapshot = await this.chain.snapshot();
     if (snapshot.status !== 'SYNCED' || !snapshot.contractAddress) return null;
     const position = await this.prisma.adStakePosition.findUnique({
       where: {
-        chainId_contractAddress_canonicalKeyword_stakerAddress: {
+        chainId_contractAddress_keywordId_stakerAddress: {
           chainId: snapshot.chainId,
           contractAddress: snapshot.contractAddress,
-          canonicalKeyword: keyword,
+          keywordId: adKeywordId(keyword),
           stakerAddress: address.toLowerCase(),
         },
       },
     });
-    if (!position?.active || rawStake(position.stakeRaw) <= 0n) return null;
+    if (!position?.active || !position.eligible || rawStake(position.stakeRaw) <= 0n) return null;
     return this.proof(
       position,
       await this.indexedThroughBlock(position.chainId, position.contractAddress),
@@ -868,6 +1095,7 @@ export class AdsService {
     action: string,
     before: unknown,
     after: unknown,
+    entityType = 'AD_CREATIVE_REVISION',
   ) {
     const project = await tx.project.findUnique({
       where: { slug: PROJECT_SLUG },
@@ -877,7 +1105,7 @@ export class AdsService {
     await writeAuditEvent(tx, {
       projectId: project.id,
       actor: principal,
-      entityType: 'AD_CREATIVE_REVISION',
+      entityType,
       entityId,
       action,
       before,
