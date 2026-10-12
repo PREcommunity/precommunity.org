@@ -1,6 +1,11 @@
 'use client';
 
-import { PRE_DECIMALS, type AdCampaignView, type AdRevisionView } from '@precommunity/shared';
+import {
+  PRE_DECIMALS,
+  keywordMarketConfirmations,
+  type AdCampaignView,
+  type AdRevisionView,
+} from '@precommunity/shared';
 import {
   ArrowLeft,
   ArrowUpRight,
@@ -9,8 +14,8 @@ import {
   Clock3,
   LoaderCircle,
   Pause,
+  Pencil,
   Play,
-  Plus,
   WalletCards,
 } from 'lucide-react';
 import Link from 'next/link';
@@ -23,7 +28,6 @@ import { useKeywordMarketRefresh } from '@/hooks/use-keyword-market-refresh';
 import { AUTH_CHANGED_EVENT, AUTH_SIGN_IN_REQUESTED_EVENT } from '@/lib/auth-events';
 import { activeChain, activeDeployment, activeExplorerTransaction } from '@/lib/deployment';
 import {
-  createAdRevision,
   getAdTransactionProjection,
   getKeywordMarketStatus,
   getMyAdCampaigns,
@@ -38,7 +42,6 @@ import {
 import { ApiError } from '@/lib/http';
 import { requireSuccessfulReceipt } from '@/lib/transactions';
 import { ActionButton } from './action-button';
-import { FormFieldError, useFormValidation } from './form-validation';
 import { KeywordMarketCreativePreview } from './keyword-market-creative-preview';
 
 function statusTone(status: AdRevisionView['status']) {
@@ -91,11 +94,9 @@ export function KeywordMarketCampaignDetail({ campaignId }: { campaignId: string
   const [chainSnapshot, setChainSnapshot] = useState<KeywordMarketChainSnapshot | null>(null);
   const [transactionMessage, setTransactionMessage] = useState('');
   const [transactionHash, setTransactionHash] = useState<`0x${string}` | null>(null);
-  const [editing, setEditing] = useState(false);
-  const [creative, setCreative] = useState({ headline: '', description: '', destinationUrl: '' });
+  const [priceWarning, setPriceWarning] = useState('');
   const loadInFlight = useRef(false);
   const pendingLoad = useRef<(() => Promise<void>) | null>(null);
-  const validation = useFormValidation();
   const wallet = useWalletSession();
   const walletConfig = useConfig();
   const publicClient = usePublicClient({ chainId: activeChain.id });
@@ -162,16 +163,6 @@ export function KeywordMarketCampaignDetail({ campaignId }: { campaignId: string
     [campaign],
   );
 
-  function beginRevision() {
-    const source = campaign?.activeRevision ?? campaign?.revisions[0];
-    setCreative({
-      headline: source?.headline ?? '',
-      description: source?.description ?? '',
-      destinationUrl: source?.destinationUrl ?? '',
-    });
-    setEditing(true);
-  }
-
   async function togglePause() {
     if (!campaign) return;
     setAction('pause');
@@ -181,24 +172,6 @@ export function KeywordMarketCampaignDetail({ campaignId }: { campaignId: string
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Campaign state could not be changed.');
-    } finally {
-      setAction('');
-    }
-  }
-
-  async function submitRevision(event: React.FormEvent) {
-    event.preventDefault();
-    if (!campaign) return;
-    setAction('revision');
-    setError('');
-    try {
-      await createAdRevision(campaign.id, creative);
-      setEditing(false);
-      await load();
-    } catch (reason) {
-      setError(
-        reason instanceof Error ? reason.message : 'Creative revision could not be submitted.',
-      );
     } finally {
       setAction('');
     }
@@ -247,7 +220,7 @@ export function KeywordMarketCampaignDetail({ campaignId }: { campaignId: string
     const receipt = requireSuccessfulReceipt(
       await publicClient.waitForTransactionReceipt({
         hash,
-        confirmations: activeDeployment.confirmations,
+        confirmations: keywordMarketConfirmations(activeDeployment.confirmations),
       }),
       label,
     );
@@ -298,6 +271,7 @@ export function KeywordMarketCampaignDetail({ campaignId }: { campaignId: string
     setError('');
     setTransactionHash(null);
     setTransactionMessage('');
+    setPriceWarning('');
 
     if (
       !chainSnapshot.contractAddress ||
@@ -355,8 +329,6 @@ export function KeywordMarketCampaignDetail({ campaignId }: { campaignId: string
       if (!publicClient) throw new Error(`${activeDeployment.networkName} RPC is unavailable.`);
       setAction('preparing-stake');
       setTransactionMessage('Preparing the on-chain operation…');
-      if (wallet.chainId !== activeChain.id) await switchChainAsync({ chainId: activeChain.id });
-
       const plan =
         operation === 'STAKE'
           ? await prepareAdStakeBid(campaign.id, amountRaw.toString(), bidUsdRaw.toString())
@@ -375,6 +347,8 @@ export function KeywordMarketCampaignDetail({ campaignId }: { campaignId: string
       ) {
         throw new Error('The API and app use different PRE token addresses.');
       }
+      setPriceWarning(plan.priceWarning ?? '');
+      if (wallet.chainId !== activeChain.id) await switchChainAsync({ chainId: activeChain.id });
       let transaction = plan.transaction;
 
       if (amountRaw > 0n) {
@@ -415,6 +389,7 @@ export function KeywordMarketCampaignDetail({ campaignId }: { campaignId: string
           if (!isAddressEqual(getAddress(refreshed.tokenAddress), getAddress(plan.tokenAddress))) {
             throw new Error('The PRE token address changed while preparing the stake.');
           }
+          setPriceWarning(refreshed.priceWarning ?? '');
           transaction = refreshed.transaction;
         }
       }
@@ -523,9 +498,12 @@ export function KeywordMarketCampaignDetail({ campaignId }: { campaignId: string
           >
             {campaign.paused ? 'Resume' : 'Pause'}
           </ActionButton>
-          <ActionButton variant="primary" icon={<Plus size={15} />} onClick={beginRevision}>
-            New creative
-          </ActionButton>
+          <Link
+            className="keyword-market-primary-link"
+            href={`/keyword-market/campaigns/${campaign.id}/edit`}
+          >
+            <Pencil size={15} aria-hidden="true" /> Edit
+          </Link>
         </div>
       </header>
 
@@ -662,6 +640,11 @@ export function KeywordMarketCampaignDetail({ campaignId }: { campaignId: string
               Withdraw PRE
             </ActionButton>
           </div>
+          {priceWarning ? (
+            <p className="keyword-market-awaiting-note" role="status">
+              {priceWarning}
+            </p>
+          ) : null}
           <p className="keyword-market-awaiting-note">
             {campaign.chainStatus === 'SYNCED' ? null : campaign.chainStatus === 'SYNCING' ? (
               <LoaderCircle className="animate-spin" size={14} />
@@ -697,92 +680,6 @@ export function KeywordMarketCampaignDetail({ campaignId }: { campaignId: string
           </Link>
         </aside>
       </section>
-
-      {editing ? (
-        <form
-          className="keyword-market-revision-editor"
-          onSubmit={submitRevision}
-          onInvalid={validation.onInvalid}
-          onInput={validation.onInput}
-        >
-          <header className="keyword-market-section-heading">
-            <div>
-              <span className="keyword-market-eyebrow">Immutable version</span>
-              <h2>Submit a new creative</h2>
-            </div>
-            <button
-              className="keyword-market-text-button"
-              type="button"
-              onClick={() => setEditing(false)}
-            >
-              Close
-            </button>
-          </header>
-          <div className="keyword-market-revision-grid">
-            <div className="keyword-market-editor-fields">
-              <label className="keyword-market-field">
-                <span>
-                  Headline <small>{creative.headline.length}/60</small>
-                </span>
-                <input
-                  value={creative.headline}
-                  maxLength={60}
-                  onChange={(event) =>
-                    setCreative((value) => ({ ...value, headline: event.target.value }))
-                  }
-                />
-              </label>
-              <label className="keyword-market-field">
-                <span>
-                  Description <small>{creative.description.length}/160</small>
-                </span>
-                <textarea
-                  {...validation.fieldProps('description')}
-                  value={creative.description}
-                  maxLength={160}
-                  required
-                  onChange={(event) =>
-                    setCreative((value) => ({ ...value, description: event.target.value }))
-                  }
-                />
-                <FormFieldError {...validation.errorProps('description')} />
-              </label>
-              <label className="keyword-market-field">
-                <span>HTTPS destination</span>
-                <input
-                  {...validation.fieldProps('destinationUrl')}
-                  type="url"
-                  pattern="https://.*"
-                  value={creative.destinationUrl}
-                  maxLength={2048}
-                  required
-                  onChange={(event) =>
-                    setCreative((value) => ({ ...value, destinationUrl: event.target.value }))
-                  }
-                />
-                <FormFieldError {...validation.errorProps('destinationUrl')} />
-              </label>
-              <ActionButton
-                type="submit"
-                variant="primary"
-                disabled={action === 'revision'}
-                icon={
-                  action === 'revision' ? (
-                    <LoaderCircle className="animate-spin" size={15} />
-                  ) : undefined
-                }
-              >
-                {action === 'revision' ? 'Submitting…' : 'Submit for review'}
-              </ActionButton>
-            </div>
-            <KeywordMarketCreativePreview
-              creative={creative}
-              keyword={campaign.keyword}
-              placeholders
-            />
-          </div>
-        </form>
-      ) : null}
 
       <section className="keyword-market-detail-section">
         <header className="keyword-market-section-heading">
@@ -850,18 +747,25 @@ export function KeywordMarketCampaignDetail({ campaignId }: { campaignId: string
               <dd>{campaign.position.stakerAddress}</dd>
             </div>
             <div>
-              <dt>Amount since</dt>
-              <dd>
-                {campaign.position.amountSinceBlock}:{campaign.position.amountSinceLogIndex}
-              </dd>
-            </div>
-            <div>
               <dt>Position block</dt>
               <dd>{campaign.position.positionBlock}</dd>
             </div>
             <div>
               <dt>Transaction</dt>
-              <dd>{campaign.position.positionTxHash}</dd>
+              <dd>
+                <a
+                  className="keyword-market-text-link"
+                  href={activeExplorerTransaction(campaign.position.positionTxHash)}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={campaign.position.positionTxHash}
+                  aria-label={`View transaction ${campaign.position.positionTxHash} on BaseScan (opens in a new tab)`}
+                >
+                  {campaign.position.positionTxHash.slice(0, 12)}…
+                  {campaign.position.positionTxHash.slice(-6)}
+                  <ArrowUpRight size={12} aria-hidden="true" />
+                </a>
+              </dd>
             </div>
           </dl>
         </section>

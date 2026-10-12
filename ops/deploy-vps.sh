@@ -23,6 +23,19 @@ load_repository_env() {
     PRECOMMUNITY_SAFE_ADDRESS
     SAFE_ADDRESS
     SAFE_TRANSACTION_SERVICE_API_KEY
+    COINGECKO_API_KEY
+    ADS_OPERATOR_KEYSTORE_PATH
+    ADS_OPERATOR_KEYSTORE_PASSWORD
+    ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64
+    ADS_OPERATOR_KEYSTORE_PATH_TESTNET
+    ADS_OPERATOR_KEYSTORE_PASSWORD_TESTNET
+    ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64_TESTNET
+    ADS_PRICE_UPDATER_KEYSTORE_PATH
+    ADS_PRICE_UPDATER_KEYSTORE_PASSWORD
+    ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_BASE64
+    ADS_PRICE_UPDATER_KEYSTORE_PATH_TESTNET
+    ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_TESTNET
+    ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_BASE64_TESTNET
     PRECOMMUNITY_BASE_RPC_URL
     PRECOMMUNITY_BROWSER_RPC_URL
     PRECOMMUNITY_KEYWORD_MARKET_RELEASE
@@ -79,6 +92,11 @@ readonly APP_USER="${PRECOMMUNITY_APP_USER:-ubuntu}"
 readonly DEPLOYMENT_NETWORK="${PRECOMMUNITY_NETWORK:-base-sepolia}"
 readonly DEPLOY_SAFE_ADDRESS="${PRECOMMUNITY_SAFE_ADDRESS:-${SAFE_ADDRESS:-}}"
 readonly SAFE_TRANSACTION_SERVICE_API_KEY_VALUE="${SAFE_TRANSACTION_SERVICE_API_KEY:-}"
+coingecko_api_key="${COINGECKO_API_KEY:-}"
+coingecko_api_key="${coingecko_api_key#"${coingecko_api_key%%[![:space:]]*}"}"
+coingecko_api_key="${coingecko_api_key%"${coingecko_api_key##*[![:space:]]}"}"
+readonly COINGECKO_API_KEY_VALUE="$coingecko_api_key"
+unset coingecko_api_key
 readonly BROWSER_RPC_URL_OVERRIDE="${PRECOMMUNITY_BROWSER_RPC_URL:-}"
 readonly KEYWORD_MARKET_RELEASE="${PRECOMMUNITY_KEYWORD_MARKET_RELEASE:-0}"
 readonly BASE_RPC_URL_OVERRIDE="${PRECOMMUNITY_BASE_RPC_URL:-${BASE_RPC_URL:-}}"
@@ -118,6 +136,10 @@ if [[ -n "$SAFE_TRANSACTION_SERVICE_API_KEY_VALUE" &&
   echo 'SAFE_TRANSACTION_SERVICE_API_KEY contains unsupported characters.' >&2
   exit 2
 fi
+if [[ -n "$COINGECKO_API_KEY_VALUE" && ! "$COINGECKO_API_KEY_VALUE" =~ ^[A-Za-z0-9._~-]+$ ]]; then
+  echo 'COINGECKO_API_KEY contains unsupported characters.' >&2
+  exit 2
+fi
 if [[ "$ESCROW_CUTOVER" != 0 && "$ESCROW_CUTOVER" != 1 ]]; then
   echo 'PRECOMMUNITY_ESCROW_CUTOVER must be 0 or 1.' >&2
   exit 2
@@ -152,6 +174,10 @@ if [[ -n "$WALLETCONNECT_PROJECT_ID" && ! "$WALLETCONNECT_PROJECT_ID" =~ ^[a-fA-
 fi
 
 validate_runtime_deployment
+OPERATOR_KEYSTORE_PAYLOAD="$(node "$SCRIPT_DIR/operator-keystore-env.mjs" payload "$DEPLOYMENT_NETWORK")"
+readonly OPERATOR_KEYSTORE_PAYLOAD
+PRICE_UPDATER_KEYSTORE_PAYLOAD="$(node "$SCRIPT_DIR/operator-keystore-env.mjs" price-payload "$DEPLOYMENT_NETWORK")"
+readonly PRICE_UPDATER_KEYSTORE_PAYLOAD
 
 release_manifest="$(mktemp)"
 trap 'rm -f "$release_manifest"' EXIT
@@ -206,14 +232,30 @@ runtime_configuration=(
   "ADS_CONTRACT_ADDRESS=$ADS_CONTRACT_ADDRESS_VALUE"
   "ADS_CONTRACT_DEPLOYMENT_BLOCK=$ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE"
 )
+if [[ -n "$SAFE_TRANSACTION_SERVICE_API_KEY_VALUE" ]]; then
+  runtime_configuration+=('PRECOMMUNITY_SAFE_TRANSACTION_SERVICE_API_KEY_STDIN=1')
+fi
+if [[ -n "$COINGECKO_API_KEY_VALUE" ]]; then
+  runtime_configuration+=('PRECOMMUNITY_COINGECKO_API_KEY_STDIN=1')
+fi
+if [[ -n "$OPERATOR_KEYSTORE_PAYLOAD" ]]; then
+  runtime_configuration+=('PRECOMMUNITY_ADS_OPERATOR_KEYSTORE_STDIN=1')
+fi
+if [[ -n "$PRICE_UPDATER_KEYSTORE_PAYLOAD" ]]; then
+  runtime_configuration+=('PRECOMMUNITY_ADS_PRICE_UPDATER_KEYSTORE_STDIN=1')
+fi
 # SSH joins arguments into a command parsed by the remote login shell.
 for ((configuration_index = 0; configuration_index < ${#runtime_configuration[@]}; configuration_index++)); do
   runtime_configuration[$configuration_index]="'${runtime_configuration[$configuration_index]//\'/\'\\\'\'}'"
 done
-if [[ -n "$SAFE_TRANSACTION_SERVICE_API_KEY_VALUE" ]]; then
-  printf '%s\n' "$SAFE_TRANSACTION_SERVICE_API_KEY_VALUE" |
+if [[ -n "$SAFE_TRANSACTION_SERVICE_API_KEY_VALUE" || -n "$COINGECKO_API_KEY_VALUE" || -n "$OPERATOR_KEYSTORE_PAYLOAD" || -n "$PRICE_UPDATER_KEYSTORE_PAYLOAD" ]]; then
+  {
+    if [[ -n "$SAFE_TRANSACTION_SERVICE_API_KEY_VALUE" ]]; then printf '%s\n' "$SAFE_TRANSACTION_SERVICE_API_KEY_VALUE"; fi
+    if [[ -n "$COINGECKO_API_KEY_VALUE" ]]; then printf '%s\n' "$COINGECKO_API_KEY_VALUE"; fi
+    if [[ -n "$OPERATOR_KEYSTORE_PAYLOAD" ]]; then printf '%s\n' "$OPERATOR_KEYSTORE_PAYLOAD"; fi
+    if [[ -n "$PRICE_UPDATER_KEYSTORE_PAYLOAD" ]]; then printf '%s\n' "$PRICE_UPDATER_KEYSTORE_PAYLOAD"; fi
+  } |
     ssh "$SSH_HOST" env \
-      'PRECOMMUNITY_SAFE_TRANSACTION_SERVICE_API_KEY_STDIN=1' \
       "${runtime_configuration[@]}" \
       bash "$RELEASE_DIR/ops/configure-app-runtime.sh" "$DOMAIN"
 else

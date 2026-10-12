@@ -31,6 +31,8 @@ function position(
     eligible: true,
     withdrawAvailableAt: 0n,
     positionVersion: 1n,
+    stakeSinceBlock: amountSinceBlock,
+    stakeSinceLogIndex: amountSinceLogIndex,
     amountSinceBlock,
     amountSinceLogIndex,
     positionBlock: amountSinceBlock,
@@ -64,8 +66,8 @@ function campaign(
 }
 
 describe('PRE Keyword Market stake ordering', () => {
-  it('uses eligibility, bid USD, then address, independent of PRE amount or event order', () => {
-    const later = position('bitcoin', address('3'), '100', 101n, 0);
+  it('uses eligibility, bid USD, then opening block/log, independent of PRE amount or address', () => {
+    const later = position('bitcoin', address('1'), '100', 101n, 0);
     const earlierLog = position('bitcoin', address('2'), '100', 100n, 2);
     const earliestLog = position('bitcoin', address('4'), '100', 100n, 1);
     const largest = position('bitcoin', address('5'), '101', 500n, 8);
@@ -83,6 +85,23 @@ describe('PRE Keyword Market stake ordering', () => {
         .map((item) => item.stakerAddress),
     ).toEqual([address('1'), address('2')]);
   });
+
+  it('keeps the earlier banana stake ahead of a later lower-address wallet with the same bid', () => {
+    const first = position('banana', address('518'), '100', 47849427n);
+    const second = position('banana', address('276'), '50', 47886077n);
+    first.bidUsdRaw = second.bidUsdRaw = '100000';
+    expect([second, first].sort(compareAdStakePositions)).toEqual([first, second]);
+    second.bidUsdRaw = '100001';
+    expect([first, second].sort(compareAdStakePositions)).toEqual([second, first]);
+  });
+
+  it('keeps opening priority when an earlier stake was topped up or charged later', () => {
+    const first = position('banana', address('5'), '50', 10n, 1);
+    const second = position('banana', address('1'), '100', 10n, 2);
+    first.bidUsdRaw = second.bidUsdRaw = '100000';
+    first.amountSinceBlock = first.positionBlock = 30n;
+    expect([second, first].sort(compareAdStakePositions)).toEqual([first, second]);
+  });
 });
 
 describe('PRE Keyword Market resolver eligibility', () => {
@@ -94,6 +113,17 @@ describe('PRE Keyword Market resolver eligibility', () => {
     position('bitcoin poland', longRunnerUp, '400'),
     position('bitcoin', shortLeader, '1000'),
   ];
+
+  it('delivers the earlier stake on an equal bid even when the later address is lower', () => {
+    const first = position('banana', address('5'), '100000', 10n);
+    const second = position('banana', address('1'), '100000', 11n);
+    const selected = selectEligibleAd(
+      adsKeywordCandidates('banana'),
+      [second, first],
+      [campaign('banana', second.stakerAddress), campaign('banana', first.stakerAddress)],
+    );
+    expect(selected?.position.stakerAddress).toBe(first.stakerAddress);
+  });
 
   it('tries the next eligible staker before falling back to a shorter keyword', () => {
     const selected = selectEligibleAd(adsKeywordCandidates('bitcoin poland xyz'), positions, [
@@ -134,16 +164,23 @@ describe('PRE Keyword Market resolver eligibility', () => {
 describe('PRE Keyword Market public resolve response', () => {
   it('does not count an empty or invalid query response as a view', async () => {
     const metrics = { increment: vi.fn(), incrementView: vi.fn() };
-    const service = new AdsService({} as never, metrics as never, { snapshot: () => ({ status: 'AWAITING_CONTRACT' }) } as never);
-    await expect(service.resolve('bitcoin')).resolves.toMatchObject({ ad: null });
+    const service = new AdsService(
+      {} as never,
+      metrics as never,
+      { snapshot: () => ({ status: 'AWAITING_CONTRACT' }) } as never,
+    );
+    await expect(service.resolve('bitcoin')).resolves.toEqual({ ad: null });
     await expect(service.resolve('---')).rejects.toThrow();
     expect(metrics.incrementView).not.toHaveBeenCalled();
     expect(metrics.increment).not.toHaveBeenCalled();
   });
-  it('returns creative fields with a verifiable chain/indexer proof', async () => {
+  it('returns only display fields and keeps view metrics on cache hits', async () => {
     const staker = address('7');
     const winner = position('bitcoin', staker, '900', 88n, 2);
-    const metrics = { increment: vi.fn().mockResolvedValue(true), incrementView: vi.fn().mockResolvedValue(true) };
+    const metrics = {
+      increment: vi.fn().mockResolvedValue(true),
+      incrementView: vi.fn().mockResolvedValue(true),
+    };
     const prisma = {
       adStakePosition: { findMany: vi.fn().mockResolvedValue([winner]) },
       adCampaign: { findMany: vi.fn().mockResolvedValue([campaign('bitcoin', staker)]) },
@@ -161,35 +198,30 @@ describe('PRE Keyword Market public resolve response', () => {
     const service = new AdsService(prisma as never, metrics as never, chain as never);
 
     const response = await service.resolve('BITCOIN price');
+    const revisionId = campaign('bitcoin', staker).activeRevision.id;
 
     expect(response).toEqual({
-      requestId: expect.any(String),
-      algorithmVersion: 'keyword-longest-v2',
-      ad: expect.objectContaining({
-        matchedKeyword: 'bitcoin',
-        revisionId: 'bitcoin-0x0000000000000000000000000000000000000007-creative',
-        proof: {
-          chainId: 8453,
-          contractAddress: address('99'),
-          stakerAddress: staker,
-          stakeRaw: '900',
-          bidUsdRaw: '900',
-          requiredCoveragePreRaw: '1',
-          eligible: true,
-          withdrawAvailableAt: '0',
-          positionVersion: '1',
-          positionBlock: '88',
-          positionTxHash: winner.positionTxHash,
-          indexedThroughBlock: '120',
-        },
-      }),
+      ad: {
+        headline: 'Result headline',
+        description: 'Result description',
+        clickUrl: expect.stringContaining(`/api/v1/keyword-market/revisions/${revisionId}/click`),
+        url: 'https://example.com/',
+        reportUrl: expect.stringContaining(`/keyword-market/reports/${revisionId}`),
+      },
     });
-    expect(metrics.increment).toHaveBeenCalledWith(response.ad!.revisionId);
-    expect(metrics.incrementView).toHaveBeenCalledWith(response.ad!.revisionId);
-    expect(response.ad!.clickUrl).toContain(`/v1/keyword-market/revisions/${response.ad!.revisionId}/click`);
-    expect(new URL(response.ad!.clickUrl).pathname).toBe(`/api/v1/keyword-market/revisions/${response.ad!.revisionId}/click`);
+    expect(metrics.increment).toHaveBeenCalledWith(revisionId);
+    expect(metrics.incrementView).toHaveBeenCalledWith(revisionId);
+    expect(new URL(response.ad!.clickUrl).pathname).toBe(
+      `/api/v1/keyword-market/revisions/${revisionId}/click`,
+    );
+    expect(new URL(response.ad!.url).protocol).toBe('https:');
+    expect(new URL(response.ad!.reportUrl).origin).toBe(new URL(response.ad!.clickUrl).origin);
+    expect(new URL(response.ad!.reportUrl).pathname).toBe(`/keyword-market/reports/${revisionId}`);
+    expect(prisma.adIndexerState.findFirst).not.toHaveBeenCalled();
 
-    await service.resolve('BITCOIN price');
+    const cachedResponse = await service.resolve('BITCOIN price');
+    expect(cachedResponse.ad).toEqual({ ...response.ad, clickUrl: expect.any(String) });
+    expect(cachedResponse.ad!.clickUrl).not.toBe(response.ad!.clickUrl);
     expect(prisma.adCampaign.findMany).toHaveBeenCalledOnce();
     expect(metrics.incrementView).toHaveBeenCalledTimes(2);
     await service.resolve('BITCOIN price', false);
@@ -198,24 +230,89 @@ describe('PRE Keyword Market public resolve response', () => {
 });
 
 describe('PRE Keyword Market campaign market view', () => {
+  it.each([
+    { block: 11n, bid: '100000', gap: '1', rank: 2 },
+    { block: 9n, bid: '99999', gap: '1', rank: 2 },
+  ])(
+    'uses opening priority for rank and the bid needed to lead ($block, $bid)',
+    async ({ block, bid, gap, rank }) => {
+      const owner = address('1');
+      const own = position('banana', owner, '50', block);
+      const leader = position('banana', address('5'), '100', 10n);
+      own.bidUsdRaw = bid;
+      leader.bidUsdRaw = '100000';
+      const now = new Date(0);
+      const prisma = {
+        adCampaign: {
+          findMany: vi.fn().mockResolvedValue([
+            {
+              id: 'banana-campaign',
+              canonicalKeyword: 'banana',
+              pausedAt: null,
+              activeRevisionId: null,
+              revisions: [],
+              createdAt: now,
+              updatedAt: now,
+            },
+          ]),
+        },
+        adStakePosition: { findMany: vi.fn().mockResolvedValue([own, leader]) },
+      };
+      const chain = {
+        snapshot: () => ({ status: 'SYNCED', chainId: 8453, contractAddress: address('99') }),
+      };
+      const service = new AdsService(prisma as never, {} as never, chain as never);
+      const result = await service.mine({ userId: 'owner', address: owner } as never);
+      expect(result[0]).toMatchObject({
+        leaderBidUsdRaw: '100000',
+        bidNeededToLeadUsdRaw: gap,
+        position: { rank },
+      });
+    },
+  );
+
   it('sums lifetime views and clicks across current and older revisions without losing integer precision', async () => {
     const now = new Date(0);
     const revision = {
       ...campaign('bitcoin', address('3')).activeRevision,
-      version: 1, moderationNote: null, createdAt: now, lifetimeResolutions: 0n, dailyMetrics: [],
+      version: 1,
+      moderationNote: null,
+      createdAt: now,
+      lifetimeResolutions: 0n,
+      dailyMetrics: [],
     };
     const prisma = {
-      adCampaign: { findMany: vi.fn().mockResolvedValue([{
-        id: 'campaign-1', canonicalKeyword: 'bitcoin', pausedAt: null, activeRevisionId: 'current',
-        revisions: [
-          { ...revision, id: 'current', lifetimeViews: 9007199254740995n, lifetimeClicks: 2n },
-          { ...revision, id: 'older', status: AdCreativeStatus.SUPERSEDED, lifetimeViews: 5n, lifetimeClicks: 3n },
-        ],
-        createdAt: now, updatedAt: now,
-      }]) },
+      adCampaign: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: 'campaign-1',
+            canonicalKeyword: 'bitcoin',
+            pausedAt: null,
+            activeRevisionId: 'current',
+            revisions: [
+              { ...revision, id: 'current', lifetimeViews: 9007199254740995n, lifetimeClicks: 2n },
+              {
+                ...revision,
+                id: 'older',
+                status: AdCreativeStatus.SUPERSEDED,
+                lifetimeViews: 5n,
+                lifetimeClicks: 3n,
+              },
+            ],
+            createdAt: now,
+            updatedAt: now,
+          },
+        ]),
+      },
     };
-    const service = new AdsService(prisma as never, {} as never, { snapshot: () => ({ status: 'AWAITING_CONTRACT', contractAddress: null }) } as never);
-    await expect(service.mine({ userId: 'user-1', address: address('3') } as never)).resolves.toEqual([
+    const service = new AdsService(
+      prisma as never,
+      {} as never,
+      { snapshot: () => ({ status: 'AWAITING_CONTRACT', contractAddress: null }) } as never,
+    );
+    await expect(
+      service.mine({ userId: 'user-1', address: address('3') } as never),
+    ).resolves.toEqual([
       expect.objectContaining({ lifetimeViews: '9007199254741000', lifetimeClicks: '5' }),
     ]);
   });
@@ -287,7 +384,11 @@ describe('PRE Keyword Market anonymous report storage', () => {
     const rawIp = '203.0.113.42';
 
     await expect(
-      service.report('revision-1', { reason: AdReportReason.OTHER }, rawIp),
+      service.report(
+        'revision-1',
+        { reason: AdReportReason.OTHER, comment: 'The destination is broken.' },
+        rawIp,
+      ),
     ).resolves.toEqual({ accepted: true });
 
     const stored = createMany.mock.calls[0]![0];
@@ -297,6 +398,7 @@ describe('PRE Keyword Market anonymous report storage', () => {
         expect.objectContaining({
           revisionId: 'revision-1',
           reason: AdReportReason.OTHER,
+          comment: 'The destination is broken.',
           reporterFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
         }),
       ],

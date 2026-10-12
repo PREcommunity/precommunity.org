@@ -205,13 +205,13 @@ export function KeywordMarketApiKeys() {
           <section className="keyword-market-admin-section">
             <form className="flex max-w-xl flex-wrap items-end gap-3" onSubmit={create}>
               <label className="keyword-market-field min-w-0 flex-1">
-                <span>Search engine name</span>
+                <span>Key name</span>
                 <input
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                   required
                   maxLength={80}
-                  placeholder="Search engine name"
+                  placeholder="Key name"
                   disabled={Boolean(busy) || Boolean(secret)}
                 />
               </label>

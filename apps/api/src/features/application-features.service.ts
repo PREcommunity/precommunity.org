@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { readApplicationFeatures } from '@precommunity/database';
+import { readApplicationFeatures, type ApplicationFeatures } from '@precommunity/database';
 import type { AuthenticatedPrincipal } from '../common/request-context';
 import { writeAuditEvent } from '../common/audit';
 import { PrismaService } from '../common/prisma.service';
@@ -14,7 +14,30 @@ export class ApplicationFeaturesService {
     return readApplicationFeatures(this.prisma);
   }
 
-  async updateKeywordMarket(enabled: boolean, actor: AuthenticatedPrincipal) {
+  updateKeywordMarket(enabled: boolean, actor: AuthenticatedPrincipal) {
+    return this.updateKeywordMarketSetting(
+      'keywordMarketEnabled',
+      enabled,
+      'UPDATE_KEYWORD_MARKET_AVAILABILITY',
+      actor,
+    );
+  }
+
+  updateKeywordMarketReview(requireReview: boolean, actor: AuthenticatedPrincipal) {
+    return this.updateKeywordMarketSetting(
+      'keywordMarketRequireReview',
+      requireReview,
+      'UPDATE_KEYWORD_MARKET_REVIEW_REQUIREMENT',
+      actor,
+    );
+  }
+
+  private async updateKeywordMarketSetting(
+    field: keyof ApplicationFeatures,
+    value: boolean,
+    action: string,
+    actor: AuthenticatedPrincipal,
+  ): Promise<ApplicationFeatures> {
     const project = await this.prisma.project.findUnique({ where: { slug: PROJECT_SLUG } });
     if (!project) {
       throw new NotFoundException(
@@ -29,10 +52,10 @@ export class ApplicationFeaturesService {
       const before = await tx.communitySettings.findUnique({ where: { projectId: project.id } });
       const settings = await tx.communitySettings.upsert({
         where: { projectId: project.id },
-        update: { keywordMarketEnabled: enabled, updatedBy: actor.address },
+        update: { [field]: value, updatedBy: actor.address },
         create: {
           projectId: project.id,
-          keywordMarketEnabled: enabled,
+          [field]: value,
           updatedBy: actor.address,
         },
       });
@@ -41,11 +64,14 @@ export class ApplicationFeaturesService {
         actor,
         entityType: 'ApplicationFeatures',
         entityId: project.id,
-        action: 'UPDATE_KEYWORD_MARKET_AVAILABILITY',
-        before: { keywordMarketEnabled: before?.keywordMarketEnabled ?? false },
-        after: { keywordMarketEnabled: settings.keywordMarketEnabled },
+        action,
+        before: { [field]: before?.[field] ?? field === 'keywordMarketRequireReview' },
+        after: { [field]: settings[field] },
       });
-      return { keywordMarketEnabled: settings.keywordMarketEnabled };
+      return {
+        keywordMarketEnabled: settings.keywordMarketEnabled,
+        keywordMarketRequireReview: settings.keywordMarketRequireReview,
+      };
     });
   }
 }

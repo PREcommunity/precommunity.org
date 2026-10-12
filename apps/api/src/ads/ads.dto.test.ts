@@ -16,7 +16,11 @@ describe('PRE Keyword Market request validation', () => {
     await expect(validate(named)).resolves.toHaveLength(0);
     expect(named.name).toBe('Search engine');
     for (const name of [undefined, '   ', 'x'.repeat(81)]) {
-      expect((await validate(plainToInstance(CreateAdApiKeyDto, { name }))).map((error) => error.property)).toContain('name');
+      expect(
+        (await validate(plainToInstance(CreateAdApiKeyDto, { name }))).map(
+          (error) => error.property,
+        ),
+      ).toContain('name');
     }
   });
   it('trims a valid creative and accepts an HTTPS destination', async () => {

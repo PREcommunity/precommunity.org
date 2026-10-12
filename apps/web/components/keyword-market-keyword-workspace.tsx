@@ -98,7 +98,7 @@ export function KeywordMarketKeywordWorkspace({ keyword }: { keyword: string }) 
             </div>
           </section>
           {data.positions.length ? (
-            <KeywordMarketRanking data={data} />
+            <KeywordMarketRanking key={data.keyword} data={data} />
           ) : (
             <div className="keyword-market-access-state">
               <span className="keyword-market-empty-index">00</span>

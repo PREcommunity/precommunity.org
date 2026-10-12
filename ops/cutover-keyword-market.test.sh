@@ -62,7 +62,22 @@ MOCK
 cat >"$TEST_ROOT/bin/psql" <<'MOCK'
 #!/usr/bin/env bash
 printf 'PSQL %s\n' "$*" >>"$CUTOVER_TEST_LOG"
-if [[ "$*" == *json_build_array* ]]; then printf '[2,1,1,0,3,5]\n'; fi
+if [[ "$*" == *'TRUNCATE TABLE'* && "${CUTOVER_TEST_FAIL_PROJECTION_RESET:-0}" == 1 ]]; then exit 10; fi
+if [[ "$*" == *json_build_array* ]]; then
+  if [[ "$*" == *'"AdCampaign"'* ]]; then
+    if [[ -f "$CUTOVER_TEST_CASE/reset-completed" ]]; then printf '[2,0,0,0,3,5,4]\n'; else printf '[2,1,1,0,3,5,4]\n'; fi
+  elif [[ -f "$CUTOVER_TEST_CASE/reset-completed" ]]; then
+    case "${CUTOVER_TEST_CHANGED_SHARED:-}" in
+      User) printf '[3,3,5,4]\n' ;;
+      FundingGoal) printf '[2,4,5,4]\n' ;;
+      CryptoContribution) printf '[2,3,6,4]\n' ;;
+      AdApiKey) printf '[2,3,5,5]\n' ;;
+      *) printf '[2,3,5,4]\n' ;;
+    esac
+  else
+    printf '[2,3,5,4]\n'
+  fi
+fi
 MOCK
 cat >"$TEST_ROOT/bin/pnpm" <<'MOCK'
 #!/usr/bin/env bash
@@ -83,6 +98,12 @@ cat >"$TEST_ROOT/bin/node-runtime" <<'MOCK'
 #!/usr/bin/env bash
 printf 'NODE %s\n' "$*" >>"$CUTOVER_TEST_LOG"
 case "${1:-}" in
+  ops/reset-keyword-market.mjs)
+    [[ "${KEYWORD_MARKET_FRESH_START:-0}" == 1 ]] || exit 90
+    [[ "${KEYWORD_MARKET_RESET_BACKUP_DIR:-}" == "$CUTOVER_TEST_CASE"/var/backups/precommunity/postgresql/keyword-market-* ]] || exit 90
+    [[ -s "$KEYWORD_MARKET_RESET_BACKUP_DIR/database/precommunity.dump" && -s "$KEYWORD_MARKET_RESET_BACKUP_DIR/checksums.sha256" ]] || exit 90
+    if [[ "${CUTOVER_TEST_FAIL_RESET:-0}" == 1 ]]; then exit 9; fi
+    : >"$CUTOVER_TEST_CASE/reset-completed" ;;
   apps/worker/dist/backfill.js) [[ "$*" == "apps/worker/dist/backfill.js --phase ${CUTOVER_TEST_EXPECT_PHASE:-active}" ]] || exit 90 ;;
   apps/worker/dist/check-keyword-market.js)
     [[ "$*" == "apps/worker/dist/check-keyword-market.js --phase ${CUTOVER_TEST_EXPECT_PHASE:-active}" ]] || exit 90
@@ -132,6 +153,7 @@ ENV
   printf 'ADS_CONTRACT_ADDRESS=0x7777777777777777777777777777777777777777\nADS_CONTRACT_DEPLOYMENT_BLOCK=200\n' >>"$CASE_ROOT/etc/precommunity/app.env.next"
   printf '{"keywordMarket":{"abiSha256":"abi-fixture","artifactSha256":"artifact-fixture","buildInfoId":"build-fixture"}}\n' >"$RELEASE_DIR/release-manifest.json"
   : >"$RELEASE_DIR/apps/worker/dist/check-keyword-market.js"
+  : >"$RELEASE_DIR/ops/reset-keyword-market.mjs"
   cat >"$RELEASE_DIR/ops/activate-release.sh" <<'MOCK'
 #!/usr/bin/env bash
 printf 'ACTIVATE %s\n' "$1" >>"$CUTOVER_TEST_LOG"
@@ -165,6 +187,18 @@ prepare_case failed-restore
 if run_case CUTOVER_TEST_FAIL_RESTORE=1; then echo 'An unrestorable backup was accepted.' >&2; exit 1; fi
 assert_not_promoted
 if grep -Fq 'PNPM db:deploy' "$LOG"; then echo 'Migration ran before backup restore verification succeeded.' >&2; exit 1; fi
+
+prepare_case live-market-replacement
+printf 'ADS_CONTRACT_ADDRESS=0x6666666666666666666666666666666666666666\nADS_CONTRACT_DEPLOYMENT_BLOCK=150\n' >>"$CASE_ROOT/etc/precommunity/app.env"
+cp "$CASE_ROOT/etc/precommunity/app.env" "$CASE_ROOT/active-before"
+if run_case; then echo 'An unapproved live-market replacement was accepted.' >&2; exit 1; fi
+assert_not_promoted
+if run_case KEYWORD_MARKET_REPLACE_ADDRESS=0x5555555555555555555555555555555555555555; then echo 'A wrong previous market address was accepted.' >&2; exit 1; fi
+assert_not_promoted
+if grep -Fq 'PG_DUMP' "$LOG"; then echo 'Replacement refusal happened after database work.' >&2; exit 1; fi
+run_case KEYWORD_MARKET_REPLACE_ADDRESS=0x6666666666666666666666666666666666666666 KEYWORD_MARKET_RELEASE_PHASE=bootstrap CUTOVER_TEST_EXPECT_PHASE=bootstrap CUTOVER_TEST_PAUSED=true
+grep -Fq 'ACTIVATE' "$LOG"
+if ! find "$CASE_ROOT/var/backups" -name previous-market-address -exec grep -Fq '0x6666666666666666666666666666666666666666' {} \; -print | grep -q .; then echo 'Previous market address was not preserved.' >&2; exit 1; fi
 
 prepare_case failed-migration
 if run_case CUTOVER_TEST_FAIL_MIGRATION=1; then echo 'A failed migration was accepted.' >&2; exit 1; fi
@@ -203,6 +237,8 @@ grep -Fq 'NODE apps/worker/dist/check-keyword-market.js --phase active' "$LOG"
 grep -Fq '"keywordMarketEnabled" = false' "$LOG"
 grep -Fq 'market phase active, application feature remains disabled' "$CASE_ROOT/output.log"
 if grep -Fq 'then Safe unpause' "$CASE_ROOT/output.log"; then echo 'Active release required Safe unpause.' >&2; exit 1; fi
+if grep -Fq 'NODE ops/reset-keyword-market.mjs' "$LOG"; then echo 'Default release reset the Keyword Market.' >&2; exit 1; fi
+if grep -Fq 'TRUNCATE TABLE' "$LOG"; then echo 'Default release cleared projections before migration.' >&2; exit 1; fi
 dump_line="$(grep -n '^PG_DUMP ' "$LOG" | cut -d: -f1)"
 restore_line="$(grep -n '^PG_RESTORE .*--exit-on-error' "$LOG" | cut -d: -f1)"
 migration_line="$(grep -n '^PNPM db:deploy' "$LOG" | cut -d: -f1)"
@@ -215,6 +251,26 @@ grep -Fq 'NODE apps/worker/dist/backfill.js --phase preopen' "$LOG"
 grep -Fq 'NODE apps/worker/dist/check-keyword-market.js --phase preopen' "$LOG"
 grep -Fq 'market phase preopen, application feature remains disabled' "$CASE_ROOT/output.log"
 grep -Fq 'then Safe unpause' "$CASE_ROOT/output.log"
+
+for paused in true false; do
+  prepare_case "bootstrap-success-$paused"
+  run_case KEYWORD_MARKET_RELEASE_PHASE=bootstrap CUTOVER_TEST_EXPECT_PHASE=bootstrap "CUTOVER_TEST_PAUSED=$paused"
+  cmp -s "$CASE_ROOT/etc/precommunity/app.env.next" "$CASE_ROOT/etc/precommunity/app.env"
+  grep -Fq 'ACTIVATE ' "$LOG"
+  grep -Fq 'NODE apps/worker/dist/backfill.js --phase bootstrap' "$LOG"
+  grep -Fq 'NODE apps/worker/dist/check-keyword-market.js --phase bootstrap' "$LOG"
+  grep -Fq 'authorize the price updater and store the first quote' "$CASE_ROOT/output.log"
+  if [[ "$paused" == true ]]; then
+    grep -Fq 'Safe unpause is required because this deployment is paused.' "$CASE_ROOT/output.log"
+  else
+    grep -Fq 'The contract is already unpaused.' "$CASE_ROOT/output.log"
+    if grep -Fq 'Safe unpause' "$CASE_ROOT/output.log"; then echo 'Unpaused bootstrap required Safe unpause.' >&2; exit 1; fi
+  fi
+done
+
+prepare_case invalid-bootstrap-pause-state
+if run_case KEYWORD_MARKET_RELEASE_PHASE=bootstrap CUTOVER_TEST_EXPECT_PHASE=bootstrap CUTOVER_TEST_PAUSED=null; then echo 'Bootstrap accepted an invalid pause state.' >&2; exit 1; fi
+assert_not_promoted
 
 prepare_case zero-previous-market
 printf 'ADS_CONTRACT_ADDRESS=0x0000000000000000000000000000000000000000\n' >>"$CASE_ROOT/etc/precommunity/app.env"
@@ -232,4 +288,70 @@ cp "$CASE_ROOT/etc/precommunity/app.env" "$CASE_ROOT/active-before"
 if run_case; then echo 'A different live market was replaced.' >&2; exit 1; fi
 assert_not_promoted
 if grep -Eq '^(PG_DUMP|PNPM) ' "$LOG"; then echo 'Live market refusal occurred after database work.' >&2; exit 1; fi
+
+for invalid_fresh in invalid '' 2; do
+  prepare_case "invalid-fresh-${invalid_fresh:-empty}"
+  if run_case "KEYWORD_MARKET_FRESH_START=$invalid_fresh"; then echo 'An invalid fresh-start flag was accepted.' >&2; exit 1; fi
+  assert_not_promoted
+  if [[ -s "$LOG" ]]; then echo 'Invalid fresh flag performed service or database work.' >&2; exit 1; fi
+done
+
+for previous_market in '' 0x0000000000000000000000000000000000000000 0x7777777777777777777777777777777777777777; do
+  prepare_case "fresh-without-replacement-${previous_market:-empty}"
+  printf 'ADS_CONTRACT_ADDRESS=%s\n' "$previous_market" >>"$CASE_ROOT/etc/precommunity/app.env"
+  cp "$CASE_ROOT/etc/precommunity/app.env" "$CASE_ROOT/active-before"
+  if run_case KEYWORD_MARKET_FRESH_START=1 "KEYWORD_MARKET_REPLACE_ADDRESS=$previous_market"; then echo 'Fresh start without a nonzero changed market was accepted.' >&2; exit 1; fi
+  assert_not_promoted
+  if grep -Eq '^(PG_DUMP|PNPM|NODE ops/reset-keyword-market)' "$LOG"; then echo 'Fresh refusal occurred after database work.' >&2; exit 1; fi
+done
+
+prepare_case fresh-success
+printf 'ADS_CONTRACT_ADDRESS=0x6666666666666666666666666666666666666666\nADS_CONTRACT_DEPLOYMENT_BLOCK=150\n' >>"$CASE_ROOT/etc/precommunity/app.env"
+cp "$CASE_ROOT/etc/precommunity/app.env" "$CASE_ROOT/active-before"
+run_case KEYWORD_MARKET_FRESH_START=1 KEYWORD_MARKET_REPLACE_ADDRESS=0x6666666666666666666666666666666666666666
+grep -Fq 'ACTIVATE ' "$LOG"
+grep -Fq 'NODE ops/reset-keyword-market.mjs' "$LOG"
+dump_line="$(grep -n '^PG_DUMP ' "$LOG" | cut -d: -f1)"
+restore_line="$(grep -n '^PG_RESTORE .*--exit-on-error' "$LOG" | cut -d: -f1)"
+projection_line="$(grep -n '^PSQL .*TRUNCATE TABLE' "$LOG" | cut -d: -f1)"
+migration_line="$(grep -n '^PNPM db:deploy' "$LOG" | cut -d: -f1)"
+seed_line="$(grep -n '^PNPM db:seed' "$LOG" | cut -d: -f1)"
+feature_line="$(grep -n '^PSQL .*keywordMarketEnabled' "$LOG" | cut -d: -f1)"
+reset_line="$(grep -n '^NODE ops/reset-keyword-market.mjs' "$LOG" | cut -d: -f1)"
+backfill_line="$(grep -n '^NODE apps/worker/dist/backfill.js' "$LOG" | cut -d: -f1)"
+if (( dump_line >= restore_line || restore_line >= projection_line || projection_line >= migration_line || migration_line >= seed_line || seed_line >= feature_line || feature_line >= reset_line || reset_line >= backfill_line )); then echo 'Fresh reset ran outside its verified backup/migration/backfill order.' >&2; exit 1; fi
+grep -Fq 'TRUNCATE TABLE "AdStakePosition", "AdChainEvent", "AdIndexerState";' "$LOG"
+if grep -Fq 'CASCADE' "$LOG"; then echo 'Fresh projection clear allowed cascading deletions.' >&2; exit 1; fi
+if ! find "$CASE_ROOT/var/backups" -name shared-counts.json -exec grep -Fq '[2,3,5,4]' {} \; -print | grep -q .; then echo 'Shared user/ledger/API-key counts were not preserved.' >&2; exit 1; fi
+
+prepare_case failed-fresh-projection-reset
+printf 'ADS_CONTRACT_ADDRESS=0x6666666666666666666666666666666666666666\nADS_CONTRACT_DEPLOYMENT_BLOCK=150\n' >>"$CASE_ROOT/etc/precommunity/app.env"
+cp "$CASE_ROOT/etc/precommunity/app.env" "$CASE_ROOT/active-before"
+if run_case KEYWORD_MARKET_FRESH_START=1 KEYWORD_MARKET_REPLACE_ADDRESS=0x6666666666666666666666666666666666666666 CUTOVER_TEST_FAIL_PROJECTION_RESET=1; then echo 'A failed projection reset was accepted.' >&2; exit 1; fi
+assert_not_promoted
+if grep -Eq '^(PNPM|NODE ops/reset-keyword-market|NODE apps/worker/dist/backfill)' "$LOG"; then echo 'Work followed a failed projection reset.' >&2; exit 1; fi
+
+prepare_case failed-fresh-migration
+printf 'ADS_CONTRACT_ADDRESS=0x6666666666666666666666666666666666666666\nADS_CONTRACT_DEPLOYMENT_BLOCK=150\n' >>"$CASE_ROOT/etc/precommunity/app.env"
+cp "$CASE_ROOT/etc/precommunity/app.env" "$CASE_ROOT/active-before"
+if run_case KEYWORD_MARKET_FRESH_START=1 KEYWORD_MARKET_REPLACE_ADDRESS=0x6666666666666666666666666666666666666666 CUTOVER_TEST_FAIL_MIGRATION=1; then echo 'A failed fresh migration was accepted.' >&2; exit 1; fi
+assert_not_promoted
+if grep -Eq '^NODE (ops/reset-keyword-market|apps/worker/dist/backfill)' "$LOG"; then echo 'Work followed a failed fresh migration.' >&2; exit 1; fi
+
+prepare_case failed-fresh-reset
+printf 'ADS_CONTRACT_ADDRESS=0x6666666666666666666666666666666666666666\nADS_CONTRACT_DEPLOYMENT_BLOCK=150\n' >>"$CASE_ROOT/etc/precommunity/app.env"
+cp "$CASE_ROOT/etc/precommunity/app.env" "$CASE_ROOT/active-before"
+if run_case KEYWORD_MARKET_FRESH_START=1 KEYWORD_MARKET_REPLACE_ADDRESS=0x6666666666666666666666666666666666666666 CUTOVER_TEST_FAIL_RESET=1; then echo 'A failed market reset was accepted.' >&2; exit 1; fi
+assert_not_promoted
+if grep -Fq 'NODE apps/worker/dist/backfill.js' "$LOG"; then echo 'Backfill followed a failed reset.' >&2; exit 1; fi
+
+for shared_table in User FundingGoal CryptoContribution AdApiKey; do
+  prepare_case "fresh-changed-$shared_table"
+  printf 'ADS_CONTRACT_ADDRESS=0x6666666666666666666666666666666666666666\nADS_CONTRACT_DEPLOYMENT_BLOCK=150\n' >>"$CASE_ROOT/etc/precommunity/app.env"
+  cp "$CASE_ROOT/etc/precommunity/app.env" "$CASE_ROOT/active-before"
+  if run_case KEYWORD_MARKET_FRESH_START=1 KEYWORD_MARKET_REPLACE_ADDRESS=0x6666666666666666666666666666666666666666 "CUTOVER_TEST_CHANGED_SHARED=$shared_table"; then echo "Fresh reset changed preserved $shared_table." >&2; exit 1; fi
+  assert_not_promoted
+  grep -Fq 'Preserved user/ledger/API-key counts changed' "$CASE_ROOT/output.log"
+  if grep -Fq 'NODE apps/worker/dist/backfill.js' "$LOG"; then echo 'Backfill followed changed shared data.' >&2; exit 1; fi
+done
 printf 'Hermetic Keyword Market cutover tests passed.\n'

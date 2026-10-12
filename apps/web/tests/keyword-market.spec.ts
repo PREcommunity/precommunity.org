@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 const port = Number(process.env.PLAYWRIGHT_PORT ?? 3100);
 const siteBase = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${port}`;
@@ -75,6 +75,83 @@ async function routeSignedInSession(page: Page, roles = ['CONTENT_ADMIN']) {
   );
 }
 
+function contrastRatio(first: string, second: string) {
+  const luminance = (color: string) => {
+    const [red, green, blue] = color
+      .match(/[\d.]+/g)!
+      .slice(0, 3)
+      .map((channel) => {
+        const value = Number(channel) / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+    return 0.2126 * red! + 0.7152 * green! + 0.0722 * blue!;
+  };
+  const values = [luminance(first), luminance(second)].sort((a, b) => b - a);
+  return (values[0]! + 0.05) / (values[1]! + 0.05);
+}
+
+async function expectVisibleControl(control: Locator, filled = false) {
+  const colors = await control.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      text: style.color,
+      background: style.backgroundColor,
+      border: style.borderTopColor,
+      page: getComputedStyle(document.body).backgroundColor,
+    };
+  });
+  expect(contrastRatio(colors.text, colors.background)).toBeGreaterThanOrEqual(4.5);
+  expect(
+    contrastRatio(filled ? colors.background : colors.border, colors.page),
+  ).toBeGreaterThanOrEqual(3);
+}
+
+for (const theme of ['light', 'dark']) {
+  test(`campaign action buttons remain visible in ${theme} mode`, async ({ page }, testInfo) => {
+    await page.addInitScript((value) => localStorage.setItem('precommunity-theme', value), theme);
+    await routeSignedInSession(page);
+    await page.route('**/v1/keyword-market/status', (route) =>
+      route.fulfill({ contentType: 'application/json', body: JSON.stringify(marketStatus) }),
+    );
+    await page.route('**/v1/keyword-market/campaigns/mine', (route) =>
+      route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify([
+          {
+            ...campaign,
+            chainStatus: 'SYNCED',
+            position: { ...publicPosition, stakerAddress: address, withdrawAvailableAt: '1' },
+          },
+        ]),
+      }),
+    );
+
+    await page.goto(`${marketBase}/campaigns/${campaignId}/edit`);
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+    const save = page.getByRole('button', { name: 'Save changes' });
+    await expect(save).toBeVisible();
+    await expectVisibleControl(save, true);
+    if (testInfo.project.name === 'desktop') {
+      await save.hover();
+      await expectVisibleControl(save, true);
+    }
+
+    await page.getByRole('link', { name: 'Cancel', exact: true }).click();
+    const edit = page.getByRole('link', { name: 'Edit', exact: true });
+    await expect(edit).toBeVisible();
+    await expectVisibleControl(edit, true);
+    const pause = page.getByRole('button', { name: 'Pause', exact: true });
+    await expectVisibleControl(pause);
+    const withdraw = page.getByRole('button', { name: 'Withdraw PRE', exact: true });
+    await expect(withdraw).toBeEnabled();
+    await expectVisibleControl(withdraw);
+    if (testInfo.project.name === 'desktop') {
+      await withdraw.hover();
+      await expectVisibleControl(withdraw);
+    }
+  });
+}
+
 test('main navigation searches public keyword ranking and prefills a new stake', async ({
   page,
 }) => {
@@ -101,8 +178,10 @@ test('main navigation searches public keyword ranking and prefills a new stake',
       body: JSON.stringify(marketStatus),
     }),
   );
-  await page.route('**/v1/keyword-market/keywords/**', (route) =>
-    route.fulfill({
+  let rankingRequests = 0;
+  await page.route('**/v1/keyword-market/keywords/**', (route) => {
+    rankingRequests += 1;
+    return route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
         keyword: decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-1)!),
@@ -112,8 +191,8 @@ test('main navigation searches public keyword ranking and prefills a new stake',
         indexedThroughBlock: marketStatus.indexedThroughBlock,
         positions: [publicPosition],
       }),
-    }),
-  );
+    });
+  });
   let resolverRequests = 0;
   await page.route('**/v1/keyword-market/resolve**', (route) => {
     resolverRequests += 1;
@@ -144,16 +223,11 @@ test('main navigation searches public keyword ranking and prefills a new stake',
   await expect(marketNavigation.getByRole('link', { name: 'Moderation' })).toHaveCount(0);
   await expect(marketNavigation.getByRole('link', { name: 'API keys' })).toHaveCount(0);
   await page.getByLabel('Search query').fill('  BITCOIN—Poland xyz  ');
-  const newStake = page
-    .locator('.keyword-market-result-heading-actions')
-    .getByRole('link', { name: 'New stake', exact: true });
-  await expect(newStake).toHaveAttribute(
-    'href',
-    '/keyword-market/campaigns/new?keyword=bitcoin%20poland%20xyz',
-  );
-  await expect(
-    page.getByRole('link', { name: 'New stake for bitcoin poland xyz' }),
-  ).toHaveAttribute('href', '/keyword-market/campaigns/new?keyword=bitcoin%20poland%20xyz');
+  const newStake = page.getByRole('link', { name: 'New stake', exact: true });
+  await expect(newStake).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'New stake', exact: true })).toHaveCount(0);
+  await expect(page.locator('.keyword-market-resolver-empty-icon')).toHaveCount(0);
+  expect(rankingRequests).toBe(0);
   await page.getByRole('button', { name: 'Search', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Keyword ranking' })).toBeVisible();
   const stake = page
@@ -161,13 +235,18 @@ test('main navigation searches public keyword ranking and prefills a new stake',
     .nth(2);
   await expect(stake.locator('strong')).toHaveText('2.5');
   await expect(stake.locator('small')).toHaveText('PRE');
+  await expect(newStake).toHaveAttribute(
+    'href',
+    '/keyword-market/campaigns/new?keyword=bitcoin%20poland%20xyz',
+  );
+  expect(rankingRequests).toBe(1);
   await expect(page.getByText(creative.headline, { exact: true })).toHaveCount(0);
   expect(resolverRequests).toBe(0);
   await newStake.click();
   await expect(page.getByLabel('Search phrase')).toHaveValue('bitcoin poland xyz');
 });
 
-test('search offers Edit for an owned phrase even when a competitor leads', async ({ page }) => {
+test('search places Edit on the owned stake even when a competitor leads', async ({ page }) => {
   await routeSignedInSession(page);
   await page.route('**/v1/keyword-market/status', (route) =>
     route.fulfill({ contentType: 'application/json', body: JSON.stringify(marketStatus) }),
@@ -175,19 +254,25 @@ test('search offers Edit for an owned phrase even when a competitor leads', asyn
   await page.route('**/v1/keyword-market/campaigns/mine', (route) =>
     route.fulfill({ contentType: 'application/json', body: JSON.stringify([campaign]) }),
   );
-  await page.route('**/v1/keyword-market/keywords/**', (route) =>
-    route.fulfill({
+  let rankingRequests = 0;
+  await page.route('**/v1/keyword-market/keywords/**', (route) => {
+    rankingRequests += 1;
+    const keyword = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-1)!);
+    return route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
-        keyword: campaign.keyword,
+        keyword,
         chainStatus: 'SYNCED',
         chainId: marketStatus.chainId,
         contractAddress: marketStatus.contractAddress,
         indexedThroughBlock: marketStatus.indexedThroughBlock,
-        positions: [publicPosition],
+        positions:
+          keyword === campaign.keyword
+            ? [publicPosition, { ...publicPosition, rank: 2, stakerAddress: address }]
+            : [publicPosition],
       }),
-    }),
-  );
+    });
+  });
   await page.goto(marketBase);
   await expect(
     page
@@ -195,11 +280,12 @@ test('search offers Edit for an owned phrase even when a competitor leads', asyn
       .getByRole('link', { name: 'API keys' }),
   ).toHaveCount(0);
   await page.getByLabel('Search query').fill('  BITCOIN—Poland  ');
-  const actions = page.locator('.keyword-market-result-heading-actions');
-  await expect(actions.getByRole('link', { name: 'Edit', exact: true })).toHaveAttribute(
-    'href',
-    `/keyword-market/campaigns/${campaignId}`,
-  );
+  const edit = page.getByRole('link', { name: 'Edit', exact: true });
+  const newStake = page.getByRole('link', { name: 'New stake', exact: true });
+  await expect(edit).toHaveCount(0);
+  await expect(newStake).toHaveCount(0);
+  await expect(page.locator('.keyword-market-resolver-empty-icon')).toHaveCount(0);
+  expect(rankingRequests).toBe(0);
   await page.getByRole('button', { name: 'Search', exact: true }).click();
   await expect(
     page
@@ -207,14 +293,44 @@ test('search offers Edit for an owned phrase even when a competitor leads', asyn
       .nth(2)
       .locator('strong'),
   ).toHaveText('2.5');
-  await expect(actions.getByRole('link', { name: 'Edit', exact: true })).toBeVisible();
+  const rows = page.locator('.keyword-market-ranking-ledger .keyword-market-ledger-row');
+  await expect(rows.nth(0).getByRole('link', { name: 'Edit', exact: true })).toHaveCount(0);
+  await expect(rows.nth(1).getByRole('link', { name: 'Edit', exact: true })).toHaveAttribute(
+    'href',
+    `/keyword-market/campaigns/${campaignId}`,
+  );
+  await expect(
+    page.locator('.keyword-market-result-heading-actions').getByRole('link', { name: 'Edit' }),
+  ).toHaveCount(0);
   await page.getByLabel('Search query').fill('bitcoin poland xyz');
-  await expect(actions.getByRole('link', { name: 'New stake', exact: true })).toHaveAttribute(
+  await expect(
+    page.getByRole('region', { name: `USD bid ranking for ${campaign.keyword}` }),
+  ).toBeVisible();
+  await expect(edit).toHaveAttribute('href', `/keyword-market/campaigns/${campaignId}`);
+  await expect(newStake).toHaveCount(0);
+  expect(rankingRequests).toBe(1);
+  await page.getByLabel('Search query').press('Enter');
+  await expect(
+    page.getByRole('region', { name: 'USD bid ranking for bitcoin poland xyz' }),
+  ).toBeVisible();
+  await expect(edit).toHaveCount(0);
+  await expect(newStake).toHaveAttribute(
     'href',
     '/keyword-market/campaigns/new?keyword=bitcoin%20poland%20xyz',
   );
+  expect(rankingRequests).toBe(2);
   await page.getByLabel('Search query').fill(campaign.keyword);
-  await actions.getByRole('link', { name: 'Edit', exact: true }).click();
+  await expect(newStake).toHaveAttribute(
+    'href',
+    '/keyword-market/campaigns/new?keyword=bitcoin%20poland%20xyz',
+  );
+  await expect(edit).toHaveCount(0);
+  expect(rankingRequests).toBe(2);
+  await page.getByLabel('Search query').press('Enter');
+  await expect(edit).toHaveAttribute('href', `/keyword-market/campaigns/${campaignId}`);
+  await expect(newStake).toHaveCount(0);
+  expect(rankingRequests).toBe(3);
+  await edit.click();
   await expect(page).toHaveURL(`${marketBase}/campaigns/${campaignId}`);
 });
 
@@ -288,7 +404,198 @@ test('advertiser flow keeps stake disabled while creative management works', asy
   await expect(page).toHaveURL(`${marketBase}/campaigns/${campaignId}`);
 });
 
-test('campaign updates from indexed external stake while preserving the creative draft', async ({
+test('advertiser edits on a separate page and reopens the saved pending changes', async ({
+  page,
+}) => {
+  await routeSignedInSession(page);
+  await page.route('**/v1/keyword-market/status', (route) =>
+    route.fulfill({ contentType: 'application/json', body: JSON.stringify(marketStatus) }),
+  );
+  let savedRevision: typeof creative | null = null;
+  await page.route('**/v1/keyword-market/campaigns/mine', (route) =>
+    route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([
+        {
+          ...campaign,
+          pendingRevision: savedRevision,
+          revisions: savedRevision ? [savedRevision, creative] : [creative],
+        },
+      ]),
+    }),
+  );
+  const updatedCreative = {
+    headline: 'Updated Bitcoin result',
+    description: 'Updated campaign description.',
+    destinationUrl: 'https://example.com/updated-bitcoin',
+  };
+  const submittedCreatives: unknown[] = [];
+  await page.route(`**/v1/keyword-market/campaigns/${campaignId}/revisions`, (route) => {
+    expect(route.request().method()).toBe('POST');
+    submittedCreatives.push(route.request().postDataJSON());
+    savedRevision = {
+      ...creative,
+      ...updatedCreative,
+      id: '00000000-0000-4000-8000-000000000103',
+      version: 2,
+      status: 'PENDING_REVIEW',
+    };
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ revisionId: savedRevision.id, version: 2 }),
+    });
+  });
+
+  await page.goto(`${marketBase}/campaigns/${campaignId}`);
+  const edit = page.getByRole('link', { name: 'Edit', exact: true });
+  await expect(edit).toBeVisible();
+  await expect(edit).toHaveAttribute('href', `/keyword-market/campaigns/${campaignId}/edit`);
+  await edit.click();
+  await expect(page).toHaveURL(`${marketBase}/campaigns/${campaignId}/edit`);
+  await expect(page.getByRole('heading', { name: 'Edit campaign', exact: true })).toBeVisible();
+  const editor = page.locator('.keyword-market-editor-grid');
+  await expect(editor.getByLabel('Search phrase')).toHaveValue(campaign.keyword);
+  await expect(editor.getByLabel('Search phrase')).toHaveJSProperty('readOnly', true);
+  const headline = editor.getByLabel(/^Headline/);
+  await expect(headline).toHaveValue(creative.headline);
+  await expect(headline).toBeFocused();
+  await expect(headline).toBeInViewport();
+  await expect(editor.getByLabel(/^Description/)).toHaveValue(creative.description);
+  await expect(editor.getByLabel(/^HTTPS destination/)).toHaveValue(creative.destinationUrl);
+  await headline.fill(updatedCreative.headline);
+  await editor.getByLabel(/^Description/).fill(updatedCreative.description);
+  await editor.getByLabel(/^HTTPS destination/).fill(updatedCreative.destinationUrl);
+  await editor.getByRole('button', { name: 'Save changes' }).click();
+  await expect(page).toHaveURL(`${marketBase}/campaigns/${campaignId}`);
+  expect(submittedCreatives).toEqual([updatedCreative]);
+  await expect(page.locator('.keyword-market-revision-row').first()).toContainText(
+    updatedCreative.headline,
+  );
+  await expect(page.locator('.keyword-market-campaign-primary')).toContainText(creative.headline);
+
+  await edit.click();
+  await expect(page).toHaveURL(`${marketBase}/campaigns/${campaignId}/edit`);
+  await page.reload();
+  await expect(headline).toHaveValue(updatedCreative.headline);
+  await expect(editor.getByLabel(/^Description/)).toHaveValue(updatedCreative.description);
+  await expect(editor.getByLabel(/^HTTPS destination/)).toHaveValue(updatedCreative.destinationUrl);
+  await headline.fill('Unsaved changes are discarded by Cancel');
+  await editor.getByRole('link', { name: 'Cancel', exact: true }).click();
+  await expect(page).toHaveURL(`${marketBase}/campaigns/${campaignId}`);
+  expect(submittedCreatives).toEqual([updatedCreative]);
+  await edit.click();
+  await expect(headline).toHaveValue(updatedCreative.headline);
+});
+
+test('campaign edit retains the draft when saving fails', async ({ page }) => {
+  await routeSignedInSession(page);
+  await page.route('**/v1/keyword-market/campaigns/mine', (route) =>
+    route.fulfill({ contentType: 'application/json', body: JSON.stringify([campaign]) }),
+  );
+  await page.route(`**/v1/keyword-market/campaigns/${campaignId}/revisions`, (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'Creative could not be saved. Try again.' }),
+    }),
+  );
+
+  await page.goto(`${marketBase}/campaigns/${campaignId}/edit`);
+  const headline = page.getByLabel(/^Headline/);
+  await headline.fill('Draft retained after a failed save');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  await expect(
+    page.getByText('Creative could not be saved. Try again.', { exact: true }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(`${marketBase}/campaigns/${campaignId}/edit`);
+  await expect(headline).toHaveValue('Draft retained after a failed save');
+  await expect(page.getByLabel(/^Description/)).toHaveValue(creative.description);
+  await expect(page.getByLabel(/^HTTPS destination/)).toHaveValue(creative.destinationUrl);
+  await expect(page.getByRole('button', { name: 'Save changes' })).toBeEnabled();
+});
+
+test('campaign edit retains the draft after signing in again to retry a save', async ({ page }) => {
+  await routeSignedInSession(page);
+  await page.route('**/v1/keyword-market/status', (route) =>
+    route.fulfill({ contentType: 'application/json', body: JSON.stringify(marketStatus) }),
+  );
+  let campaignRequests = 0;
+  await page.route('**/v1/keyword-market/campaigns/mine', (route) => {
+    campaignRequests += 1;
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify([campaign]) });
+  });
+  const submittedCreatives: unknown[] = [];
+  await page.route(`**/v1/keyword-market/campaigns/${campaignId}/revisions`, (route) => {
+    submittedCreatives.push(route.request().postDataJSON());
+    return route.fulfill(
+      submittedCreatives.length === 1
+        ? {
+            status: 401,
+            contentType: 'application/json',
+            body: JSON.stringify({ message: 'Session expired' }),
+          }
+        : {
+            contentType: 'application/json',
+            body: JSON.stringify({
+              revisionId: '00000000-0000-4000-8000-000000000103',
+              version: 2,
+            }),
+          },
+    );
+  });
+  const draft = {
+    headline: 'Campaign draft survives signing in again',
+    description: 'Keep every edited field after the campaign wallet signs in again.',
+    destinationUrl: 'https://example.com/session-retry',
+  };
+
+  await page.goto(`${marketBase}/campaigns/${campaignId}/edit`);
+  await page.getByLabel(/^Headline/).fill(draft.headline);
+  await page.getByLabel(/^Description/).fill(draft.description);
+  await page.getByLabel(/^HTTPS destination/).fill(draft.destinationUrl);
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  await expect(
+    page.getByText('Sign in with the campaign wallet to save your changes.', { exact: true }),
+  ).toBeVisible();
+  const requestsBeforeSignIn = campaignRequests;
+  await page.evaluate(() => window.dispatchEvent(new Event('precommunity:auth-changed')));
+  await expect.poll(() => campaignRequests).toBeGreaterThan(requestsBeforeSignIn);
+  await expect(page.getByLabel(/^Headline/)).toBeVisible();
+  await expect(page.getByLabel(/^Headline/)).toHaveValue(draft.headline);
+  await expect(page.getByLabel(/^Description/)).toHaveValue(draft.description);
+  await expect(page.getByLabel(/^HTTPS destination/)).toHaveValue(draft.destinationUrl);
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  await expect(page).toHaveURL(`${marketBase}/campaigns/${campaignId}`);
+  expect(submittedCreatives).toEqual([draft, draft]);
+});
+
+for (const access of [
+  {
+    name: 'signed out',
+    status: 401,
+    body: '{"message":"Not signed in"}',
+    message: 'Sign in with the campaign wallet',
+  },
+  { name: 'not owned', status: 200, body: '[]', message: 'Campaign not found' },
+]) {
+  test(`campaign edit hides the form when the campaign is ${access.name}`, async ({ page }) => {
+    if (access.status === 200) await routeSignedInSession(page);
+    else
+      await page.route('**/v1/auth/me', (route) =>
+        route.fulfill({ status: 401, contentType: 'application/json', body: access.body }),
+      );
+    await page.route('**/v1/keyword-market/campaigns/mine', (route) =>
+      route.fulfill({ status: access.status, contentType: 'application/json', body: access.body }),
+    );
+
+    await page.goto(`${marketBase}/campaigns/${campaignId}/edit`);
+    await expect(page.getByText(access.message, { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Save changes' })).toHaveCount(0);
+    await expect(page.getByLabel(/^Headline/)).toHaveCount(0);
+  });
+}
+
+test('campaign updates from indexed external stake while preserving the bid draft', async ({
   page,
 }) => {
   await page.clock.install();
@@ -347,11 +654,6 @@ test('campaign updates from indexed external stake while preserving the creative
   const positionPanel = page.locator('.keyword-market-stake-panel');
   await expect(positionPanel.getByText('0 PRE', { exact: true })).toBeVisible();
   await expect(positionPanel.locator('.keyword-market-rank-number')).toHaveText('—');
-  await page.getByRole('button', { name: 'New creative' }).click();
-  const draftHeadline = 'Draft kept while the blockchain index updates';
-  const draftDescription = 'These unsaved changes should survive a background API refresh.';
-  await page.getByLabel(/^Headline/).fill(draftHeadline);
-  await page.getByLabel(/^Description/).fill(draftDescription);
   await page.getByLabel('USD bid per click').fill('');
   const requestsBeforeStake = campaignRequests;
 
@@ -361,8 +663,6 @@ test('campaign updates from indexed external stake while preserving the creative
   await expect(positionPanel.getByText('2.5 PRE', { exact: true })).toBeVisible();
   await expect(positionPanel.locator('.keyword-market-rank-number')).toHaveText('#1');
   expect(campaignRequests).toBeGreaterThan(requestsBeforeStake);
-  await expect(page.getByLabel(/^Headline/)).toHaveValue(draftHeadline);
-  await expect(page.getByLabel(/^Description/)).toHaveValue(draftDescription);
   await expect(page.getByLabel('USD bid per click')).toHaveValue('');
 });
 

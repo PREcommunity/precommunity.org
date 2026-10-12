@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PRE_KEYWORD_MARKET_ABI, adKeywordId } from '@precommunity/shared';
-import { decodeFunctionData, erc20Abi } from 'viem';
+import { decodeFunctionData, erc20Abi, parseEther } from 'viem';
 import {
   buildAdsStakeTransactionPlan,
   ContractAdsChainAdapter,
@@ -15,10 +15,13 @@ const query = { canonicalKeyword: 'bitcoin', stakerAddress: tokenAddress };
 const syncedState = () => ({
   updatedAt: new Date(),
   lastBlockNumber: 100n,
+  lastBlockHash: `0x${'c'.repeat(64)}`,
   configBlockNumber: 100n,
   minimumStakeRaw: '1000000000000000000',
   paused: false,
   operatorAddress: '0x0000000000000000000000000000000000000000',
+  preUsdPriceE18Raw: '10000000000000000',
+  preUsdPriceQuotedAt: BigInt(Math.floor(Date.now() / 1000)),
 });
 
 async function configuredAdapter(run: (Adapter: typeof ContractAdsChainAdapter) => Promise<void>) {
@@ -36,10 +39,168 @@ async function configuredAdapter(run: (Adapter: typeof ContractAdsChainAdapter) 
   }
 }
 
-function replaceRpc(instance: ContractAdsChainAdapter, readContract = vi.fn()) {
-  (instance as unknown as { publicClient: unknown }).publicClient = { readContract };
-  return readContract;
+function replaceRpc(
+  instance: ContractAdsChainAdapter,
+  readContract = vi.fn(),
+  quote = { price: 10n ** 18n, quotedAt: BigInt(Math.floor(Date.now() / 1000)) },
+) {
+  const rpc = vi.fn(async (request: { functionName: string; blockNumber?: bigint }) => {
+    if (request.functionName === 'preUsdPriceE18') return quote.price;
+    if (request.functionName === 'preUsdPriceQuotedAt') return quote.quotedAt;
+    return readContract(request);
+  });
+  (instance as unknown as { publicClient: unknown }).publicClient = {
+    getBlock: vi.fn().mockResolvedValue({ number: 123n }),
+    readContract: rpc,
+  };
+  return rpc;
 }
+
+function projectionDatabase(state: unknown, positionRead = vi.fn()) {
+  const tx = {
+    adIndexerState: { findUnique: vi.fn().mockResolvedValue(state) },
+    adStakePosition: { findUnique: positionRead },
+  };
+  return { ...tx, $transaction: vi.fn(async (run: (database: typeof tx) => unknown) => run(tx)) };
+}
+
+const billingQuery = {
+  chainId: 84532,
+  contractAddress,
+  keywordId,
+  stakerAddress: tokenAddress,
+  positionVersion: '1',
+};
+
+function billingRpc(instance: ContractAdsChainAdapter) {
+  const rpc = {
+    getChainId: vi.fn().mockResolvedValue(84532),
+    getBlock: vi.fn().mockResolvedValue({ number: 123n, hash: `0x${'a'.repeat(64)}` }),
+    readContract: vi.fn(
+      async ({ functionName }: { functionName: string; blockNumber?: bigint }) => {
+        if (functionName === 'preUsdPriceE18') return 10n ** 16n;
+        if (functionName === 'preUsdPriceQuotedAt') return 1_700_000_000n;
+        return [100n, 250000n, 1n, false, 1000n, 1n];
+      },
+    ),
+  };
+  (instance as unknown as { billingClient: unknown }).billingClient = rpc;
+  return rpc;
+}
+
+describe('current click bid capture', () => {
+  it('reads the full position at the latest captured block and permits pending withdrawals', async () => {
+    await configuredAdapter(async (Adapter) => {
+      const adapter = new Adapter({} as never);
+      const rpc = billingRpc(adapter);
+      await expect(adapter.billingPosition(billingQuery)).resolves.toEqual({
+        status: 'FOUND',
+        bidUsdRaw: '250000',
+        source: 'RPC',
+        blockNumber: 123n,
+        blockHash: `0x${'a'.repeat(64)}`,
+        preUsdPriceE18: '10000000000000000',
+        preUsdPriceQuotedAt: '1700000000',
+      });
+      expect(rpc.readContract.mock.calls).toHaveLength(3);
+      expect(rpc.readContract.mock.calls.every(([request]) => request.blockNumber === 123n)).toBe(
+        true,
+      );
+      expect(rpc.readContract).toHaveBeenCalledWith({
+        address: contractAddress,
+        abi: PRE_KEYWORD_MARKET_ABI,
+        functionName: 'stakeDetailsOf',
+        args: [keywordId, tokenAddress],
+        blockNumber: 123n,
+      });
+    });
+  });
+
+  it.each([
+    [[100n, 250000n, 1n, true, 0n, 2n], 'POSITION_VERSION_MISMATCH'],
+    [[0n, 0n, 0n, false, 0n, 1n], 'POSITION_MISSING'],
+  ])('never falls back after a definitive live position rejection', async (tuple, errorCode) => {
+    await configuredAdapter(async (Adapter) => {
+      const stateRead = vi.fn().mockResolvedValue(syncedState());
+      const adapter = new Adapter({ adIndexerState: { findUnique: stateRead } } as never);
+      const rpc = billingRpc(adapter);
+      rpc.readContract.mockResolvedValue(tuple as never);
+      await expect(adapter.billingPosition(billingQuery)).resolves.toEqual({
+        status: 'UNAVAILABLE',
+        errorCode,
+      });
+      expect(stateRead).not.toHaveBeenCalled();
+    });
+  });
+
+  it('falls back only to a fresh synchronized projection of the original version', async () => {
+    await configuredAdapter(async (Adapter) => {
+      const state = syncedState();
+      const projected = {
+        stakeRaw: '100',
+        bidUsdRaw: '123456',
+        positionVersion: 1n,
+        positionBlock: 99n,
+        positionBlockHash: `0x${'b'.repeat(64)}`,
+      };
+      const projectionRead = vi.fn().mockResolvedValue(projected);
+      const database = projectionDatabase(state, projectionRead);
+      const adapter = new Adapter(database as never);
+      const rpc = billingRpc(adapter);
+      rpc.getBlock.mockRejectedValue(new Error('RPC unavailable'));
+      await expect(adapter.billingPosition(billingQuery)).resolves.toEqual({
+        status: 'FOUND',
+        bidUsdRaw: '123456',
+        source: 'PROJECTION',
+        blockNumber: state.lastBlockNumber,
+        blockHash: state.lastBlockHash,
+        preUsdPriceE18: state.preUsdPriceE18Raw,
+        preUsdPriceQuotedAt: state.preUsdPriceQuotedAt.toString(),
+      });
+      expect(database.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+        isolationLevel: 'RepeatableRead',
+      });
+      projected.positionVersion = 2n;
+      await expect(adapter.billingPosition(billingQuery)).resolves.toMatchObject({
+        errorCode: 'POSITION_VERSION_MISMATCH',
+      });
+      state.updatedAt = new Date(Date.now() - 60_001);
+      projectionRead.mockClear();
+      await expect(adapter.billingPosition(billingQuery)).resolves.toEqual({
+        status: 'UNAVAILABLE',
+        errorCode: 'CAPTURE_FAILED',
+      });
+      expect(projectionRead).not.toHaveBeenCalled();
+    });
+  });
+
+  it('bounds a stalled RPC and does not trust a different deployment or wrong RPC network', async () => {
+    await configuredAdapter(async (Adapter) => {
+      vi.useFakeTimers();
+      try {
+        const adapter = new Adapter(projectionDatabase(null) as never);
+        const rpc = billingRpc(adapter);
+        rpc.getBlock.mockImplementation(() => new Promise(() => undefined));
+        const capture = adapter.billingPosition(billingQuery);
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(capture).resolves.toMatchObject({
+          status: 'UNAVAILABLE',
+          errorCode: 'CAPTURE_FAILED',
+        });
+        await expect(
+          adapter.billingPosition({ ...billingQuery, chainId: 8453 }),
+        ).resolves.toMatchObject({ errorCode: 'CONTRACT_MISMATCH' });
+        rpc.getBlock.mockResolvedValue({ number: 123n, hash: `0x${'a'.repeat(64)}` });
+        rpc.getChainId.mockResolvedValue(8453);
+        await expect(adapter.billingPosition(billingQuery)).resolves.toMatchObject({
+          errorCode: 'CHAIN_MISMATCH',
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+});
 
 describe('PRE Keyword Market contract adapter', () => {
   it('keeps transaction preparation disabled before a contract is configured', async () => {
@@ -159,7 +320,228 @@ describe('PRE Keyword Market contract adapter', () => {
       expect(
         decodeFunctionData({ abi: PRE_KEYWORD_MARKET_ABI, data: plan.transaction.data }),
       ).toEqual({ functionName: 'stake', args: [keywordId, 0n, 1_500_000n] });
-      expect(rpc).toHaveBeenCalledTimes(3);
+      expect(rpc).toHaveBeenCalledTimes(5);
+    });
+  });
+
+  it.each([
+    [0n, true],
+    [99n, true],
+    [100n, false],
+    [101n, false],
+    [(1n << 256n) - 1n, false],
+  ])(
+    'requires approval for allowance %s only when below the deposit',
+    async (allowance, approvalRequired) => {
+      await configuredAdapter(async (Adapter) => {
+        const adapter = new Adapter({
+          adIndexerState: { findUnique: vi.fn().mockResolvedValue(syncedState()) },
+        } as never);
+        const rpc = replaceRpc(
+          adapter,
+          vi.fn(async ({ functionName }: { functionName: string }) => {
+            if (functionName === 'stakeDetailsOf') return [100n, 1n, 1n, true, 0n, 1n];
+            if (functionName === 'minimumStake') return 1n;
+            if (functionName === 'paused') return false;
+            if (functionName === 'allowance') return allowance;
+            throw new Error(`Unexpected RPC method ${functionName}`);
+          }),
+          { price: 10n ** 28n, quotedAt: BigInt(Math.floor(Date.now() / 1000)) },
+        );
+        const plan = await adapter.stake({ ...query, amountRaw: '100', bidUsdRaw: '1' });
+        if (!plan.enabled) throw new Error('Expected ready plan');
+        expect(Boolean(plan.approvalTransaction)).toBe(approvalRequired);
+        expect(rpc).toHaveBeenCalledWith({
+          address: plan.tokenAddress,
+          abi: erc20Abi,
+          functionName: 'allowance',
+          args: [query.stakerAddress, contractAddress],
+          blockNumber: 123n,
+        });
+        if (plan.approvalTransaction) {
+          expect(
+            decodeFunctionData({ abi: erc20Abi, data: plan.approvalTransaction.data }),
+          ).toEqual({
+            functionName: 'approve',
+            args: [contractAddress, 100n],
+          });
+        }
+      });
+    },
+  );
+
+  it('reads allowance again when preparing a stake after approval', async () => {
+    await configuredAdapter(async (Adapter) => {
+      const adapter = new Adapter({
+        adIndexerState: { findUnique: vi.fn().mockResolvedValue(syncedState()) },
+      } as never);
+      let allowance = 0n;
+      const rpc = replaceRpc(
+        adapter,
+        vi.fn(async ({ functionName }: { functionName: string }) => {
+          if (functionName === 'stakeDetailsOf') return [100n, 1n, 1n, true, 0n, 1n];
+          if (functionName === 'minimumStake') return 1n;
+          if (functionName === 'paused') return false;
+          if (functionName === 'allowance') return allowance;
+          throw new Error(`Unexpected RPC method ${functionName}`);
+        }),
+        { price: 10n ** 28n, quotedAt: BigInt(Math.floor(Date.now() / 1000)) },
+      );
+      const input = { ...query, amountRaw: '100', bidUsdRaw: '1' };
+      const first = await adapter.stake(input);
+      expect(first.enabled && first.approvalTransaction).toBeTruthy();
+      allowance = (1n << 256n) - 1n;
+      await expect(adapter.stake(input)).resolves.toMatchObject({
+        enabled: true,
+        approvalTransaction: null,
+      });
+      expect(
+        rpc.mock.calls.filter(([request]) => request.functionName === 'allowance'),
+      ).toHaveLength(2);
+    });
+  });
+
+  it.each([
+    ['new stake', '0', '100'],
+    ['bid-only update', '100', '0'],
+    ['insufficient top-up', '100', '79'],
+  ])('rejects an underfunded %s before allowance preparation', async (_name, existing, deposit) => {
+    await configuredAdapter(async (Adapter) => {
+      const adapter = new Adapter({
+        adIndexerState: { findUnique: vi.fn().mockResolvedValue(syncedState()) },
+      } as never);
+      const rpc = replaceRpc(
+        adapter,
+        vi.fn(async ({ functionName }: { functionName: string }) => {
+          if (functionName === 'stakeDetailsOf')
+            return [parseEther(existing), 1n, 1n, true, 0n, 1n];
+          if (functionName === 'minimumStake') return parseEther('1');
+          if (functionName === 'paused') return false;
+          throw new Error(`Unexpected RPC method ${functionName}`);
+        }),
+      );
+      await expect(
+        adapter.stake({
+          ...query,
+          amountRaw: parseEther(deposit).toString(),
+          bidUsdRaw: '180000000',
+        }),
+      ).rejects.toThrow(
+        `One click requires 180 PRE; your resulting stake is ${Number(existing) + Number(deposit)} PRE. Add ${180 - Number(existing) - Number(deposit)} PRE or lower your bid.`,
+      );
+      expect(rpc.mock.calls.some(([request]) => request.functionName === 'allowance')).toBe(false);
+      expect(rpc.mock.calls.every(([request]) => request.blockNumber === 123n)).toBe(true);
+    });
+  });
+
+  it('includes the old quote timestamp in an underfunded stake error before approval', async () => {
+    await configuredAdapter(async (Adapter) => {
+      const adapter = new Adapter({
+        adIndexerState: { findUnique: vi.fn().mockResolvedValue(syncedState()) },
+      } as never);
+      const quotedAt = BigInt(Math.floor(Date.now() / 1000) - 31 * 60);
+      const rpc = replaceRpc(
+        adapter,
+        vi.fn(async ({ functionName }: { functionName: string }) => {
+          if (functionName === 'stakeDetailsOf') return [parseEther('100'), 1n, 1n, true, 0n, 1n];
+          if (functionName === 'minimumStake') return parseEther('1');
+          if (functionName === 'paused') return false;
+          throw new Error(`Unexpected RPC method ${functionName}`);
+        }),
+        { price: parseEther('1'), quotedAt },
+      );
+      await expect(
+        adapter.stake({ ...query, amountRaw: '0', bidUsdRaw: '180000000' }),
+      ).rejects.toMatchObject({
+        status: 400,
+        message: `One click requires 180 PRE; your resulting stake is 100 PRE. Add 80 PRE or lower your bid. The contract's PRE/USD price is older than 30 minutes (updated ${new Date(Number(quotedAt) * 1000).toISOString()}). This stake uses that price.`,
+      });
+      expect(rpc.mock.calls.some(([request]) => request.functionName === 'allowance')).toBe(false);
+    });
+  });
+
+  it('allows equality after a sufficient top-up and warns while still using an old contract price', async () => {
+    await configuredAdapter(async (Adapter) => {
+      const adapter = new Adapter({
+        adIndexerState: { findUnique: vi.fn().mockResolvedValue(syncedState()) },
+      } as never);
+      replaceRpc(
+        adapter,
+        vi.fn(async ({ functionName }: { functionName: string }) => {
+          if (functionName === 'stakeDetailsOf') return [parseEther('100'), 1n, 1n, true, 0n, 1n];
+          if (functionName === 'minimumStake') return parseEther('1');
+          if (functionName === 'paused') return false;
+          if (functionName === 'allowance') return parseEther('80');
+          throw new Error(`Unexpected RPC method ${functionName}`);
+        }),
+        { price: parseEther('1'), quotedAt: BigInt(Math.floor(Date.now() / 1000) - 31 * 60) },
+      );
+      await expect(
+        adapter.stake({ ...query, amountRaw: parseEther('80').toString(), bidUsdRaw: '180000000' }),
+      ).resolves.toMatchObject({
+        enabled: true,
+        approvalTransaction: null,
+        priceWarning: expect.stringContaining('older than 30 minutes'),
+      });
+    });
+  });
+
+  it('rejects a re-prepared stake if a charge reduced the existing position after approval', async () => {
+    await configuredAdapter(async (Adapter) => {
+      const adapter = new Adapter({
+        adIndexerState: { findUnique: vi.fn().mockResolvedValue(syncedState()) },
+      } as never);
+      let currentAmount = parseEther('1');
+      const rpc = replaceRpc(
+        adapter,
+        vi.fn(async ({ functionName }: { functionName: string }) => {
+          if (functionName === 'stakeDetailsOf') return [currentAmount, 1n, 1n, true, 0n, 1n];
+          if (functionName === 'minimumStake') return parseEther('1');
+          if (functionName === 'paused') return false;
+          if (functionName === 'allowance') return 0n;
+          throw new Error(`Unexpected RPC method ${functionName}`);
+        }),
+      );
+      const input = { ...query, amountRaw: parseEther('0.1').toString(), bidUsdRaw: '1000000' };
+      await expect(adapter.stake(input)).resolves.toMatchObject({
+        enabled: true,
+        approvalTransaction: expect.any(Object),
+      });
+      currentAmount = parseEther('0.5');
+      rpc.mockClear();
+      await expect(adapter.stake(input)).rejects.toThrow(
+        'One click requires 1 PRE; your resulting stake is 0.6 PRE. Add 0.4 PRE',
+      );
+      expect(rpc.mock.calls.some(([request]) => request.functionName === 'allowance')).toBe(false);
+    });
+  });
+
+  it.each([
+    { price: 0n, quotedAt: 1n },
+    { price: parseEther('1'), quotedAt: 0n },
+    { price: parseEther('1'), quotedAt: BigInt(Math.floor(Date.now() / 1000) + 3600) },
+  ])('blocks staking when the contract price is missing or invalid', async (quote) => {
+    await configuredAdapter(async (Adapter) => {
+      const adapter = new Adapter({
+        adIndexerState: { findUnique: vi.fn().mockResolvedValue(syncedState()) },
+      } as never);
+      const rpc = replaceRpc(
+        adapter,
+        vi.fn(async ({ functionName }: { functionName: string }) => {
+          if (functionName === 'stakeDetailsOf') return [parseEther('100'), 1n, 1n, true, 0n, 1n];
+          if (functionName === 'minimumStake') return parseEther('1');
+          if (functionName === 'paused') return false;
+          throw new Error(`Unexpected RPC method ${functionName}`);
+        }),
+        quote,
+      );
+      await expect(
+        adapter.stake({ ...query, amountRaw: '0', bidUsdRaw: '1000000' }),
+      ).rejects.toMatchObject({
+        status: 503,
+        message: 'The contract has no valid PRE/USD price yet.',
+      });
+      expect(rpc.mock.calls.some(([request]) => request.functionName === 'allowance')).toBe(false);
     });
   });
 

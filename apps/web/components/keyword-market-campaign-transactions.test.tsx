@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AdCampaignView } from '@precommunity/shared';
+import { keywordMarketConfirmations, type AdCampaignView } from '@precommunity/shared';
 import { activeChain, activeDeployment, activeExplorerTransaction } from '@/lib/deployment';
 import { ApiError } from '@/lib/http';
 import type { AdStakeTransactionPlan, KeywordMarketChainSnapshot } from '@/lib/keyword-market-api';
@@ -17,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   status: vi.fn(),
   campaigns: vi.fn(),
   projection: vi.fn(),
+  switchChain: vi.fn(),
+  walletChainId: 84532,
 }));
 
 vi.mock('react', async (importOriginal) => {
@@ -30,7 +32,7 @@ vi.mock('wagmi', () => ({
     waitForTransactionReceipt: mocks.receipt,
   }),
   useSendTransaction: () => ({ sendTransactionAsync: mocks.send }),
-  useSwitchChain: () => ({ switchChainAsync: vi.fn() }),
+  useSwitchChain: () => ({ switchChainAsync: mocks.switchChain }),
 }));
 vi.mock('wagmi/actions', () => ({ getAccount: () => mocks.account }));
 vi.mock('@/hooks/use-wallet-session', () => ({
@@ -38,7 +40,7 @@ vi.mock('@/hooks/use-wallet-session', () => ({
     isConnected: true,
     address: `0x${'22'.repeat(20)}`,
     sessionAddress: `0x${'22'.repeat(20)}`,
-    chainId: 84532,
+    chainId: mocks.walletChainId,
   }),
 }));
 vi.mock('@/hooks/use-keyword-market-refresh', () => ({ useKeywordMarketRefresh: () => {} }));
@@ -129,10 +131,11 @@ async function finishTransaction() {
 
 describe('keyword campaign transaction safety', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mocks.buttons.clear();
     mocks.account.address = staker;
     mocks.account.isConnected = true;
+    mocks.walletChainId = activeChain.id;
     cells = [
       campaign,
       'ready',
@@ -144,8 +147,7 @@ describe('keyword campaign transaction safety', () => {
       snapshot,
       '',
       null,
-      false,
-      { headline: '', description: '', destinationUrl: '' },
+      '',
     ].map((value) => {
       const cell = {
         value,
@@ -186,6 +188,98 @@ describe('keyword campaign transaction safety', () => {
     expect(cells[4]!.value).toBe('1');
   });
 
+  it('shows an underfunded-bid error before any wallet approval, signing or network switch', async () => {
+    const message =
+      'One click requires 180 PRE; your resulting stake is 100 PRE. Add 80 PRE or lower your bid.';
+    mocks.walletChainId = activeChain.id === 84532 ? 8453 : 84532;
+    cells[4]!.value = '100';
+    cells[5]!.value = '180';
+    mocks.prepare.mockRejectedValueOnce(new ApiError(message, 400));
+    submitStake();
+    await finishTransaction();
+    expect(renderCampaign()).toContain(message);
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.switchChain).not.toHaveBeenCalled();
+    expect(mocks.read).not.toHaveBeenCalled();
+    expect(cells[4]!.value).toBe('100');
+    expect(cells[5]!.value).toBe('180');
+  });
+
+  it('does not submit a bid-only update rejected for an underfunded existing position', async () => {
+    cells[0]!.value = {
+      ...campaign,
+      position: {
+        rank: 1,
+        stakerAddress: staker,
+        stakeRaw: '100000000000000000000',
+        bidUsdRaw: '100000',
+        requiredCoveragePreRaw: '1000000000000000000',
+        eligible: true,
+        withdrawAvailableAt: '0',
+        positionVersion: '1',
+        amountSinceBlock: '100',
+        amountSinceLogIndex: 0,
+        positionBlock: '100',
+        positionTxHash: hash,
+        hasEligibleAd: false,
+      },
+    };
+    cells[4]!.value = '0';
+    mocks.prepare.mockRejectedValueOnce(
+      new ApiError('One click requires 180 PRE; your resulting stake is 100 PRE.', 400),
+    );
+    renderCampaign();
+    mocks.buttons.get('Update stake / bid')!();
+    await finishTransaction();
+    expect(mocks.prepare).toHaveBeenCalledWith(campaign.id, '0', '100000');
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(cells[2]!.value).toContain('One click requires 180 PRE');
+  });
+
+  it('stops before the stake when the balance or price becomes insufficient after approval', async () => {
+    mocks.read.mockImplementation(async ({ functionName }: { functionName: string }) =>
+      functionName === 'allowance' ? 0n : 10n ** 20n,
+    );
+    mocks.send.mockResolvedValueOnce(approvalHash);
+    mocks.receipt.mockResolvedValueOnce({ ...confirmedReceipt, transactionHash: approvalHash });
+    mocks.prepare
+      .mockResolvedValueOnce(plan)
+      .mockRejectedValueOnce(
+        new ApiError('One click requires 180 PRE; your resulting stake is 100 PRE.', 400),
+      );
+    submitStake();
+    await finishTransaction();
+    expect(mocks.prepare).toHaveBeenCalledTimes(2);
+    expect(mocks.send).toHaveBeenCalledOnce();
+    expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({ to: token }));
+    expect(cells[2]!.value).toContain('One click requires 180 PRE');
+    expect(cells[4]!.value).toBe('1');
+  });
+
+  it('shows the old-price warning before approval and refreshes it before staking', async () => {
+    const warning = 'The contract price is older than 30 minutes. This stake uses that price.';
+    mocks.prepare
+      .mockResolvedValueOnce({ ...plan, priceWarning: warning })
+      .mockResolvedValueOnce(plan);
+    mocks.read.mockImplementation(async ({ functionName }: { functionName: string }) =>
+      functionName === 'allowance' ? 0n : 10n ** 20n,
+    );
+    mocks.send
+      .mockImplementationOnce(async () => {
+        expect(renderCampaign()).toContain(warning);
+        return approvalHash;
+      })
+      .mockImplementationOnce(async () => {
+        expect(renderCampaign()).not.toContain(warning);
+        return hash;
+      });
+    mocks.receipt.mockResolvedValueOnce({ ...confirmedReceipt, transactionHash: approvalHash });
+    submitStake();
+    await finishTransaction();
+    expect(mocks.send).toHaveBeenCalledTimes(2);
+    expect(cells[2]!.value).toBe('');
+  });
+
   it('does not send the stake after the active account changes following approval', async () => {
     mocks.read.mockImplementation(async ({ functionName }: { functionName: string }) =>
       functionName === 'allowance' ? 0n : 10n ** 20n,
@@ -218,10 +312,70 @@ describe('keyword campaign transaction safety', () => {
     });
     expect(mocks.receipt).toHaveBeenCalledWith({
       hash,
-      confirmations: activeDeployment.confirmations,
+      confirmations: keywordMarketConfirmations(activeDeployment.confirmations),
     });
+    expect(mocks.receipt.mock.calls[0]![0].confirmations).toBeLessThanOrEqual(4);
     expect(cells[4]!.value).toBe('');
     expect(renderCampaign()).toContain('Position updated and indexed.');
+  });
+
+  it.each([10n ** 18n, 2n * 10n ** 18n, (1n << 256n) - 1n])(
+    'skips a prepared approval when the live marketplace allowance is sufficient (%s)',
+    async (allowance) => {
+      mocks.read.mockImplementation(async ({ functionName }: { functionName: string }) =>
+        functionName === 'allowance' ? allowance : 10n ** 20n,
+      );
+      submitStake();
+      await finishTransaction();
+      expect(mocks.read).toHaveBeenCalledWith(
+        expect.objectContaining({
+          address: token,
+          functionName: 'allowance',
+          args: [staker, market],
+        }),
+      );
+      expect(mocks.send).toHaveBeenCalledOnce();
+      expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({ to: market }));
+      expect(mocks.prepare).toHaveBeenCalledOnce();
+      expect(cells[2]!.value).toBe('');
+    },
+  );
+
+  it('approves insufficient allowance once before sending the stake', async () => {
+    mocks.read.mockImplementation(async ({ functionName }: { functionName: string }) =>
+      functionName === 'allowance' ? 10n ** 18n - 1n : 10n ** 20n,
+    );
+    mocks.send.mockResolvedValueOnce(approvalHash);
+    mocks.receipt.mockResolvedValueOnce({ ...confirmedReceipt, transactionHash: approvalHash });
+    mocks.prepare.mockResolvedValueOnce(plan).mockResolvedValueOnce({
+      ...plan,
+      approvalTransaction: null,
+    });
+    submitStake();
+    await finishTransaction();
+    expect(mocks.send).toHaveBeenCalledTimes(2);
+    expect(mocks.send).toHaveBeenNthCalledWith(1, expect.objectContaining({ to: token }));
+    expect(mocks.send).toHaveBeenNthCalledWith(2, expect.objectContaining({ to: market }));
+    expect(mocks.prepare).toHaveBeenCalledTimes(2);
+    expect(mocks.receipt).toHaveBeenNthCalledWith(1, {
+      hash: approvalHash,
+      confirmations: keywordMarketConfirmations(activeDeployment.confirmations),
+    });
+    expect(cells[2]!.value).toBe('');
+  });
+
+  it('does not send the stake when its approval is reverted', async () => {
+    mocks.read.mockImplementation(async ({ functionName }: { functionName: string }) =>
+      functionName === 'allowance' ? 0n : 10n ** 20n,
+    );
+    mocks.receipt.mockResolvedValueOnce({ ...confirmedReceipt, status: 'reverted' });
+    submitStake();
+    await finishTransaction();
+    expect(mocks.send).toHaveBeenCalledOnce();
+    expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({ to: token }));
+    expect(mocks.projection).not.toHaveBeenCalled();
+    expect(cells[2]!.value).toBe('PRE approval reverted on-chain');
+    expect(cells[4]!.value).toBe('1');
   });
 
   it.each([0, 429, 503])('retries transient indexing failures with status %s', async (status) => {

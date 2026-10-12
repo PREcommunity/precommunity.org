@@ -4,7 +4,10 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { ExternalLink } from 'lucide-react';
 import { useApplicationFeatures } from '@/hooks/use-application-features';
-import { APPLICATION_FEATURES_CHANGED_EVENT } from '@/lib/application-features';
+import {
+  APPLICATION_FEATURES_CHANGED_EVENT,
+  type ApplicationFeatures,
+} from '@/lib/application-features';
 import { clientApiJson } from '@/lib/http';
 import { ConfirmationDialog } from './confirmation-dialog';
 import { StatusNotice, type StatusNoticeState } from './status-notice';
@@ -18,30 +21,39 @@ export function KeywordMarketFeaturePanel({
 }) {
   const { features, loading, refresh } = useApplicationFeatures();
   const [pending, setPending] = useState(false);
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState<'market' | 'review' | null>(null);
   const [notice, setNotice] = useState<StatusNoticeState | null>(null);
   const enabled = features.keywordMarketEnabled;
+  const requireReview = features.keywordMarketRequireReview;
+  const confirmingReview = confirming === 'review';
 
   async function update() {
+    if (!canManage || !confirming || pending) return;
     setPending(true);
     setNotice(null);
     try {
-      const next = await clientApiJson<{ keywordMarketEnabled: boolean }>(
-        '/v1/admin/features/keyword-market',
+      const next = await clientApiJson<ApplicationFeatures>(
+        confirmingReview
+          ? '/v1/admin/features/keyword-market/review'
+          : '/v1/admin/features/keyword-market',
         {
           method: 'PUT',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ enabled: !enabled }),
+          body: JSON.stringify(
+            confirmingReview ? { requireReview: !requireReview } : { enabled: !enabled },
+          ),
         },
         'Keyword Market setting',
       );
       setNotice({
         type: 'success',
-        message: `Keyword Market ${next.keywordMarketEnabled ? 'enabled' : 'disabled'}.`,
+        message: confirmingReview
+          ? `Keyword Market review requirement ${next.keywordMarketRequireReview ? 'enabled' : 'disabled'}.`
+          : `Keyword Market ${next.keywordMarketEnabled ? 'enabled' : 'disabled'}.`,
       });
       window.dispatchEvent(new Event(APPLICATION_FEATURES_CHANGED_EVENT));
       await refresh();
-      setConfirming(false);
+      setConfirming(null);
     } catch (error) {
       setNotice({
         type: 'error',
@@ -65,7 +77,7 @@ export function KeywordMarketFeaturePanel({
             Controls the market pages, API endpoints, indexing, metrics and data retention jobs.
           </p>
         </div>
-        <span className="flex items-center gap-2 max-sm:justify-between">
+        <span className="flex flex-wrap items-center gap-2 max-sm:justify-between">
           {canModerate && enabled ? (
             <Link
               className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-navy bg-white px-2.5 text-[10px] font-bold text-navy transition-colors hover:border-blue hover:bg-blue-soft"
@@ -81,28 +93,65 @@ export function KeywordMarketFeaturePanel({
             aria-checked={enabled}
             disabled={loading || pending || !canManage}
             title={canManage ? undefined : 'Only SUPER_ADMIN can change this setting'}
-            onClick={() => setConfirming(true)}
+            onClick={() => setConfirming('market')}
           >
             <i className={`size-2 rounded-full ${enabled ? 'bg-success' : 'bg-muted'}`} />
             <span>{enabled ? 'Market visible' : 'Market hidden'}</span>
           </button>
+          <button
+            className={`flex min-h-8 cursor-pointer items-center gap-2 rounded-md border border-navy px-2.5 text-[10px] font-bold transition-colors duration-150 hover:border-blue hover:bg-blue-soft disabled:cursor-not-allowed disabled:opacity-55 ${requireReview ? 'bg-navy text-white hover:text-navy dark:hover:text-white' : 'bg-white'}`}
+            type="button"
+            role="switch"
+            aria-label="Require review"
+            aria-checked={requireReview}
+            disabled={loading || pending || !canManage}
+            title={canManage ? undefined : 'Only SUPER_ADMIN can change this setting'}
+            onClick={() => setConfirming('review')}
+          >
+            <i className={`size-2 rounded-full ${requireReview ? 'bg-success' : 'bg-muted'}`} />
+            <span>Require review {requireReview ? 'on' : 'off'}</span>
+          </button>
         </span>
       </header>
+      <p className="mt-3 mb-0 max-w-[720px] text-xs text-muted">
+        {requireReview
+          ? 'New campaigns and creative revisions wait for moderator approval.'
+          : 'New campaigns and creative revisions are automatically approved and published when eligible.'}{' '}
+        Existing pending reviews stay in moderation.
+      </p>
       {!canManage ? (
-        <p className="mt-3 mb-0 text-xs text-muted">Only SUPER_ADMIN can change this setting.</p>
+        <p className="mt-3 mb-0 text-xs text-muted">Only SUPER_ADMIN can change these settings.</p>
       ) : null}
       <StatusNotice notice={notice} />
       <ConfirmationDialog
-        open={confirming}
-        title={`${enabled ? 'Disable' : 'Enable'} Keyword Marketplace?`}
-        description={
-          enabled
-            ? 'The market will disappear and its API and background jobs will stop. Existing data will be preserved.'
-            : 'The market pages, API endpoints and background jobs will become available.'
+        open={confirming !== null}
+        title={
+          confirmingReview
+            ? requireReview
+              ? 'Turn off required review?'
+              : 'Require review for new submissions?'
+            : `${enabled ? 'Disable' : 'Enable'} Keyword Marketplace?`
         }
-        confirmLabel={enabled ? 'Disable market' : 'Enable market'}
+        description={
+          confirmingReview
+            ? requireReview
+              ? 'New campaigns and creative revisions will be automatically approved and published when eligible. Existing pending reviews will stay in moderation.'
+              : 'New campaigns and creative revisions will wait for moderator approval before publication. Existing submissions will keep their current status.'
+            : enabled
+              ? 'The market will disappear and its API and background jobs will stop. Existing data will be preserved.'
+              : 'The market pages, API endpoints and background jobs will become available.'
+        }
+        confirmLabel={
+          confirmingReview
+            ? requireReview
+              ? 'Turn off review'
+              : 'Require review'
+            : enabled
+              ? 'Disable market'
+              : 'Enable market'
+        }
         pending={pending}
-        onCancel={() => setConfirming(false)}
+        onCancel={() => setConfirming(null)}
         onConfirm={() => void update()}
       />
     </section>

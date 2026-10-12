@@ -16,6 +16,7 @@ import {
   Redirect,
   Req,
   UseGuards,
+  ValidationPipe,
 } from '@nestjs/common';
 import { AdCreativeStatus, Role } from '@precommunity/database';
 import type { Request } from 'express';
@@ -70,9 +71,10 @@ export class AdsController {
   async click(
     @Param('revisionId', ParseUUIDPipe) revisionId: string,
     @Req() request: Request,
+    @Query('delivery') delivery?: unknown,
   ) {
     return {
-      url: await this.service.click(revisionId, countsAdNavigation(request)),
+      url: await this.service.click(revisionId, countsAdNavigation(request), delivery),
       statusCode: HttpStatus.FOUND,
     };
   }
@@ -210,7 +212,17 @@ export class AdsAdminController {
   }
 
   @Get('reports')
-  reports(@Query() query: ListAdAdminReportsDto) {
+  reports(
+    @Query(
+      new ValidationPipe({
+        expectedType: ListAdAdminReportsDto,
+        transform: true,
+        whitelist: true,
+        forbidNonWhitelisted: true,
+      }),
+    )
+    query: ListAdAdminReportsDto,
+  ) {
     return this.service.adminReports(query.status, query.cursor, query.limit);
   }
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { LogOut, RefreshCw, UserRound } from 'lucide-react';
+import { LogOut, RefreshCw, Unplug, UserRound } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import { useWalletSession } from '@/hooks/use-wallet-session';
@@ -145,12 +145,17 @@ export function WalletButton({
   }
 
   return (
-    <div>
+    <div className="flex items-center gap-2 max-sm:gap-1.5">
       <button
         type="button"
-        className="h-[38px] min-w-[124px] cursor-pointer rounded-md border border-navy bg-navy px-3.5 text-xs font-bold text-white hover:border-blue hover:bg-blue hover:text-navy disabled:cursor-wait disabled:opacity-70 dark:border-ink dark:bg-surface dark:text-ink dark:hover:border-blue dark:hover:bg-blue-soft dark:hover:text-ink max-sm:h-9 max-sm:min-w-[108px] max-sm:px-2.5"
+        className={`h-[38px] cursor-pointer rounded-md border border-navy bg-navy px-3.5 text-xs font-bold text-white hover:border-blue hover:bg-blue hover:text-navy disabled:cursor-wait disabled:opacity-70 dark:border-ink dark:bg-surface dark:text-ink dark:hover:border-blue dark:hover:bg-blue-soft dark:hover:text-ink max-sm:h-9 max-sm:px-2.5 ${session.isConnected ? 'min-w-[74px] max-sm:min-w-[66px]' : 'min-w-[124px] max-sm:min-w-[108px]'}`}
         onClick={session.connectAndAuthenticate}
-        disabled={session.connectModalOpen || session.isAuthenticating}
+        disabled={
+          session.connectModalOpen ||
+          session.isAuthenticating ||
+          session.isDisconnecting ||
+          session.isLoggingOut
+        }
       >
         {session.connectModalOpen
           ? 'Choose wallet…'
@@ -160,6 +165,24 @@ export function WalletButton({
               ? 'Sign in'
               : 'Connect wallet'}
       </button>
+      {session.isConnected ? (
+        <button
+          type="button"
+          className="flex h-[38px] cursor-pointer items-center justify-center gap-1.5 rounded-md border border-navy bg-transparent px-2.5 text-xs font-bold text-navy hover:border-blue hover:bg-blue-soft disabled:cursor-wait disabled:opacity-70 dark:border-ink dark:text-ink max-sm:size-9 max-sm:px-0"
+          onClick={() => void session.disconnectWallet()}
+          disabled={
+            session.connectModalOpen ||
+            session.isAuthenticating ||
+            session.isDisconnecting ||
+            session.isLoggingOut
+          }
+        >
+          <Unplug size={15} aria-hidden="true" />
+          <span className="max-sm:sr-only">
+            {session.isDisconnecting ? 'Disconnecting…' : 'Disconnect'}
+          </span>
+        </button>
+      ) : null}
       {session.error ? (
         <span
           className="absolute top-[calc(100%+10px)] right-0 w-[260px] bg-navy px-3 py-2.5 text-xs text-white"

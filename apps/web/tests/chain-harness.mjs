@@ -262,6 +262,9 @@ function rpcResult(method, params = []) {
         ? `0x${(1_000n * 10n ** 18n).toString(16).padStart(64, '0')}`
         : `0x${'0'.repeat(64)}`;
     }
+    if (String(call.data ?? '').startsWith('0xdd62ed3e')) {
+      return `0x${'0'.repeat(64)}`;
+    }
     if (String(call.to ?? '').toLowerCase() === '0xca11bde05977b3631167028862be2a173976ca11') {
       const { args } = decodeFunctionData({ abi: multicall3Abi, data: call.data });
       return encodeFunctionResult({
@@ -377,7 +380,7 @@ createServer((request, response) => {
   }
   if (request.url === '/v1/public/features') {
     response.setHeader('content-type', 'application/json');
-    response.end(JSON.stringify({ keywordMarketEnabled: true }));
+    response.end(JSON.stringify({ keywordMarketEnabled: true, keywordMarketRequireReview: true }));
     return;
   }
   if (request.url?.includes('/contributions')) {

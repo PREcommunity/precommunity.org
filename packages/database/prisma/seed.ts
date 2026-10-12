@@ -52,6 +52,7 @@ async function main() {
       projectId: project.id,
       forumTopicModerationEnabled: false,
       keywordMarketEnabled: false,
+      keywordMarketRequireReview: true,
     },
   });
 }

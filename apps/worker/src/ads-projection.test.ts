@@ -48,6 +48,8 @@ describe('PRE Keyword Market position projection', () => {
           eligible: true,
           withdrawAvailableAt: 0n,
           positionVersion: 1n,
+          stakeSinceBlock: 10n,
+          stakeSinceLogIndex: 3,
           amountSinceBlock: 10n,
           amountSinceLogIndex: 3,
           active: true,
@@ -56,12 +58,20 @@ describe('PRE Keyword Market position projection', () => {
     );
   });
 
-  it('preserves the tie timestamp when a later event leaves the amount unchanged', async () => {
+  it.each([
+    ['top-up', { stakeRaw: '150' }, true],
+    ['charge', { stakeRaw: '80' }, true],
+    ['bid update', { bidUsdRaw: '3500000' }, false],
+    ['withdrawal request', { eligible: false, withdrawAvailableAt: 123n }, false],
+  ] as const)('preserves opening priority after a %s', async (_, update, amountChanged) => {
     const upsert = vi.fn();
     const database = {
       adStakePosition: {
         findUnique: vi.fn().mockResolvedValue({
           stakeRaw: '100',
+          positionVersion: 1n,
+          stakeSinceBlock: 10n,
+          stakeSinceLogIndex: 3,
           amountSinceBlock: 10n,
           amountSinceLogIndex: 3,
           positionBlock: 10n,
@@ -74,24 +84,58 @@ describe('PRE Keyword Market position projection', () => {
     await expect(
       applyAdPositionChange(database, {
         ...baseChange,
-        bidUsdRaw: '3500000',
-        eligible: false,
-        withdrawAvailableAt: 123n,
-        positionVersion: 2n,
+        ...update,
+        previousStakeRaw: '100',
         blockNumber: 11n,
         logIndex: 0,
       }),
-    ).resolves.toEqual({ applied: true, amountChanged: false });
+    ).resolves.toEqual({ applied: true, amountChanged });
     expect(upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         update: expect.objectContaining({
-          bidUsdRaw: '3500000',
-          eligible: false,
-          withdrawAvailableAt: 123n,
-          positionVersion: 2n,
+          ...update,
+          positionVersion: 1n,
+          stakeSinceBlock: 10n,
+          stakeSinceLogIndex: 3,
+          amountSinceBlock: amountChanged ? 11n : 10n,
+          amountSinceLogIndex: amountChanged ? 0 : 3,
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    ['a zero-balance reopening', '0', 1n],
+    ['a new position version', '100', 2n],
+  ] as const)('resets opening priority for %s', async (_, previousStakeRaw, positionVersion) => {
+    const upsert = vi.fn();
+    const database = {
+      adStakePosition: {
+        findUnique: vi.fn().mockResolvedValue({
+          stakeRaw: previousStakeRaw,
+          positionVersion: 1n,
+          stakeSinceBlock: 10n,
+          stakeSinceLogIndex: 3,
           amountSinceBlock: 10n,
           amountSinceLogIndex: 3,
+          positionBlock: 10n,
+          positionLogIndex: 3,
         }),
+        upsert,
+      },
+    } as never;
+
+    await applyAdPositionChange(database, {
+      ...baseChange,
+      previousStakeRaw,
+      positionVersion,
+      blockNumber: 11n,
+      logIndex: 0,
+    });
+
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ stakeSinceBlock: 11n, stakeSinceLogIndex: 0 }),
       }),
     );
   });
@@ -102,6 +146,9 @@ describe('PRE Keyword Market position projection', () => {
       .fn()
       .mockResolvedValueOnce({
         stakeRaw: '100',
+        positionVersion: 2n,
+        stakeSinceBlock: 10n,
+        stakeSinceLogIndex: 3,
         amountSinceBlock: 10n,
         amountSinceLogIndex: 3,
         positionBlock: 12n,
@@ -109,6 +156,9 @@ describe('PRE Keyword Market position projection', () => {
       })
       .mockResolvedValueOnce({
         stakeRaw: '100',
+        positionVersion: 2n,
+        stakeSinceBlock: 10n,
+        stakeSinceLogIndex: 3,
         amountSinceBlock: 10n,
         amountSinceLogIndex: 3,
         positionBlock: 12n,
@@ -176,8 +226,11 @@ describe('PRE Keyword Market position projection', () => {
   });
 
   it('calculates a confirmation boundary and resets only ads projection tables after a reorg', async () => {
-    expect(finalizedAdsBlock(100n, 12)).toBe(88n);
-    expect(finalizedAdsBlock(5n, 12)).toBe(0n);
+    expect(finalizedAdsBlock(100n, 12)).toBe(97n);
+    expect(finalizedAdsBlock(100n, 4)).toBe(97n);
+    expect(finalizedAdsBlock(100n, 1)).toBe(100n);
+    expect(finalizedAdsBlock(3n, 4)).toBe(0n);
+    expect(finalizedAdsBlock(2n, 4)).toBe(0n);
     expect(() => finalizedAdsBlock(100n, 0)).toThrow('positive integer');
 
     const tx = {
@@ -211,6 +264,9 @@ describe('PRE Keyword Market position projection', () => {
         minimumStakeRaw: '100',
         paused: false,
         operatorAddress: baseChange.stakerAddress,
+        priceUpdaterAddress: baseChange.stakerAddress,
+        preUsdPriceE18Raw: '10000000000000000',
+        preUsdPriceQuotedAt: 1_791_804_000n,
         configBlockNumber: 119n,
       }),
     ).resolves.toBe(current);

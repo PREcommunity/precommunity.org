@@ -18,6 +18,17 @@ const optionalConfirmations = z.preprocess(
   z.coerce.number().int().positive().max(1_000).optional(),
 );
 const optionalSecret = z.preprocess(emptyToUndefined, z.string().trim().min(1).optional());
+// Keystore passwords are exact bytes, including leading and trailing whitespace.
+const optionalPassword = z.preprocess(
+  (value) => (value === '' ? undefined : value),
+  z.string().optional(),
+);
+function decodeOperatorPassword(encoded: string | undefined) {
+  if (!encoded || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded))
+    return undefined;
+  const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+  return Buffer.from(decoded).toString('base64') === encoded ? decoded : undefined;
+}
 
 export const serverConfigSchema = z
   .object({
@@ -48,6 +59,19 @@ export const serverConfigSchema = z
     SAFE_ADDRESS: optionalAddress,
     SAFE_ADDRESS_TESTNET: optionalAddress,
     SAFE_TRANSACTION_SERVICE_API_KEY: optionalSecret,
+    COINGECKO_API_KEY: optionalSecret,
+    ADS_OPERATOR_KEYSTORE_PATH: optionalSecret,
+    ADS_OPERATOR_KEYSTORE_PASSWORD: optionalPassword,
+    ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64: optionalPassword,
+    ADS_OPERATOR_KEYSTORE_PATH_TESTNET: optionalSecret,
+    ADS_OPERATOR_KEYSTORE_PASSWORD_TESTNET: optionalPassword,
+    ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64_TESTNET: optionalPassword,
+    ADS_PRICE_UPDATER_KEYSTORE_PATH: optionalSecret,
+    ADS_PRICE_UPDATER_KEYSTORE_PASSWORD: optionalPassword,
+    ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_BASE64: optionalPassword,
+    ADS_PRICE_UPDATER_KEYSTORE_PATH_TESTNET: optionalSecret,
+    ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_TESTNET: optionalPassword,
+    ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_BASE64_TESTNET: optionalPassword,
     SAFE_TRANSACTION_SERVICE_URL: optionalUrl,
     SAFE_TRANSACTION_SERVICE_URL_TESTNET: optionalUrl,
     IPFS_GATEWAY_URL: z.string().url().default('https://ipfs.io/ipfs/'),
@@ -113,6 +137,13 @@ export function resolveServerConfig<T extends ServerRuntime>(runtime: T) {
     );
   }
 
+  const operatorPassword = isTestnet
+    ? runtime.ADS_OPERATOR_KEYSTORE_PASSWORD_TESTNET
+    : runtime.ADS_OPERATOR_KEYSTORE_PASSWORD;
+  const encodedOperatorPassword = isTestnet
+    ? runtime.ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64_TESTNET
+    : runtime.ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64;
+
   return {
     ...runtime,
     BASE_RPC_URL:
@@ -123,6 +154,28 @@ export function resolveServerConfig<T extends ServerRuntime>(runtime: T) {
       ? runtime.SAFE_TRANSACTION_SERVICE_URL_TESTNET
       : runtime.SAFE_TRANSACTION_SERVICE_URL,
     chain: deployment.network === 'base' ? base : baseSepolia,
+    adsOperator: {
+      keystorePath:
+        (isTestnet
+          ? runtime.ADS_OPERATOR_KEYSTORE_PATH_TESTNET
+          : runtime.ADS_OPERATOR_KEYSTORE_PATH) ?? null,
+      password: operatorPassword ?? decodeOperatorPassword(encodedOperatorPassword),
+    },
+    adsPriceUpdater: {
+      keystorePath:
+        (isTestnet
+          ? runtime.ADS_PRICE_UPDATER_KEYSTORE_PATH_TESTNET
+          : runtime.ADS_PRICE_UPDATER_KEYSTORE_PATH) ?? null,
+      password:
+        (isTestnet
+          ? runtime.ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_TESTNET
+          : runtime.ADS_PRICE_UPDATER_KEYSTORE_PASSWORD) ??
+        decodeOperatorPassword(
+          isTestnet
+            ? runtime.ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_BASE64_TESTNET
+            : runtime.ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_BASE64,
+        ),
+    },
     deployment,
     adsContract: {
       address:

@@ -2,6 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseEnv } from 'node:util';
 import {
+  encodedOperatorPair,
+  operatorKeystorePair,
+  serializeNativeEnv,
+} from './operator-keystore-env.mjs';
+import {
   buildKeywordRehearsalProfile,
   keywordMarketManifestName,
   REHEARSAL_SCHEMA,
@@ -68,9 +73,7 @@ test('rehearsal profile isolates both fallback URLs, secrets and real app origin
   assert.notEqual(env.SESSION_SECRET, main.SESSION_SECRET);
   assert.notEqual(env.ADS_REPORT_FINGERPRINT_SECRET, main.ADS_REPORT_FINGERPRINT_SECRET);
   assert.notEqual(env.SESSION_SECRET, env.ADS_REPORT_FINGERPRINT_SECRET);
-  const serialized = Object.entries(env)
-    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
-    .join('\n');
+  const serialized = serializeNativeEnv(env);
   assert.deepEqual(parseEnv(serialized), env);
   const rerun = buildKeywordRehearsalProfile(main, env, manifest);
   assert.equal(rerun.env.SESSION_SECRET, env.SESSION_SECRET);
@@ -167,4 +170,136 @@ test('copied main secrets and shared rehearsal secrets are replaced independentl
     assert.notEqual(value, main.ADS_REPORT_FINGERPRINT_SECRET);
   }
   assert.notEqual(env.SESSION_SECRET, env.ADS_REPORT_FINGERPRINT_SECRET);
+});
+
+test('rehearsal preserves its CoinGecko key, falls back to main, and treats whitespace as absent', () => {
+  const configured = { ...main, COINGECKO_API_KEY: ' main-fixture ' };
+  const { env } = buildKeywordRehearsalProfile(configured);
+  assert.equal(env.COINGECKO_API_KEY, 'main-fixture');
+  assert.equal(
+    buildKeywordRehearsalProfile(configured, { COINGECKO_API_KEY: ' previous-fixture ' }).env
+      .COINGECKO_API_KEY,
+    'previous-fixture',
+  );
+  assert.equal(
+    buildKeywordRehearsalProfile(configured, { COINGECKO_API_KEY: ' \t ' }).env.COINGECKO_API_KEY,
+    'main-fixture',
+  );
+  assert.equal(
+    buildKeywordRehearsalProfile({ ...main, COINGECKO_API_KEY: ' \t ' }).env.COINGECKO_API_KEY,
+    '',
+  );
+  const serialized = serializeNativeEnv(env);
+  assert.deepEqual(parseEnv(serialized), env);
+  assert.equal('NEXT_PUBLIC_COINGECKO_API_KEY' in env, false);
+});
+
+test('rehearsal rejects CoinGecko keys unsafe for environment serialization without exposing them', () => {
+  for (const value of [
+    'unsafe"fixture',
+    'unsafe\\fixture',
+    'unsafe\nfixture',
+    'unsafe fixture',
+    'unsafe$fixture',
+  ]) {
+    for (const [configured, previous] of [
+      [{ ...main, COINGECKO_API_KEY: value }, {}],
+      [main, { COINGECKO_API_KEY: value }],
+    ]) {
+      assert.throws(() => buildKeywordRehearsalProfile(configured, previous), {
+        message: 'COINGECKO_API_KEY contains unsupported characters',
+      });
+    }
+  }
+});
+
+test('rehearsal preserves only an explicitly configured testnet operator pair with exact password bytes', () => {
+  const password = ' leading $ ` " \' \\ / # żółć trailing ';
+  const parentPair = { path: '/testnet/operator fixture.json', password };
+  const mainnetPair = { path: '/mainnet/operator.json', password: 'mainnet private fixture' };
+  const configured = {
+    ...main,
+    ...encodedOperatorPair(mainnetPair),
+    ADS_OPERATOR_KEYSTORE_PATH_TESTNET: parentPair.path,
+    ADS_OPERATOR_KEYSTORE_PASSWORD_TESTNET: password,
+  };
+  const first = buildKeywordRehearsalProfile(configured).env;
+  const loaded = parseEnv(serializeNativeEnv(first));
+  assert.deepEqual(operatorKeystorePair(loaded, '_TESTNET'), parentPair);
+  assert.equal(operatorKeystorePair(loaded), null);
+  const rerun = buildKeywordRehearsalProfile(
+    {
+      ...configured,
+      ...encodedOperatorPair({ ...parentPair, password: 'new parent password' }, '_TESTNET'),
+    },
+    loaded,
+  ).env;
+  assert.deepEqual(operatorKeystorePair(rerun, '_TESTNET'), parentPair);
+  const ownPair = { path: '/testnet/own-operator.json', password: ' own $ ` # password ' };
+  const own = buildKeywordRehearsalProfile(
+    configured,
+    encodedOperatorPair(ownPair, '_TESTNET'),
+  ).env;
+  assert.deepEqual(operatorKeystorePair(own, '_TESTNET'), ownPair);
+  const noFallback = buildKeywordRehearsalProfile({
+    ...main,
+    ...encodedOperatorPair(mainnetPair),
+  }).env;
+  assert.equal(operatorKeystorePair(noFallback, '_TESTNET'), null);
+});
+
+test('rehearsal isolates updater credentials from mainnet and preserves its own encoded testnet pair on regeneration', () => {
+  const prefix = 'ADS_PRICE_UPDATER';
+  const parent = {
+    path: '/testnet/price updater fixture.json',
+    password: ' leading $ ` " \' \\ / # żółć\ntrailing ',
+  };
+  const mainnet = {
+    path: '/mainnet/price updater.json',
+    password: 'mainnet private price fixture',
+  };
+  const operator = { path: '/testnet/operator.json', password: 'separate operator fixture' };
+  const configured = {
+    ...main,
+    ...encodedOperatorPair(mainnet, '', prefix),
+    ...encodedOperatorPair(parent, '_TESTNET', prefix),
+    ...encodedOperatorPair(operator, '_TESTNET'),
+  };
+  const first = buildKeywordRehearsalProfile(configured).env;
+  const loaded = parseEnv(serializeNativeEnv(first));
+  assert.deepEqual(operatorKeystorePair(loaded, '_TESTNET', prefix), parent);
+  assert.equal(operatorKeystorePair(loaded, '', prefix), null);
+  assert.deepEqual(operatorKeystorePair(loaded, '_TESTNET'), operator);
+  const own = { path: '/testnet/own price updater.json', password: ' own private price fixture ' };
+  const regenerated = buildKeywordRehearsalProfile(configured, {
+    ...loaded,
+    ...encodedOperatorPair(own, '_TESTNET', prefix),
+  }).env;
+  assert.deepEqual(operatorKeystorePair(regenerated, '_TESTNET', prefix), own);
+  assert.equal(operatorKeystorePair(regenerated, '', prefix), null);
+  const onlyMainnet = buildKeywordRehearsalProfile({
+    ...main,
+    ...encodedOperatorPair(mainnet, '', prefix),
+  }).env;
+  assert.equal(operatorKeystorePair(onlyMainnet, '_TESTNET', prefix), null);
+  assert.equal(
+    Object.keys(first).some((key) => key.startsWith('NEXT_PUBLIC_ADS_PRICE_UPDATER')),
+    false,
+  );
+});
+
+test('rehearsal refuses partial or malformed updater pairs without exposing their credentials', () => {
+  for (const pair of [
+    { ADS_PRICE_UPDATER_KEYSTORE_PATH_TESTNET: '/private price fixture.json' },
+    { ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_TESTNET: 'private price fixture' },
+    {
+      ADS_PRICE_UPDATER_KEYSTORE_PATH_TESTNET: '/private price fixture.json',
+      ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_BASE64_TESTNET: 'invalid private price fixture',
+    },
+  ]) {
+    assert.throws(
+      () => buildKeywordRehearsalProfile({ ...main, ...pair }),
+      (error) => !error.message.includes('private price fixture'),
+    );
+  }
 });

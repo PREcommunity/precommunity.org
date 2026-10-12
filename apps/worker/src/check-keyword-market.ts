@@ -1,5 +1,6 @@
 import './load-env';
 import { prisma } from '@precommunity/database';
+import { keywordMarketConfirmations } from '@precommunity/shared';
 import { createPublicClient, http } from 'viem';
 import { config } from './config';
 import { keywordMarketCheckPhase, verifyKeywordMarketReadiness } from './keyword-market-readiness';
@@ -14,7 +15,7 @@ async function main() {
       deploymentBlock: config.adsContract.deploymentBlock,
       preAddress: config.deployment.preAddress,
       safeAddress: config.SAFE_ADDRESS,
-      confirmations: config.deployment.confirmations,
+      confirmations: keywordMarketConfirmations(config.deployment.confirmations),
       phase: keywordMarketCheckPhase(process.argv.slice(2), 'active'),
     },
   );

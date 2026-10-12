@@ -4,8 +4,22 @@ import {
   Injectable,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { PRE_KEYWORD_MARKET_ABI, adKeywordId, type AdsChainStatus } from '@precommunity/shared';
-import { createPublicClient, encodeFunctionData, erc20Abi, getAddress, http } from 'viem';
+import { Prisma, type AdIndexerState } from '@precommunity/database';
+import {
+  PRE_KEYWORD_MARKET_ABI,
+  adKeywordId,
+  billPreRaw,
+  preUsdPriceSnapshot,
+  type AdsChainStatus,
+} from '@precommunity/shared';
+import {
+  createPublicClient,
+  encodeFunctionData,
+  erc20Abi,
+  formatUnits,
+  getAddress,
+  http,
+} from 'viem';
 import { PrismaService } from '../common/prisma.service';
 import { config } from '../config';
 
@@ -69,6 +83,7 @@ export interface AdsReadyStakeTransactionPlan {
   tokenAddress: `0x${string}`;
   approvalTransaction: AdsPreparedTransaction | null;
   transaction: AdsPreparedTransaction;
+  priceWarning?: string;
 }
 
 export type AdsStakeTransactionPlan =
@@ -77,9 +92,52 @@ export type AdsStakeTransactionPlan =
 export interface AdsChainAdapter {
   snapshot(): Promise<AdsChainSnapshot>;
   position(query: AdsChainPositionQuery): Promise<AdsChainPositionState | null>;
+  billingPosition(query: AdsBillingPositionQuery): Promise<AdsBillingPositionResult>;
   stake(input: AdsStakeOperationInput): Promise<AdsStakeTransactionPlan>;
   requestUnstake(input: AdsStakeOperationInput): Promise<AdsStakeTransactionPlan>;
   unstake(input: AdsStakeOperationInput): Promise<AdsStakeTransactionPlan>;
+}
+
+export interface AdsBillingPositionQuery {
+  chainId: number;
+  contractAddress: string;
+  keywordId: string;
+  stakerAddress: string;
+  positionVersion: string;
+}
+
+export type AdsBillingPositionResult =
+  | {
+      status: 'FOUND';
+      bidUsdRaw: string;
+      source: 'RPC' | 'PROJECTION';
+      blockNumber: bigint;
+      blockHash: string;
+      preUsdPriceE18: string;
+      preUsdPriceQuotedAt: string;
+    }
+  | { status: 'UNAVAILABLE'; errorCode: string };
+
+const BILLING_RPC_TIMEOUT_MS = 2_000;
+
+function billingPositionResult(
+  query: AdsBillingPositionQuery,
+  position: { amount: bigint; bidUsd: bigint; positionVersion: bigint },
+  evidence: {
+    source: 'RPC' | 'PROJECTION';
+    blockNumber: bigint;
+    blockHash: string;
+    preUsdPriceE18: string;
+    preUsdPriceQuotedAt: string;
+  },
+): AdsBillingPositionResult {
+  if (position.positionVersion !== BigInt(query.positionVersion)) {
+    return { status: 'UNAVAILABLE', errorCode: 'POSITION_VERSION_MISMATCH' };
+  }
+  if (position.amount <= 0n || position.bidUsd <= 0n) {
+    return { status: 'UNAVAILABLE', errorCode: 'POSITION_MISSING' };
+  }
+  return { status: 'FOUND', bidUsdRaw: position.bidUsd.toString(), ...evidence };
 }
 
 export function parseAdsStakeAmount(value?: string) {
@@ -148,10 +206,27 @@ export function buildAdsStakeTransactionPlan(input: {
 }
 
 const client = createPublicClient({ chain: config.chain, transport: http(config.BASE_RPC_URL) });
+const billingClient = createPublicClient({
+  chain: config.chain,
+  transport: http(config.BASE_RPC_URL, { timeout: BILLING_RPC_TIMEOUT_MS, retryCount: 0 }),
+});
+
+function synchronizedState(state: AdIndexerState | null) {
+  return Boolean(
+    state &&
+    Date.now() - state.updatedAt.getTime() >= 0 &&
+    Date.now() - state.updatedAt.getTime() <= 60_000 &&
+    state.configBlockNumber === state.lastBlockNumber &&
+    state.minimumStakeRaw !== null &&
+    state.paused !== null &&
+    state.operatorAddress !== null,
+  );
+}
 
 @Injectable()
 export class ContractAdsChainAdapter implements AdsChainAdapter {
   private readonly publicClient = client;
+  private readonly billingClient = billingClient;
 
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
@@ -174,14 +249,7 @@ export class ContractAdsChainAdapter implements AdsChainAdapter {
     const state = await this.prisma.adIndexerState.findUnique({
       where: { key: `${config.deployment.chainId}:${contractAddress}` },
     });
-    const synced = Boolean(
-      state &&
-      Date.now() - state.updatedAt.getTime() <= 60_000 &&
-      state.configBlockNumber === state.lastBlockNumber &&
-      state.minimumStakeRaw !== null &&
-      state.paused !== null &&
-      state.operatorAddress !== null,
-    );
+    const synced = synchronizedState(state);
     return {
       status: synced ? 'SYNCED' : 'SYNCING',
       chainId: config.deployment.chainId,
@@ -220,6 +288,114 @@ export class ContractAdsChainAdapter implements AdsChainAdapter {
     };
   }
 
+  async billingPosition(query: AdsBillingPositionQuery): Promise<AdsBillingPositionResult> {
+    if (
+      query.chainId !== config.deployment.chainId ||
+      !config.adsContract.address ||
+      query.contractAddress !== getAddress(config.adsContract.address).toLowerCase()
+    ) {
+      return { status: 'UNAVAILABLE', errorCode: 'CONTRACT_MISMATCH' };
+    }
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const live = (async () => {
+        const [chainId, block] = await Promise.all([
+          this.billingClient.getChainId(),
+          this.billingClient.getBlock({ blockTag: 'latest' }),
+        ]);
+        if (chainId !== query.chainId)
+          return { status: 'UNAVAILABLE', errorCode: 'CHAIN_MISMATCH' } as const;
+        const [amount, bidUsd, , , , positionVersion] = await this.billingClient.readContract({
+          address: getAddress(query.contractAddress),
+          abi: PRE_KEYWORD_MARKET_ABI,
+          functionName: 'stakeDetailsOf',
+          args: [query.keywordId as `0x${string}`, getAddress(query.stakerAddress)],
+          blockNumber: block.number,
+        });
+        const position = billingPositionResult(
+          query,
+          { amount, bidUsd, positionVersion },
+          {
+            source: 'RPC',
+            blockNumber: block.number,
+            blockHash: block.hash,
+            preUsdPriceE18: '0',
+            preUsdPriceQuotedAt: '0',
+          },
+        );
+        if (position.status === 'UNAVAILABLE') return position;
+        const [price, quotedAt] = await Promise.all([
+          this.billingClient.readContract({
+            address: getAddress(query.contractAddress),
+            abi: PRE_KEYWORD_MARKET_ABI,
+            functionName: 'preUsdPriceE18',
+            blockNumber: block.number,
+          }),
+          this.billingClient.readContract({
+            address: getAddress(query.contractAddress),
+            abi: PRE_KEYWORD_MARKET_ABI,
+            functionName: 'preUsdPriceQuotedAt',
+            blockNumber: block.number,
+          }),
+        ]);
+        return {
+          ...position,
+          preUsdPriceE18: price.toString(),
+          preUsdPriceQuotedAt: quotedAt.toString(),
+        };
+      })();
+      return await Promise.race([
+        live,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('Billing RPC timed out')),
+            BILLING_RPC_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } catch {
+      return await this.prisma.$transaction(
+        async (tx) => {
+          const state = await tx.adIndexerState.findUnique({
+            where: { key: `${query.chainId}:${query.contractAddress}` },
+          });
+          if (!state || !synchronizedState(state)) {
+            return { status: 'UNAVAILABLE', errorCode: 'CAPTURE_FAILED' } as const;
+          }
+          const position = await tx.adStakePosition.findUnique({
+            where: {
+              chainId_contractAddress_keywordId_stakerAddress: {
+                chainId: query.chainId,
+                contractAddress: query.contractAddress,
+                keywordId: query.keywordId,
+                stakerAddress: query.stakerAddress,
+              },
+            },
+          });
+          if (!position) return { status: 'UNAVAILABLE', errorCode: 'POSITION_MISSING' } as const;
+          return billingPositionResult(
+            query,
+            {
+              amount: BigInt(position.stakeRaw),
+              bidUsd: BigInt(position.bidUsdRaw),
+              positionVersion: position.positionVersion,
+            },
+            {
+              source: 'PROJECTION',
+              blockNumber: state.lastBlockNumber,
+              blockHash: state.lastBlockHash,
+              preUsdPriceE18: state.preUsdPriceE18Raw ?? '0',
+              preUsdPriceQuotedAt: state.preUsdPriceQuotedAt?.toString() ?? '0',
+            },
+          );
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   stake(input: AdsStakeOperationInput) {
     return this.prepare('STAKE', input);
   }
@@ -249,24 +425,41 @@ export class ContractAdsChainAdapter implements AdsChainAdapter {
     const contractAddress = getAddress(snapshot.contractAddress);
     const tokenAddress = getAddress(config.deployment.preAddress);
     const keywordId = adKeywordId(input.canonicalKeyword);
+    const block = await this.publicClient.getBlock({ blockTag: 'latest' });
     const [amount, , , , withdrawAvailableAt] = await this.publicClient.readContract({
       address: contractAddress,
       abi: PRE_KEYWORD_MARKET_ABI,
       functionName: 'stakeDetailsOf',
       args: [keywordId, getAddress(input.stakerAddress)],
+      blockNumber: block.number,
     });
     const current = { active: amount > 0n, withdrawAvailableAt: String(withdrawAvailableAt) };
+    let priceWarning: string | undefined;
     if (operation === 'STAKE') {
-      const [minimumStake, paused] = await Promise.all([
+      const [minimumStake, paused, price, quotedAt] = await Promise.all([
         this.publicClient.readContract({
           address: contractAddress,
           abi: PRE_KEYWORD_MARKET_ABI,
           functionName: 'minimumStake',
+          blockNumber: block.number,
         }),
         this.publicClient.readContract({
           address: contractAddress,
           abi: PRE_KEYWORD_MARKET_ABI,
           functionName: 'paused',
+          blockNumber: block.number,
+        }),
+        this.publicClient.readContract({
+          address: contractAddress,
+          abi: PRE_KEYWORD_MARKET_ABI,
+          functionName: 'preUsdPriceE18',
+          blockNumber: block.number,
+        }),
+        this.publicClient.readContract({
+          address: contractAddress,
+          abi: PRE_KEYWORD_MARKET_ABI,
+          functionName: 'preUsdPriceQuotedAt',
+          blockNumber: block.number,
         }),
       ]);
       if (paused) throw new ServiceUnavailableException('Keyword Market staking is paused');
@@ -279,6 +472,28 @@ export class ContractAdsChainAdapter implements AdsChainAdapter {
       if (!current.active && BigInt(amountRaw!) < minimumStake) {
         throw new BadRequestException(
           `A new position requires at least ${minimumStake} raw PRE units`,
+        );
+      }
+      if (price <= 0n || quotedAt <= 0n || quotedAt > BigInt(Math.floor(Date.now() / 1000) + 60)) {
+        throw new ServiceUnavailableException('The contract has no valid PRE/USD price yet.');
+      }
+      const priceUsd = formatUnits(price, 18);
+      const required = BigInt(billPreRaw(bidUsdRaw!, priceUsd));
+      const available = amount + BigInt(amountRaw!);
+      const priceSnapshot = preUsdPriceSnapshot({
+        id: '',
+        source: 'COINGECKO',
+        assetId: 'presearch',
+        priceUsd,
+        quotedAt: new Date(Number(quotedAt) * 1000).toISOString(),
+        fetchedAt: new Date().toISOString(),
+      });
+      if (priceSnapshot.status === 'STALE') {
+        priceWarning = `The contract's PRE/USD price is older than 30 minutes (updated ${priceSnapshot.quote!.quotedAt}). This stake uses that price.`;
+      }
+      if (available < required) {
+        throw new BadRequestException(
+          `One click requires ${formatUnits(required, 18)} PRE; your resulting stake is ${formatUnits(available, 18)} PRE. Add ${formatUnits(required - available, 18)} PRE or lower your bid.${priceWarning ? ` ${priceWarning}` : ''}`,
         );
       }
     } else if (!current.active) {
@@ -301,9 +516,10 @@ export class ContractAdsChainAdapter implements AdsChainAdapter {
             abi: erc20Abi,
             functionName: 'allowance',
             args: [getAddress(input.stakerAddress), contractAddress],
+            blockNumber: block.number,
           })
         : 0n;
-    return buildAdsStakeTransactionPlan({
+    const plan = buildAdsStakeTransactionPlan({
       operation,
       chainId: snapshot.chainId,
       contractAddress,
@@ -313,5 +529,6 @@ export class ContractAdsChainAdapter implements AdsChainAdapter {
       bidUsdRaw,
       approvalRequired: operation === 'STAKE' && allowance < BigInt(amountRaw!),
     });
+    return priceWarning ? { ...plan, priceWarning } : plan;
   }
 }

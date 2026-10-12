@@ -1,0 +1,300 @@
+--- a/contracts/PREKeywordMarketV1.sol
++++ b/contracts/PREKeywordMarketV1.sol
+@@ -24,6 +24,7 @@
+         uint256 version;
+         uint256 withdrawAvailableAt;
+         uint256 requiredCoveragePre;
++        uint256 openingSequence;
+     }
+ 
+     struct StakingDetails {
+@@ -35,6 +36,7 @@
+     }
+ 
+     mapping(bytes32 keywordId => address[] stakers) private _stakers;
++    mapping(bytes32 keywordId => uint256 sequence) private _nextOpeningSequence;
+     mapping(bytes32 chargeId => bool processed) public chargeProcessed;
+     mapping(bytes32 keywordId => StakingDetails details) private _topStakes;
+     mapping(bytes32 keywordId => mapping(address staker => Position position)) private _positions;
+@@ -129,6 +131,7 @@
+             if (amountPre < minimumStake) revert StakeBelowMinimum(amountPre, minimumStake);
+             position.version += 1;
+             position.requiredCoveragePre = minimumStake;
++            position.openingSequence = ++_nextOpeningSequence[keywordId];
+         }
+         uint256 newAmount = previousStake + amountPre;
+         if (amountPre != 0) _receiveExact(amountPre);
+@@ -284,6 +287,7 @@
+         position.bidUsd = 0;
+         position.requiredCoveragePre = 0;
+         position.withdrawAvailableAt = 0;
++        position.openingSequence = 0;
+     }
+ 
+     function _emitPositionChanged(bytes32 keywordId, address staker, uint256 previousStake, Position storage position)
+@@ -375,7 +379,9 @@
+     function _higher(bytes32 keywordId, address first, address second) private view returns (bool) {
+         uint256 firstBid = _positions[keywordId][first].bidUsd;
+         uint256 secondBid = _positions[keywordId][second].bidUsd;
+-        return firstBid > secondBid || (firstBid == secondBid && uint160(first) < uint160(second));
++        return firstBid > secondBid
++            || (firstBid == secondBid
++                && _positions[keywordId][first].openingSequence < _positions[keywordId][second].openingSequence);
+     }
+ 
+     function _refreshTop(bytes32 keywordId) private {
+--- a/test/PREKeywordMarketV1.test.ts
++++ b/test/PREKeywordMarketV1.test.ts
+@@ -239,8 +239,10 @@
+         eligible: boolean;
+         withdrawal: bigint;
+         version: bigint;
++        openingSequence: bigint;
+       }
+     >();
++    const openingSequences = new Map<string, bigint>();
+     async function replay(transaction: ContractTransactionResponse) {
+       const changes = (await decodedEvents(market, transaction)).filter(
+         (event) => event.name === "PositionChanged",
+@@ -249,6 +251,12 @@
+       for (const { args } of changes) {
+         const key = `${args.keywordId}:${args.staker}`;
+         expect(args.previousStake).to.equal(projected.get(key)?.amount ?? 0n);
++        let openingSequence = projected.get(key)?.openingSequence ?? 0n;
++        if (args.newStake === 0n) openingSequence = 0n;
++        else if (args.previousStake === 0n) {
++          openingSequence = (openingSequences.get(args.keywordId) ?? 0n) + 1n;
++          openingSequences.set(args.keywordId, openingSequence);
++        }
+         projected.set(key, {
+           keywordId: args.keywordId,
+           staker: args.staker,
+@@ -258,6 +266,7 @@
+           eligible: args.eligible,
+           withdrawal: args.withdrawAvailableAt,
+           version: args.positionVersion,
++          openingSequence,
+         });
+       }
+       for (const position of projected.values()) {
+@@ -278,7 +287,7 @@
+         );
+         eligible.sort((left, right) =>
+           left.bidUsd === right.bidUsd
+-            ? BigInt(left.staker) < BigInt(right.staker)
++            ? left.openingSequence < right.openingSequence
+               ? -1
+               : 1
+             : left.bidUsd > right.bidUsd
+@@ -304,6 +313,7 @@
+     await replay(await stake(market, alice, otherKeyword, pre("4"), bid(1)));
+     await replay(await stake(market, alice, keywordId, 0n, bid(4)));
+     await replay(await stake(market, alice, keywordId, pre("2"), bid(4)));
++    await replay(await stake(market, bob, keywordId, 0n, bid(4)));
+     await replay(
+       await market
+         .connect(operator)
+@@ -346,7 +356,7 @@
+     expect(
+       duplicate.filter((event) => event.name === "PositionChanged"),
+     ).to.have.length(0);
+-    await replay(await stake(market, alice, keywordId, pre("2"), bid(6)));
++    await replay(await stake(market, alice, keywordId, pre("2"), bid(5)));
+   });
+ 
+   it("matches an independent position model through seeded heap mutations and complete exits", async function () {
+@@ -378,7 +388,9 @@
+           coverage: 0n,
+           withdrawal: 0n,
+           version: 0n,
++          openingSequence: 0n,
+         }));
++        let openingSequence = 0n;
+         let fees = 0n;
+         for (const participant of participants) {
+           await payment!.mint(participant.address, 1_000n);
+@@ -398,7 +410,7 @@
+             })
+             .sort((left, right) =>
+               left.bidUsd === right.bidUsd
+-                ? BigInt(left.address) < BigInt(right.address)
++                ? left.openingSequence < right.openingSequence
+                   ? -1
+                   : 1
+                 : left.bidUsd > right.bidUsd
+@@ -444,6 +456,7 @@
+             if (position.amount === 0n) {
+               position.version += 1n;
+               position.coverage = 1n;
++              position.openingSequence = ++openingSequence;
+             }
+             position.amount += deposit;
+             position.bidUsd = bid(command.value);
+@@ -473,6 +486,7 @@
+                 bidUsd: 0n,
+                 coverage: 0n,
+                 withdrawal: 0n,
++                openingSequence: 0n,
+               });
+           } else if (command.operation === "REQUEST") {
+             if (position.amount === 0n || position.withdrawal !== 0n) continue;
+@@ -491,6 +505,7 @@
+               bidUsd: 0n,
+               coverage: 0n,
+               withdrawal: 0n,
++              openingSequence: 0n,
+             });
+           }
+           const change = (await decodedEvents(market, transaction)).find(
+@@ -702,18 +717,105 @@
+     expect((await market.topStakeOf(keywordId)).staker).to.equal(bob.address);
+   });
+ 
+-  it("breaks equal bids by lower staker address and keeps keywords independent", async () => {
++  it("breaks equal bids by earlier opening regardless of address or deposit and keeps keywords independent", async () => {
++    const { alice, bob, market, keywordId } = await deploy();
++    const earlier = BigInt(alice.address) > BigInt(bob.address) ? alice : bob;
++    const later = earlier === alice ? bob : alice;
++    const otherKeyword = ethers.id("other keyword");
++    await stake(market, earlier, keywordId, pre("5"), bid(3));
++    await stake(market, later, keywordId, pre("8"), bid(3));
++    expect((await market.topStakeOf(keywordId)).staker).to.equal(earlier.address);
++    await stake(market, later, keywordId, 0n, bid(4));
++    expect((await market.topStakeOf(keywordId)).staker).to.equal(later.address);
++    await stake(market, later, otherKeyword, pre("3"), bid(1));
++    await stake(market, earlier, otherKeyword, pre("5"), bid(1));
++    expect((await market.topStakeOf(otherKeyword)).staker).to.equal(
++      later.address,
++    );
++  });
++
++  it("orders equal bids by execution order when both positions open in the same block", async () => {
++    const { alice, bob, market, keywordId } = await deploy();
++    const earlier = BigInt(alice.address) > BigInt(bob.address) ? alice : bob;
++    const later = earlier === alice ? bob : alice;
++    const gasPrice = (await ethers.provider.getFeeData()).gasPrice!;
++    await ethers.provider.send("evm_setAutomine", [false]);
++    try {
++      const first = await market.connect(earlier).stake(
++        keywordId, pre("5"), bid(3), { gasLimit: 1_000_000n, gasPrice },
++      );
++      const second = await market.connect(later).stake(
++        keywordId, pre("8"), bid(3), { gasLimit: 1_000_000n, gasPrice },
++      );
++      await ethers.provider.send("evm_mine", []);
++      const firstReceipt = await first.wait();
++      const secondReceipt = await second.wait();
++      expect(firstReceipt!.status).to.equal(1);
++      expect(secondReceipt!.status).to.equal(1);
++      expect(firstReceipt!.blockNumber).to.equal(secondReceipt!.blockNumber);
++      expect(firstReceipt!.index).to.be.lessThan(secondReceipt!.index);
++      expect((await market.topStakeOf(keywordId)).staker).to.equal(earlier.address);
++    } finally {
++      await ethers.provider.send("evm_setAutomine", [true]);
++    }
++  });
++
++  it("preserves opening priority through top-ups, repricing, partial charges and requalification", async () => {
+     const { operator, alice, bob, market, keywordId } = await deploy();
+-    const otherKeyword = ethers.id("other keyword");
+     await stake(market, alice, keywordId, pre("5"), bid(3));
+     await stake(market, bob, keywordId, pre("8"), bid(3));
+-    const lowerAddress =
+-      BigInt(alice.address) < BigInt(bob.address) ? alice.address : bob.address;
+-    expect((await market.topStakeOf(keywordId)).staker).to.equal(lowerAddress);
+-    await stake(market, bob, otherKeyword, pre("3"), bid(1));
+-    expect((await market.topStakeOf(otherKeyword)).staker).to.equal(
+-      bob.address,
+-    );
++    await stake(market, alice, keywordId, pre("1"), bid(3));
++    expect((await market.topStakeOf(keywordId)).staker).to.equal(alice.address);
++    await stake(market, alice, keywordId, 0n, bid(1));
++    expect((await market.topStakeOf(keywordId)).staker).to.equal(bob.address);
++    await stake(market, alice, keywordId, 0n, bid(3));
++    expect((await market.topStakeOf(keywordId)).staker).to.equal(alice.address);
++    await market.connect(operator).chargeStake(
++      keywordId, alice.address, 1n, pre("2"), ethers.id("priority-partial"),
++    );
++    expect((await market.topStakeOf(keywordId)).staker).to.equal(alice.address);
++    await market.connect(operator).chargeStake(
++      keywordId, alice.address, 1n, pre("3.5"), ethers.id("priority-ineligible"),
++    );
++    expect((await market.topStakeOf(keywordId)).staker).to.equal(bob.address);
++    await stake(market, alice, keywordId, pre("1"), bid(3));
++    expect((await market.topStakeOf(keywordId)).staker).to.equal(alice.address);
++  });
++
++  it("caps an oversized charge, promotes a lower bid and resets priority on reopening", async () => {
++    const { operator, alice, bob, market, keywordId } = await deploy();
++    await stake(market, alice, keywordId, pre("5"), bid(4));
++    await stake(market, bob, keywordId, pre("8"), bid(3));
++    expect((await market.topStakeOf(keywordId)).staker).to.equal(alice.address);
++    const chargeId = ethers.id("priority-drained");
++    await expect(market.connect(operator).chargeStake(
++      keywordId, alice.address, 1n, pre("7"), chargeId,
++    )).to.emit(market, "StakeCharged").withArgs(
++      keywordId, alice.address, chargeId, pre("7"), pre("5"), 0n,
++    );
++    const empty = await market.stakeDetailsOf(keywordId, alice.address);
++    expect(empty.amount).to.equal(0n);
++    expect(empty.bidUsd).to.equal(0n);
++    expect(empty.eligible).to.equal(false);
++    expect((await market.topStakeOf(keywordId)).staker).to.equal(bob.address);
++    await stake(market, alice, keywordId, pre("5"), bid(3));
++    expect((await market.topStakeOf(keywordId)).staker).to.equal(bob.address);
++    expect((await market.stakeDetailsOf(keywordId, alice.address)).positionVersion).to.equal(2n);
++    await stake(market, alice, keywordId, 0n, bid(4));
++    expect((await market.topStakeOf(keywordId)).staker).to.equal(alice.address);
++  });
++
++  it("gives a withdrawn position new priority when it reopens", async () => {
++    const { alice, bob, market, keywordId } = await deploy();
++    await stake(market, alice, keywordId, pre("5"), bid(3));
++    await stake(market, bob, keywordId, pre("8"), bid(3));
++    await market.connect(alice).requestUnstake(keywordId);
++    const details = await market.stakeDetailsOf(keywordId, alice.address);
++    await advanceTo(details.withdrawAvailableAt);
++    await market.connect(alice).unstake(keywordId);
++    await stake(market, alice, keywordId, pre("5"), bid(3));
++    expect((await market.topStakeOf(keywordId)).staker).to.equal(bob.address);
++    expect((await market.stakeDetailsOf(keywordId, alice.address)).positionVersion).to.equal(2n);
+   });
+ 
+   it("keeps the heap leader correct through multi-level bid changes, exits and charges", async () => {
+@@ -722,7 +824,7 @@
+     const bids = [4, 7, 2, 8, 1, 6, 3, 5];
+     async function assertTop() {
+       const active = await Promise.all(
+-        participants.map(async (staker) => {
++        participants.map(async (staker, index) => {
+           const details = await market.stakeDetailsOf(
+             keywordId,
+             staker.address,
+@@ -731,6 +833,7 @@
+             address: staker.address,
+             bidUsd: details.bidUsd,
+             eligible: details.eligible,
++            openingSequence: index,
+           };
+         }),
+       );
+@@ -738,7 +841,7 @@
+         if (left.eligible !== right.eligible) return left.eligible ? -1 : 1;
+         if (left.bidUsd !== right.bidUsd)
+           return left.bidUsd > right.bidUsd ? -1 : 1;
+-        return BigInt(left.address) < BigInt(right.address) ? -1 : 1;
++        return left.openingSequence - right.openingSequence;
+       });
+       const expected =
+         active.find((position) => position.eligible)?.address ??
+--- a/README.md
++++ b/README.md
+@@ -26,7 +26,7 @@
+ 
+ Deployment manifests for this release use the `escrow` suffix: `.deployments/base-sepolia.escrow.json` and `.deployments/base.escrow.json`. Older deployment addresses and manifests are not used by this release.
+ 
+-`PREKeywordMarketV1` is a separate deployment on Base Sepolia (84532) or Base (8453). The constructor gives ownership directly to the configured Safe. Its fourth argument chooses the initial pause state; deployment defaults to active on both networks, and staking does not require a billing operator. The default operator is zero. PRE funds an offer's deposit and the USD bid determines rank. Withdrawal requests leave the ranking immediately and the remaining PRE is withdrawable after 24 hours.
++`PREKeywordMarketV1` is a separate deployment on Base Sepolia (84532) or Base (8453). The constructor gives ownership directly to the configured Safe. Its fourth argument chooses the initial pause state; deployment defaults to active on both networks, and staking does not require a billing operator. The default operator is zero. PRE funds an offer's deposit and the USD bid determines rank. Equal bids favor the earlier position opening, tracked by a per-keyword sequence that also orders stakes executed in the same block. Top-ups, bid updates and partial charges preserve that sequence; reopening a zero-balance position assigns a new one. The external ABI and events are unchanged. Existing non-upgradeable deployments retain their original tie policy; this rule requires a new deployment that preserves access to withdrawals from the old contract. Withdrawal requests leave the ranking immediately and the remaining PRE is withdrawable after 24 hours.
+ 
+ For Base Sepolia configure `PRE_ADDRESS_TESTNET`, `SAFE_ADDRESS_TESTNET`, `KEYWORD_MARKET_MINIMUM_PRE_TESTNET`, the testnet RPC and deployer keystore. `KEYWORD_MARKET_START_PAUSED[_TESTNET]` accepts only `0` (default, active) or `1` (paused until the Safe calls `unpause`). For Base configure the same keys without `_TESTNET`, the mainnet RPC and keystore, and explicitly set `KEYWORD_MARKET_ALLOW_MAINNET=1` in the repository `.env`. Base deployment accepts only the canonical PRE token; both networks require PRE with 18 decimals and a deployed Safe with a valid owner list and threshold. The opt-in gate applies to deployment; checks and source verification remain read-only.
+ 

@@ -4,7 +4,10 @@ import { SessionGuard } from '../auth/session.guard';
 import type { AuthenticatedRequest } from '../common/request-context';
 import { Roles } from '../common/roles';
 import { RolesGuard } from '../common/roles.guard';
-import { UpdateKeywordMarketFeatureDto } from './application-features.dto';
+import {
+  UpdateKeywordMarketFeatureDto,
+  UpdateKeywordMarketReviewDto,
+} from './application-features.dto';
 import { ApplicationFeaturesService } from './application-features.service';
 
 @Controller('public/features')
@@ -34,5 +37,14 @@ export class AdminApplicationFeaturesController {
     @Req() request: AuthenticatedRequest,
   ) {
     return this.features.updateKeywordMarket(body.enabled, request.principal!);
+  }
+
+  @Put('keyword-market/review')
+  @Roles(Role.SUPER_ADMIN)
+  updateKeywordMarketReview(
+    @Body() body: UpdateKeywordMarketReviewDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.features.updateKeywordMarketReview(body.requireReview, request.principal!);
   }
 }

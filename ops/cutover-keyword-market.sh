@@ -14,11 +14,17 @@ readonly BACKUP_ROOT=/var/backups/precommunity/postgresql
 readonly UNITS=(precommunity-web.service precommunity-api.service precommunity-worker.service)
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly MARKET_PHASE="${KEYWORD_MARKET_RELEASE_PHASE-active}"
+readonly REPLACE_ADDRESS="${KEYWORD_MARKET_REPLACE_ADDRESS:-}"
+readonly FRESH_START="${KEYWORD_MARKET_FRESH_START-0}"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/runtime-deployment-env.sh"
 
 case "$RELEASE_DIR" in "$APP_ROOT"/releases/*) ;; *) echo 'Expected an existing production release directory.' >&2; exit 2 ;; esac
-case "$MARKET_PHASE" in active|preopen) ;; *) echo 'KEYWORD_MARKET_RELEASE_PHASE must be active or preopen.' >&2; exit 2 ;; esac
+case "$MARKET_PHASE" in active|preopen|bootstrap) ;; *) echo 'KEYWORD_MARKET_RELEASE_PHASE must be active, preopen or bootstrap.' >&2; exit 2 ;; esac
+case "$FRESH_START" in 0|1) ;; *) echo 'KEYWORD_MARKET_FRESH_START must be 0 or 1.' >&2; exit 2 ;; esac
+if [[ -n "$REPLACE_ADDRESS" && ! "$REPLACE_ADDRESS" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
+  echo 'KEYWORD_MARKET_REPLACE_ADDRESS must identify the previous active market.' >&2; exit 2
+fi
 if [[ "${PRECOMMUNITY_MAINTENANCE_CONFIRMED:-0}" != 1 ]]; then
   echo 'Operator must enable maintenance and set PRECOMMUNITY_MAINTENANCE_CONFIRMED=1.' >&2
   exit 2
@@ -33,6 +39,10 @@ done
 for file in "$ACTIVE_ENV" "$STAGED_ENV" "$DATA_ENV" "$RELEASE_DIR/release-manifest.json" "$RELEASE_DIR/apps/worker/dist/check-keyword-market.js"; do
   [[ -r "$file" ]] || { echo "Missing required file: $file" >&2; exit 1; }
 done
+if [[ "$FRESH_START" == 1 && ! -r "$RELEASE_DIR/ops/reset-keyword-market.mjs" ]]; then
+  echo 'Fresh Keyword Market release requires its reset helper.' >&2
+  exit 1
+fi
 [[ -x "$NODE_RUNTIME" ]] || { echo 'Production Node runtime is missing.' >&2; exit 1; }
 [[ -s "$NVM_DIR/nvm.sh" ]] || { echo 'Production Node environment is missing.' >&2; exit 1; }
 # shellcheck disable=SC1091
@@ -79,8 +89,17 @@ if [[ ! "$market" =~ ^0x[a-fA-F0-9]{40}$ || "$market" =~ ^0x0{40}$ || ! "$market
   exit 1
 fi
 if [[ -n "$PREVIOUS_MARKET" && ! "$PREVIOUS_MARKET" =~ ^0x0{40}$ && "${PREVIOUS_MARKET,,}" != "${market,,}" ]]; then
-  echo 'Replacing a live market contract requires a separate withdrawal-preserving release.' >&2
-  exit 1
+  if [[ "${REPLACE_ADDRESS,,}" != "${PREVIOUS_MARKET,,}" ]]; then
+    echo 'Replacing a live market requires KEYWORD_MARKET_REPLACE_ADDRESS matching the previous active address.' >&2
+    exit 1
+  fi
+fi
+if [[ "$FRESH_START" == 1 ]]; then
+  if [[ ! "$PREVIOUS_MARKET" =~ ^0x[a-fA-F0-9]{40}$ || "$PREVIOUS_MARKET" =~ ^0x0{40}$ ||
+        "${PREVIOUS_MARKET,,}" == "${market,,}" || "${REPLACE_ADDRESS,,}" != "${PREVIOUS_MARKET,,}" ]]; then
+    echo 'Fresh start requires replacing a nonzero market with its exact previous address.' >&2
+    exit 1
+  fi
 fi
 
 if [[ "$PRECOMMUNITY_NETWORK" != base ]]; then
@@ -103,13 +122,19 @@ readonly BACKUP_DIR="$BACKUP_ROOT/keyword-market-$(date -u +%Y%m%dT%H%M%SZ)"
 sudo install -d -o root -g postgres -m 0750 "$BACKUP_DIR"
 sudo cp -p "$ACTIVE_ENV" "$BACKUP_DIR/app.env"
 printf '%s\n' "$PREVIOUS_RELEASE" | sudo tee "$BACKUP_DIR/previous-release" >/dev/null
+printf '%s\n' "$PREVIOUS_MARKET" | sudo tee "$BACKUP_DIR/previous-market-address" >/dev/null
 sudo install -d -o postgres -g postgres -m 0700 "$BACKUP_DIR/database"
 sudo -u postgres pg_dump --dbname=precommunity --format=custom --file="$BACKUP_DIR/database/precommunity.dump"
 sudo -u postgres pg_restore --list "$BACKUP_DIR/database/precommunity.dump" >/dev/null
 sudo sha256sum "$BACKUP_DIR/database/precommunity.dump" | sudo tee "$BACKUP_DIR/checksums.sha256" >/dev/null
-readonly COUNTS_SQL='SELECT json_build_array((SELECT count(*) FROM "User"),(SELECT count(*) FROM "AdCampaign"),(SELECT count(*) FROM "AdCreativeRevision"),(SELECT count(*) FROM "AdReport"),(SELECT count(*) FROM "FundingGoal"),(SELECT count(*) FROM "CryptoContribution"))::text;'
+readonly COUNTS_SQL='SELECT json_build_array((SELECT count(*) FROM "User"),(SELECT count(*) FROM "AdCampaign"),(SELECT count(*) FROM "AdCreativeRevision"),(SELECT count(*) FROM "AdReport"),(SELECT count(*) FROM "FundingGoal"),(SELECT count(*) FROM "CryptoContribution"),(SELECT count(*) FROM "AdApiKey"))::text;'
+readonly SHARED_COUNTS_SQL='SELECT json_build_array((SELECT count(*) FROM "User"),(SELECT count(*) FROM "FundingGoal"),(SELECT count(*) FROM "CryptoContribution"),(SELECT count(*) FROM "AdApiKey"))::text;'
 before_counts="$(sudo -u postgres psql --dbname=precommunity -XAtc "$COUNTS_SQL")"
 printf '%s\n' "$before_counts" | sudo tee "$BACKUP_DIR/content-counts.json" >/dev/null
+if [[ "$FRESH_START" == 1 ]]; then
+  before_shared_counts="$(sudo -u postgres psql --dbname=precommunity -XAtc "$SHARED_COUNTS_SQL")"
+  printf '%s\n' "$before_shared_counts" | sudo tee "$BACKUP_DIR/shared-counts.json" >/dev/null
+fi
 
 database_changed=0
 release_promoted=0
@@ -148,28 +173,46 @@ restore_created=0
 
 # Mark before attempting migration: even a failed deploy may have committed earlier migrations.
 database_changed=1
+if [[ "$FRESH_START" == 1 ]]; then
+  sudo -u postgres psql --dbname=precommunity -X --set=ON_ERROR_STOP=1 \
+    --command='TRUNCATE TABLE "AdStakePosition", "AdChainEvent", "AdIndexerState";'
+fi
 pnpm db:deploy
 pnpm db:seed
 sudo -u postgres psql --dbname=precommunity -X --set=ON_ERROR_STOP=1 --command='UPDATE "CommunitySettings" SET "keywordMarketEnabled" = false;'
-after_counts="$(sudo -u postgres psql --dbname=precommunity -XAtc "$COUNTS_SQL")"
-if [[ "$before_counts" != "$after_counts" ]]; then
-  echo 'Preserved user/campaign/creative/report/ledger counts changed; release remains stopped.' >&2
-  exit 1
+if [[ "$FRESH_START" == 1 ]]; then
+  KEYWORD_MARKET_FRESH_START=1 KEYWORD_MARKET_RESET_BACKUP_DIR="$BACKUP_DIR" \
+    "$NODE_RUNTIME" ops/reset-keyword-market.mjs
+  after_shared_counts="$(sudo -u postgres psql --dbname=precommunity -XAtc "$SHARED_COUNTS_SQL")"
+  if [[ "$before_shared_counts" != "$after_shared_counts" ]]; then
+    echo 'Preserved user/ledger/API-key counts changed; release remains stopped.' >&2
+    exit 1
+  fi
+else
+  after_counts="$(sudo -u postgres psql --dbname=precommunity -XAtc "$COUNTS_SQL")"
+  if [[ "$before_counts" != "$after_counts" ]]; then
+    echo 'Preserved user/campaign/creative/report/ledger/API-key counts changed; release remains stopped.' >&2
+    exit 1
+  fi
 fi
 "$NODE_RUNTIME" apps/worker/dist/backfill.js --phase "$MARKET_PHASE"
 "$NODE_RUNTIME" apps/worker/dist/check-keyword-market.js --phase "$MARKET_PHASE" >"$RELEASE_DIR/keyword-market-readiness.json"
-"$NODE_RUNTIME" --input-type=module - "$MARKET_PHASE" <<'NODE'
+market_paused="$("$NODE_RUNTIME" --input-type=module - "$MARKET_PHASE" <<'NODE'
 import { readFileSync } from 'node:fs';
 const manifest = JSON.parse(readFileSync('release-manifest.json', 'utf8'));
 const ready = JSON.parse(readFileSync('keyword-market-readiness.json', 'utf8'));
 const phase = process.argv[2];
-if (ready.status !== 'READY' || ready.phase !== phase || ready.paused !== (phase === 'preopen')) {
+const expectedPaused = phase === 'preopen' ? true : phase === 'active' ? false : undefined;
+if (ready.status !== 'READY' || ready.phase !== phase || typeof ready.paused !== 'boolean' ||
+    (expectedPaused !== undefined && ready.paused !== expectedPaused)) {
   throw new Error(`Keyword Market ${phase} readiness was not confirmed`);
 }
 for (const key of ['abiSha256', 'artifactSha256', 'buildInfoId']) {
   if (ready[key] !== manifest.keywordMarket[key]) throw new Error(`Release artifact identity mismatch: ${key}`);
 }
+process.stdout.write(String(ready.paused));
 NODE
+)"
 sudo install -o root -g "$(id -gn)" -m 0640 "$STAGED_ENV" "$ACTIVE_ENV"
 release_promoted=1
 bash "$RELEASE_DIR/ops/activate-release.sh" "$RELEASE_DIR"
@@ -183,7 +226,15 @@ for ((attempt=0; attempt<30; attempt++)); do
 done
 trap - EXIT
 printf 'Prepared release activated; market phase %s, application feature remains disabled. Backup: %s\n' "$MARKET_PHASE" "$BACKUP_DIR"
-if [[ "$MARKET_PHASE" == preopen ]]; then
+if [[ "$MARKET_PHASE" == bootstrap ]]; then
+  printf 'Operator: authorize the price updater and store the first quote, then confirm SYNCED. '
+  if [[ "$market_paused" == true ]]; then
+    printf 'Safe unpause is required because this deployment is paused. '
+  else
+    printf 'The contract is already unpaused. '
+  fi
+  printf 'Verify active readiness and the two-wallet flow before ending maintenance.\n'
+elif [[ "$MARKET_PHASE" == preopen ]]; then
   printf 'Operator: enable Keyword Market in admin, confirm SYNCED, then Safe unpause. Verify active readiness and the two-wallet flow before ending maintenance.\n'
 else
   printf 'Operator: enable Keyword Market in admin, confirm SYNCED and active readiness, then verify the two-wallet flow before ending maintenance. The contract is already active on-chain.\n'

@@ -18,6 +18,7 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$TEST_ROOT/ops" "$TEST_ROOT/bin" "$TEST_ROOT/tmp" "$CONFIG_DIR"
 cp "$SCRIPT_DIR/runtime-deployment-env.sh" "$TEST_ROOT/ops/"
+cp "$SCRIPT_DIR/operator-keystore-env.mjs" "$TEST_ROOT/ops/"
 "$NODE_BINARY" - "$SCRIPT_DIR/configure-app-runtime.sh" "$TEST_ROOT/ops/configure-app-runtime.sh" "$CONFIG_DIR" <<'NODE'
 const fs = require('node:fs');
 fs.writeFileSync(process.argv[3], fs.readFileSync(process.argv[2], 'utf8').replaceAll('/etc/precommunity', process.argv[4]));
@@ -48,6 +49,7 @@ exec /usr/bin/install "${args[@]}"
 MOCK
 chmod +x "$TEST_ROOT/bin/"*
 ln -s "$BASH_BINARY" "$TEST_ROOT/bin/bash"
+ln -s "$NODE_BINARY" "$TEST_ROOT/bin/node"
 printf "SESSION_SECRET='%s'\nADS_REPORT_FINGERPRINT_SECRET='%s'\n" \
   '1111111111111111111111111111111111111111111111111111111111111111' \
   '2222222222222222222222222222222222222222222222222222222222222222' >"$CONFIG_DIR/app.secrets"
@@ -60,7 +62,9 @@ write_active() {
     "NEXT_PUBLIC_BASE_RPC_URL${suffix}=\"${browser}\"" \
     "ADS_CONTRACT_ADDRESS${suffix}=$MARKET" \
     "ADS_CONTRACT_DEPLOYMENT_BLOCK${suffix}=12345" \
-    'NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=11111111111111111111111111111111' >"$CONFIG_DIR/app.env"
+    'NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=11111111111111111111111111111111' \
+    "COINGECKO_API_KEY=\"${4:-}\"" \
+    "SAFE_TRANSACTION_SERVICE_API_KEY=${5:-}" >"$CONFIG_DIR/app.env"
 }
 
 run_configuration() {
@@ -72,6 +76,10 @@ run_configuration() {
     PRECOMMUNITY_BROWSER_RPC_URL="${3:-}" \
     ADS_CONTRACT_ADDRESS="${4:-}" \
     ADS_CONTRACT_DEPLOYMENT_BLOCK="${5:-}" \
+    PRECOMMUNITY_SAFE_TRANSACTION_SERVICE_API_KEY_STDIN="${6:-0}" \
+    PRECOMMUNITY_COINGECKO_API_KEY_STDIN="${7:-0}" \
+    PRECOMMUNITY_ADS_OPERATOR_KEYSTORE_STDIN="${8:-0}" \
+    PRECOMMUNITY_ADS_PRICE_UPDATER_KEYSTORE_STDIN="${9:-0}" \
     PRECOMMUNITY_SAFE_ADDRESS=0x3333333333333333333333333333333333333333 \
     PUBLIC_ESCROW_ADDRESS=0x1111111111111111111111111111111111111111 \
     PUBLIC_ESCROW_DEPLOYMENT_BLOCK=100 \
@@ -128,4 +136,138 @@ if run_configuration base '' '' '' 12345; then
   echo 'A block-only market deployment pair was accepted.' >&2; exit 1
 fi
 
+write_active base "$PRIVATE_RPC" "$PUBLIC_RPC" ' existing-price-fixture '
+run_configuration base-sepolia
+assert_value COINGECKO_API_KEY existing-price-fixture
+if grep -Eq '^NEXT_PUBLIC_COINGECKO' "$STAGED_ENV"; then
+  echo 'CoinGecko key was exposed to the browser.' >&2; exit 1
+fi
+if grep -Fq 'existing-price-fixture' "$TEST_ROOT/output.log"; then
+  echo 'Runtime configuration printed the CoinGecko key.' >&2; exit 1
+fi
+
+write_active base "$PRIVATE_RPC" "$PUBLIC_RPC" existing-price-fixture existing-safe-fixture
+printf 'safe-input-fixture\n price-input-fixture \n' | run_configuration base '' '' '' '' 1 1
+assert_value SAFE_TRANSACTION_SERVICE_API_KEY safe-input-fixture
+assert_value COINGECKO_API_KEY price-input-fixture
+if grep -Eq 'safe-input-fixture|price-input-fixture' "$TEST_ROOT/output.log"; then
+  echo 'Runtime configuration printed a provisioned API key.' >&2; exit 1
+fi
+
+printf ' \t \n' | run_configuration base '' '' '' '' 0 1
+assert_value COINGECKO_API_KEY existing-price-fixture
+assert_value SAFE_TRANSACTION_SERVICE_API_KEY existing-safe-fixture
+write_active base "$PRIVATE_RPC" "$PUBLIC_RPC" '   '
+run_configuration base
+assert_value COINGECKO_API_KEY ''
+
+cp "$STAGED_ENV" "$TEST_ROOT/staged-before"
+if printf 'unsafe"fixture\n' | run_configuration base '' '' '' '' 0 1; then
+  echo 'An unsafe CoinGecko key was accepted.' >&2; exit 1
+fi
+cmp -s "$STAGED_ENV" "$TEST_ROOT/staged-before" || { echo 'An unsafe key modified staged output.' >&2; exit 1; }
+if grep -Fq 'unsafe"fixture' "$TEST_ROOT/output.log"; then
+  echo 'Runtime configuration printed a rejected API key.' >&2; exit 1
+fi
+if run_configuration base '' '' '' '' 0 1 </dev/null; then
+  echo 'CoinGecko key provisioning accepted missing input.' >&2; exit 1
+fi
+if printf 'safe-only-fixture\n' | run_configuration base '' '' '' '' 1 1; then
+  echo 'Combined API key provisioning accepted a missing second line.' >&2; exit 1
+fi
+if run_configuration base '' '' '' '' 0 2; then
+  echo 'An invalid CoinGecko stdin flag was accepted.' >&2; exit 1
+fi
+write_active base "$PRIVATE_RPC" "$PUBLIC_RPC" 'unsafe fixture'
+if run_configuration base; then
+  echo 'An unsafe existing CoinGecko key was accepted.' >&2; exit 1
+fi
+cmp -s "$STAGED_ENV" "$TEST_ROOT/staged-before" || { echo 'Invalid key configuration modified staged output.' >&2; exit 1; }
+
+readonly OPERATOR_PASSWORD=$' leading $ ` " \' \\ / # żółć trailing '
+readonly OPERATOR_PASSWORD_BASE64="$(printf '%s' "$OPERATOR_PASSWORD" | base64 | tr -d '\n')"
+write_active base "$PRIVATE_RPC" "$PUBLIC_RPC"
+printf '%s\n' \
+  "ADS_OPERATOR_KEYSTORE_PATH='/srv/mainnet/operator fixture.json'" \
+  "ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64='$OPERATOR_PASSWORD_BASE64'" \
+  "ADS_OPERATOR_KEYSTORE_PATH_TESTNET='/srv/testnet/operator.json'" \
+  "ADS_OPERATOR_KEYSTORE_PASSWORD_TESTNET=' old testnet password '" >>"$CONFIG_DIR/app.env"
+run_configuration base-sepolia
+assert_value ADS_OPERATOR_KEYSTORE_PATH '/srv/mainnet/operator fixture.json'
+assert_value ADS_OPERATOR_KEYSTORE_PASSWORD ''
+assert_value ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64 "$OPERATOR_PASSWORD_BASE64"
+assert_value ADS_OPERATOR_KEYSTORE_PATH_TESTNET '/srv/testnet/operator.json'
+assert_value ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64_TESTNET "$(printf '%s' ' old testnet password ' | base64 | tr -d '\n')"
+"$NODE_BINARY" - "$STAGED_ENV" <<'NODE'
+const {parseEnv}=require('node:util');
+const fs=require('node:fs');
+const values=parseEnv(fs.readFileSync(process.argv[2], 'utf8'));
+if (Buffer.from(values.ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64,'base64').toString() !== ' leading $ ` " \' \\ / # żółć trailing ') {
+  throw new Error('The generated operator password changed.');
+}
+NODE
+printf '{"network":"base-sepolia","path":"/srv/testnet/operator next.json","passwordBase64":"%s"}\n' \
+  "$OPERATOR_PASSWORD_BASE64" | run_configuration base-sepolia '' '' '' '' 0 0 1
+assert_value ADS_OPERATOR_KEYSTORE_PATH '/srv/mainnet/operator fixture.json'
+assert_value ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64 "$OPERATOR_PASSWORD_BASE64"
+assert_value ADS_OPERATOR_KEYSTORE_PATH_TESTNET '/srv/testnet/operator next.json'
+assert_value ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64_TESTNET "$OPERATOR_PASSWORD_BASE64"
+if grep -Fq "$OPERATOR_PASSWORD_BASE64" "$TEST_ROOT/output.log"; then
+  echo 'Runtime configuration printed the operator password.' >&2; exit 1
+fi
+cp "$STAGED_ENV" "$TEST_ROOT/staged-before"
+if run_configuration base '' '' '' '' 0 0 1 </dev/null; then
+  echo 'Operator provisioning accepted missing input.' >&2; exit 1
+fi
+cmp -s "$STAGED_ENV" "$TEST_ROOT/staged-before" || { echo 'Invalid operator input modified staged output.' >&2; exit 1; }
+
+readonly UPDATER_PASSWORD=$' leading price $ ` " \' \\ / # żółć\ntrailing '
+readonly UPDATER_PASSWORD_BASE64="$(printf '%s' "$UPDATER_PASSWORD" | base64 | tr -d '\n')"
+write_active base "$PRIVATE_RPC" "$PUBLIC_RPC"
+printf '%s\n' \
+  "ADS_PRICE_UPDATER_KEYSTORE_PATH='/srv/mainnet/price fixture.json'" \
+  "ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_BASE64='$UPDATER_PASSWORD_BASE64'" \
+  "ADS_PRICE_UPDATER_KEYSTORE_PATH_TESTNET='/srv/testnet/price.json'" \
+  "ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_TESTNET=' previous testnet price fixture '" \
+  "ADS_OPERATOR_KEYSTORE_PATH='/srv/mainnet/operator fixture.json'" \
+  "ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64='$OPERATOR_PASSWORD_BASE64'" >>"$CONFIG_DIR/app.env"
+run_configuration base-sepolia
+assert_value ADS_PRICE_UPDATER_KEYSTORE_PATH '/srv/mainnet/price fixture.json'
+assert_value ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_BASE64 "$UPDATER_PASSWORD_BASE64"
+assert_value ADS_PRICE_UPDATER_KEYSTORE_PATH_TESTNET '/srv/testnet/price.json'
+assert_value ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_BASE64_TESTNET "$(printf '%s' ' previous testnet price fixture ' | base64 | tr -d '\n')"
+assert_value ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64 "$OPERATOR_PASSWORD_BASE64"
+printf '{"network":"base-sepolia","path":"/srv/testnet/price next.json","passwordBase64":"%s"}\n' \
+  "$UPDATER_PASSWORD_BASE64" | run_configuration base-sepolia '' '' '' '' 0 0 0 1
+assert_value ADS_PRICE_UPDATER_KEYSTORE_PATH_TESTNET '/srv/testnet/price next.json'
+assert_value ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_BASE64_TESTNET "$UPDATER_PASSWORD_BASE64"
+assert_value ADS_PRICE_UPDATER_KEYSTORE_PATH '/srv/mainnet/price fixture.json'
+assert_value ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64 "$OPERATOR_PASSWORD_BASE64"
+if grep -Fq "$UPDATER_PASSWORD_BASE64" "$TEST_ROOT/output.log"; then
+  echo 'Runtime configuration printed the price updater password.' >&2; exit 1
+fi
+printf '{"network":"base-sepolia","path":"/srv/testnet/operator together.json","passwordBase64":"%s"}\n{"network":"base-sepolia","path":"/srv/testnet/price together.json","passwordBase64":"%s"}\n' \
+  "$OPERATOR_PASSWORD_BASE64" "$UPDATER_PASSWORD_BASE64" | run_configuration base-sepolia '' '' '' '' 0 0 1 1
+assert_value ADS_OPERATOR_KEYSTORE_PATH_TESTNET '/srv/testnet/operator together.json'
+assert_value ADS_OPERATOR_KEYSTORE_PASSWORD_BASE64_TESTNET "$OPERATOR_PASSWORD_BASE64"
+assert_value ADS_PRICE_UPDATER_KEYSTORE_PATH_TESTNET '/srv/testnet/price together.json'
+assert_value ADS_PRICE_UPDATER_KEYSTORE_PASSWORD_BASE64_TESTNET "$UPDATER_PASSWORD_BASE64"
+cp "$STAGED_ENV" "$TEST_ROOT/staged-before"
+if run_configuration base-sepolia '' '' '' '' 0 0 0 1 </dev/null; then
+  echo 'Updater provisioning accepted missing input.' >&2; exit 1
+fi
+if run_configuration base-sepolia '' '' '' '' 0 0 0 2; then
+  echo 'An invalid updater stdin flag was accepted.' >&2; exit 1
+fi
+if printf '{"network":"base","path":"/private price fixture.json","passwordBase64":"%s"}\n' \
+  "$UPDATER_PASSWORD_BASE64" | run_configuration base-sepolia '' '' '' '' 0 0 0 1; then
+  echo 'Updater provisioning accepted a different network.' >&2; exit 1
+fi
+if grep -Eq 'private price fixture|price next.json' "$TEST_ROOT/output.log" || grep -Fq "$UPDATER_PASSWORD_BASE64" "$TEST_ROOT/output.log"; then
+  echo 'Invalid updater input leaked its credentials.' >&2; exit 1
+fi
+if printf '{"network":"base-sepolia","path":"/private price fixture.json","passwordBase64":"invalid private price fixture"}\n' | run_configuration base-sepolia '' '' '' '' 0 0 0 1; then
+  echo 'Updater provisioning accepted malformed password encoding.' >&2; exit 1
+fi
+cmp -s "$STAGED_ENV" "$TEST_ROOT/staged-before" || { echo 'Invalid updater input modified staged output.' >&2; exit 1; }
 printf 'Hermetic runtime configuration tests passed.\n'

@@ -4,18 +4,28 @@ import type { SessionRole } from '@/lib/session-access';
 import { KeywordMarketSubnavigation } from './keyword-market-header';
 
 const session = vi.hoisted(() => ({ sessionRoles: [] as SessionRole[] }));
+const navigation = vi.hoisted(() => ({ pathname: '/keyword-market/api-keys' }));
 vi.mock('@/hooks/use-wallet-session', () => ({ useWalletSession: () => session }));
-vi.mock('next/navigation', () => ({ usePathname: () => '/keyword-market/api-keys' }));
+vi.mock('next/navigation', () => ({ usePathname: () => navigation.pathname }));
 
 describe('Keyword Market navigation', () => {
   beforeEach(() => {
     session.sessionRoles = [];
+    navigation.pathname = '/keyword-market/api-keys';
   });
 
   it('labels the public homepage Search', () => {
     const html = renderToStaticMarkup(<KeywordMarketSubnavigation />);
     expect(html).toContain('>Search</a>');
     expect(html).not.toContain('>Resolver</a>');
+  });
+
+  it('exposes Docs without signing in and marks the current page', () => {
+    navigation.pathname = '/keyword-market/docs';
+    const html = renderToStaticMarkup(<KeywordMarketSubnavigation />);
+    expect(html).toContain('aria-current="page" href="/keyword-market/docs">Docs</a>');
+    expect(html).not.toContain('aria-current="page" href="/keyword-market"');
+    expect(html).not.toContain('href="/keyword-market/api-keys"');
   });
 
   it.each(['CONTENT_ADMIN', 'FINANCE_ADMIN'] as const)('hides API keys for %s', (role) => {

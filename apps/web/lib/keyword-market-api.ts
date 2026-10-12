@@ -75,6 +75,7 @@ export type AdStakeTransactionPlan =
       tokenAddress: `0x${string}`;
       approvalTransaction: KeywordMarketTransaction | null;
       transaction: KeywordMarketTransaction;
+      priceWarning?: string;
     };
 
 export interface AdCreativeInput {

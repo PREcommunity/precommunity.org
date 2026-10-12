@@ -6,6 +6,13 @@ export const ADS_MAX_QUERY_TOKENS = 32;
 export const ADS_MAX_KEYWORD_CHARACTERS = 64;
 export const ADS_MAX_KEYWORD_TOKENS = 5;
 
+export function keywordMarketConfirmations(configuredConfirmations: number) {
+  if (!Number.isInteger(configuredConfirmations) || configuredConfirmations < 1) {
+    throw new Error('PRE Keyword Market confirmations must be a positive integer');
+  }
+  return Math.min(configuredConfirmations, 4);
+}
+
 export const AD_REPORT_REASONS = [
   'SCAM_PHISHING',
   'MISLEADING',
@@ -141,19 +148,14 @@ export interface AdStakeProof {
 }
 
 export interface AdResolveCreative {
-  revisionId: string;
   headline: string;
   description: string;
-  destinationUrl: string;
   clickUrl: string;
-  displayDomain: string;
-  matchedKeyword: string;
-  proof: AdStakeProof;
+  url: string;
+  reportUrl: string;
 }
 
 export interface AdResolveResponse {
-  requestId: string;
-  algorithmVersion: typeof ADS_ALGORITHM_VERSION;
   ad: AdResolveCreative | null;
 }
 

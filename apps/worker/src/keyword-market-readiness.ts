@@ -1,11 +1,12 @@
 import type { PrismaClient } from '@precommunity/database';
-import { PRE_KEYWORD_MARKET_ABI } from '@precommunity/shared';
+import { keywordMarketConfirmations, PRE_KEYWORD_MARKET_ABI } from '@precommunity/shared';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   erc20Abi,
   getAddress,
+  zeroAddress,
   type Account,
   type Chain,
   type PublicClient,
@@ -13,7 +14,7 @@ import {
 } from 'viem';
 import { adsIndexerStateKey, finalizedAdsBlock } from './ads-projection';
 
-export type KeywordMarketCheckPhase = 'preopen' | 'active';
+export type KeywordMarketCheckPhase = 'bootstrap' | 'preopen' | 'active';
 
 interface MarketArtifact {
   contractName: string;
@@ -56,8 +57,12 @@ export function loadReviewedMarketArtifact(): ReviewedMarketArtifact {
 export function keywordMarketCheckPhase(args: string[], defaultPhase?: KeywordMarketCheckPhase) {
   if (args[0] === '--') args = args.slice(1);
   if (args.length === 0) return defaultPhase;
-  if (args.length !== 2 || args[0] !== '--phase' || !['preopen', 'active'].includes(args[1]!)) {
-    throw new Error('Usage: --phase preopen|active');
+  if (
+    args.length !== 2 ||
+    args[0] !== '--phase' ||
+    !['bootstrap', 'preopen', 'active'].includes(args[1]!)
+  ) {
+    throw new Error('Usage: --phase bootstrap|preopen|active');
   }
   return args[1] as KeywordMarketCheckPhase;
 }
@@ -123,7 +128,10 @@ export async function verifyKeywordMarketReadiness<
     state.configBlockNumber !== state.lastBlockNumber ||
     state.minimumStakeRaw === null ||
     state.paused === null ||
-    state.operatorAddress === null
+    state.operatorAddress === null ||
+    state.priceUpdaterAddress === null ||
+    state.preUsdPriceE18Raw === null ||
+    state.preUsdPriceQuotedAt === null
   ) {
     throw new Error('Keyword Market projection is not fully synchronized');
   }
@@ -141,6 +149,9 @@ export async function verifyKeywordMarketReadiness<
     minimumStake,
     paused,
     operator,
+    priceUpdater,
+    preUsdPriceE18,
+    preUsdPriceQuotedAt,
     checkpoint,
   ] = await Promise.all([
     client.getChainId(),
@@ -179,6 +190,24 @@ export async function verifyKeywordMarketReadiness<
       address,
       abi: PRE_KEYWORD_MARKET_ABI,
       functionName: 'operator',
+      blockNumber: state.lastBlockNumber,
+    }),
+    client.readContract({
+      address,
+      abi: PRE_KEYWORD_MARKET_ABI,
+      functionName: 'priceUpdater',
+      blockNumber: state.lastBlockNumber,
+    }),
+    client.readContract({
+      address,
+      abi: PRE_KEYWORD_MARKET_ABI,
+      functionName: 'preUsdPriceE18',
+      blockNumber: state.lastBlockNumber,
+    }),
+    client.readContract({
+      address,
+      abi: PRE_KEYWORD_MARKET_ABI,
+      functionName: 'preUsdPriceQuotedAt',
       blockNumber: state.lastBlockNumber,
     }),
     client.getBlock({ blockNumber: state.lastBlockNumber }),
@@ -221,9 +250,22 @@ export async function verifyKeywordMarketReadiness<
     minimumStake <= 0n ||
     minimumStake.toString() !== state.minimumStakeRaw ||
     paused !== state.paused ||
-    getAddress(operator).toLowerCase() !== state.operatorAddress.toLowerCase()
+    getAddress(operator).toLowerCase() !== state.operatorAddress.toLowerCase() ||
+    getAddress(priceUpdater).toLowerCase() !== state.priceUpdaterAddress.toLowerCase() ||
+    preUsdPriceE18.toString() !== state.preUsdPriceE18Raw ||
+    preUsdPriceQuotedAt !== state.preUsdPriceQuotedAt
   ) {
     throw new Error('Keyword Market cached configuration does not match its checkpoint');
+  }
+  if ((preUsdPriceE18 === 0n) !== (preUsdPriceQuotedAt === 0n))
+    throw new Error('Keyword Market price and timestamp must be initialized together');
+  if (
+    options.phase === 'active' &&
+    (preUsdPriceE18 <= 0n || preUsdPriceQuotedAt <= 0n || getAddress(priceUpdater) === zeroAddress)
+  ) {
+    throw new Error(
+      'Keyword Market active readiness requires a price updater and first PRE/USD quote',
+    );
   }
   const expectedPaused =
     options.phase === 'preopen' ? true : options.phase === 'active' ? false : undefined;
@@ -243,6 +285,7 @@ export async function verifyKeywordMarketReadiness<
     throw new Error('Keyword Market chain reorganized during readiness verification');
   return {
     status: 'READY' as const,
+    confirmations: keywordMarketConfirmations(options.confirmations),
     phase: options.phase ?? (paused ? 'preopen' : 'active'),
     chainId,
     contractAddress: address.toLowerCase(),
@@ -252,6 +295,9 @@ export async function verifyKeywordMarketReadiness<
     minimumStakeRaw: minimumStake.toString(),
     paused,
     operatorAddress: getAddress(operator).toLowerCase(),
+    priceUpdaterAddress: getAddress(priceUpdater).toLowerCase(),
+    preUsdPriceE18Raw: preUsdPriceE18.toString(),
+    preUsdPriceQuotedAt: preUsdPriceQuotedAt.toString(),
     indexedThroughBlock: state.lastBlockNumber.toString(),
     indexedBlockHash: state.lastBlockHash.toLowerCase(),
     finalizedHead: finalizedHead.toString(),

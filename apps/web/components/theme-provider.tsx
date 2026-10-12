@@ -19,18 +19,19 @@ interface ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 const storageKey = 'precommunity-theme';
 
-function systemTheme(): ResolvedTheme {
-  return resolveTheme('system', window.matchMedia('(prefers-color-scheme: dark)').matches);
-}
-
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [preference, setPreference] = useState<ThemePreference>('system');
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>('light');
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const saved = window.localStorage.getItem(storageKey);
-    const initial: ThemePreference = isThemePreference(saved) ? saved : 'system';
+    let initial: ThemePreference = 'system';
+    try {
+      const saved = window.localStorage.getItem(storageKey);
+      if (isThemePreference(saved)) initial = saved;
+    } catch {
+      // Use the system theme when browser storage is unavailable.
+    }
     setPreference(initial);
     setReady(true);
   }, []);
@@ -39,8 +40,9 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     if (!ready) return;
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const apply = (value: ThemePreference) => {
-      const resolved = value === 'system' ? systemTheme() : value;
+      const resolved = resolveTheme(value, media.matches);
       document.documentElement.dataset.theme = resolved;
+      document.documentElement.style.colorScheme = resolved;
       document
         .querySelector('meta[name="theme-color"]')
         ?.setAttribute('content', resolved === 'dark' ? '#07172a' : '#2d8eff');
@@ -56,7 +58,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, [preference, ready]);
 
   const updatePreference = useCallback((next: ThemePreference) => {
-    window.localStorage.setItem(storageKey, next);
+    try {
+      window.localStorage.setItem(storageKey, next);
+    } catch {
+      // The choice still applies when browser storage is unavailable.
+    }
     setPreference(next);
   }, []);
 

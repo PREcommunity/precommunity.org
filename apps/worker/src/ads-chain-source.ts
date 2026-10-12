@@ -99,32 +99,51 @@ export class ContractAdsChainSource {
     address: `0x${string}`,
     blockNumber: bigint,
   ): Promise<AdsContractSnapshot> {
-    const [pre, minimumStake, paused, operator] = await Promise.all([
-      this.client.readContract({
-        address,
-        abi: PRE_KEYWORD_MARKET_ABI,
-        functionName: 'PRE',
-        blockNumber,
-      }),
-      this.client.readContract({
-        address,
-        abi: PRE_KEYWORD_MARKET_ABI,
-        functionName: 'minimumStake',
-        blockNumber,
-      }),
-      this.client.readContract({
-        address,
-        abi: PRE_KEYWORD_MARKET_ABI,
-        functionName: 'paused',
-        blockNumber,
-      }),
-      this.client.readContract({
-        address,
-        abi: PRE_KEYWORD_MARKET_ABI,
-        functionName: 'operator',
-        blockNumber,
-      }),
-    ]);
+    const [pre, minimumStake, paused, operator, priceUpdater, priceE18, priceQuotedAt] =
+      await Promise.all([
+        this.client.readContract({
+          address,
+          abi: PRE_KEYWORD_MARKET_ABI,
+          functionName: 'PRE',
+          blockNumber,
+        }),
+        this.client.readContract({
+          address,
+          abi: PRE_KEYWORD_MARKET_ABI,
+          functionName: 'minimumStake',
+          blockNumber,
+        }),
+        this.client.readContract({
+          address,
+          abi: PRE_KEYWORD_MARKET_ABI,
+          functionName: 'paused',
+          blockNumber,
+        }),
+        this.client.readContract({
+          address,
+          abi: PRE_KEYWORD_MARKET_ABI,
+          functionName: 'operator',
+          blockNumber,
+        }),
+        this.client.readContract({
+          address,
+          abi: PRE_KEYWORD_MARKET_ABI,
+          functionName: 'priceUpdater',
+          blockNumber,
+        }),
+        this.client.readContract({
+          address,
+          abi: PRE_KEYWORD_MARKET_ABI,
+          functionName: 'preUsdPriceE18',
+          blockNumber,
+        }),
+        this.client.readContract({
+          address,
+          abi: PRE_KEYWORD_MARKET_ABI,
+          functionName: 'preUsdPriceQuotedAt',
+          blockNumber,
+        }),
+      ]);
     if (getAddress(String(pre)) !== getAddress(config.deployment.preAddress)) {
       throw new Error('Keyword Market PRE token does not match the selected deployment');
     }
@@ -133,6 +152,9 @@ export class ContractAdsChainSource {
       minimumStakeRaw: minimumStake.toString(),
       paused,
       operatorAddress: getAddress(operator).toLowerCase(),
+      priceUpdaterAddress: getAddress(priceUpdater).toLowerCase(),
+      preUsdPriceE18Raw: priceE18.toString(),
+      preUsdPriceQuotedAt: BigInt(priceQuotedAt),
       configBlockNumber: blockNumber,
     };
   }
@@ -214,14 +236,28 @@ export class ContractAdsChainSource {
           : start + INDEXER_LOG_BLOCK_RANGE - 1n;
       await this.assertCanonicalCheckpoint(checkpoint);
       const indexedBlock = await this.client.getBlock({ blockNumber: end });
-      const logs = await this.client.getContractEvents({
-        address,
-        abi: PRE_KEYWORD_MARKET_ABI,
-        eventName: 'PositionChanged',
-        fromBlock: start,
-        toBlock: end,
-        strict: true,
-      });
+      const [positions, charges] = await Promise.all([
+        this.client.getContractEvents({
+          address,
+          abi: PRE_KEYWORD_MARKET_ABI,
+          eventName: 'PositionChanged',
+          fromBlock: start,
+          toBlock: end,
+          strict: true,
+        }),
+        this.client.getContractEvents({
+          address,
+          abi: PRE_KEYWORD_MARKET_ABI,
+          eventName: 'StakeCharged',
+          fromBlock: start,
+          toBlock: end,
+          strict: true,
+        }),
+      ]);
+      const logs = [
+        ...positions.map((log) => ({ ...log, eventName: 'PositionChanged' as const })),
+        ...charges.map((log) => ({ ...log, eventName: 'StakeCharged' as const })),
+      ];
       logs.sort((left, right) =>
         left.blockNumber === right.blockNumber
           ? left.logIndex - right.logIndex
@@ -240,6 +276,38 @@ export class ContractAdsChainSource {
           await assertUnchangedCheckpoint(tx, key, checkpoint);
           let count = 0;
           for (const log of logs) {
+            if (log.eventName === 'StakeCharged') {
+              const args = log.args as {
+                chargeId: `0x${string}`;
+                keywordId: `0x${string}`;
+                staker: `0x${string}`;
+                requestedPre: bigint;
+                chargedPre: bigint;
+                remainingPre: bigint;
+              };
+              await tx.adChainEvent.createMany({
+                data: [
+                  {
+                    ...identity,
+                    txHash: log.transactionHash.toLowerCase(),
+                    logIndex: log.logIndex,
+                    blockNumber: log.blockNumber,
+                    blockHash: log.blockHash.toLowerCase(),
+                    eventName: 'StakeCharged',
+                    payload: {
+                      chargeId: args.chargeId.toLowerCase(),
+                      keywordId: args.keywordId.toLowerCase(),
+                      staker: args.staker.toLowerCase(),
+                      requestedPre: args.requestedPre.toString(),
+                      chargedPre: args.chargedPre.toString(),
+                      remainingPre: args.remainingPre.toString(),
+                    },
+                  },
+                ],
+                skipDuplicates: true,
+              });
+              continue;
+            }
             const args = log.args as {
               keywordId: `0x${string}`;
               staker: `0x${string}`;

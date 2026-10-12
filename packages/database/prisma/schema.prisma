@@ -8,10 +8,157 @@ datasource db {
   provider = "postgresql"
 }
 
+model PreUsdPrice {
+  id        String   @id @default(uuid()) @db.Uuid
+  source    String
+  assetId   String
+  priceUsd  Decimal  @db.Decimal(38, 18)
+  quotedAt  DateTime @db.Timestamptz(3)
+  fetchedAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([source, assetId, quotedAt])
+}
+
+/// Signed price updates survive worker restarts and projection rebuilds.
+model AdPricePublication {
+  id                 String    @id @default(uuid()) @db.Uuid
+  chainId            Int
+  contractAddress    String
+  quoteId            String?   @db.Uuid
+  priceE18Raw        String
+  quotedAt           BigInt
+  status             String    @default("PREPARED")
+  signerAddress      String?
+  nonce              BigInt?
+  txHash             String?
+  signedTransaction  String?
+  receiptBlockNumber BigInt?
+  receiptBlockHash   String?
+  errorCode          String?
+  attemptCount       Int       @default(0)
+  nextAttemptAt      DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@unique([chainId, signerAddress, nonce])
+  @@unique([chainId, contractAddress, quotedAt])
+  @@index([chainId, signerAddress, status])
+  @@index([chainId, contractAddress, status, createdAt])
+}
+
 enum Role {
   SUPER_ADMIN
   CONTENT_ADMIN
   FINANCE_ADMIN
+}
+
+/// Billing survives analytics retention and rebuilds of the chain projection.
+model AdBillingClick {
+  id               String         @id @db.Uuid
+  revisionId       String         @db.Uuid
+  chainId          Int
+  contractAddress  String
+  keywordId        String
+  keyword          String
+  stakerAddress    String
+  positionVersion  BigInt
+  status           String         @default("CAPTURING")
+  bidUsdRaw        String?
+  amountPreRaw     String?
+  priceQuoteId     String?        @db.Uuid
+  priceUsd         String?
+  priceQuotedAt    DateTime?
+  captureSource    String?
+  bidBlockNumber   BigInt?
+  bidBlockHash     String?
+  priceBlockNumber BigInt?
+  priceBlockHash   String?
+  errorCode        String?
+  batchId          String?        @db.Uuid
+  clickedAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  batch            AdChargeBatch? @relation(fields: [batchId], references: [id], onDelete: Restrict)
+
+  @@index([chainId, contractAddress, status, clickedAt])
+  @@index([batchId])
+}
+
+model AdChargeSettings {
+  chainId                   Int
+  contractAddress           String
+  automaticEnabled          Boolean   @default(false)
+  intervalMinutes           Int       @default(10)
+  clickThreshold            Int       @default(50)
+  updatedBy                 String?
+  workerHeartbeatAt         DateTime?
+  reconciliationBlockNumber BigInt?
+  reconciliationBlockHash   String?
+  signerAddress             String?
+  operatorAddress           String?
+  gasBalanceRaw             String?
+  readiness                 String    @default("WORKER_UNAVAILABLE")
+  errorCode                 String?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+
+  @@id([chainId, contractAddress])
+}
+
+model AdChargeRun {
+  id              String          @id @default(uuid()) @db.Uuid
+  chainId         Int
+  contractAddress String
+  trigger         String
+  status          String          @default("QUEUED")
+  actorAddress    String?
+  errorCode       String?
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  batches         AdChargeBatch[]
+
+  @@index([chainId, contractAddress, status, createdAt])
+  @@index([chainId, contractAddress, createdAt])
+}
+
+model AdChargeBatch {
+  id                 String           @id @default(uuid()) @db.Uuid
+  runId              String           @db.Uuid
+  chargeId           String
+  chainId            Int
+  contractAddress    String
+  keywordId          String
+  keyword            String
+  stakerAddress      String
+  positionVersion    BigInt
+  clickCount         Int
+  duePreRaw          String
+  requestedPreRaw    String
+  chargedPreRaw      String?
+  shortfallPreRaw    String?
+  status             String           @default("PREPARED")
+  txHash             String?
+  settledTxHash      String?
+  signedTransaction  String?
+  signerAddress      String?
+  nonce              BigInt?
+  receiptBlockNumber BigInt?
+  receiptBlockHash   String?
+  errorCode          String?
+  attemptCount       Int              @default(0)
+  nextAttemptAt      DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  run                AdChargeRun      @relation(fields: [runId], references: [id], onDelete: Restrict)
+  clicks             AdBillingClick[]
+
+  @@unique([chainId, contractAddress, chargeId])
+  @@unique([chainId, signerAddress, nonce])
+  @@index([chainId, signerAddress, status])
+  @@index([chainId, contractAddress, status, createdAt])
+  @@index([chainId, contractAddress, createdAt, id])
+  @@index([runId])
 }
 
 enum ChainAuthorityKind {
@@ -302,6 +449,8 @@ model AdStakePosition {
   eligible               Boolean
   withdrawAvailableAt    BigInt
   positionVersion        BigInt
+  stakeSinceBlock        BigInt
+  stakeSinceLogIndex     Int
   amountSinceBlock       BigInt
   amountSinceLogIndex    Int
   positionBlock          BigInt
@@ -334,16 +483,19 @@ model AdChainEvent {
 }
 
 model AdIndexerState {
-  key               String   @id
-  chainId           Int
-  contractAddress   String
-  lastBlockNumber   BigInt
-  lastBlockHash     String
-  minimumStakeRaw   String?
-  paused            Boolean?
-  operatorAddress   String?
-  configBlockNumber BigInt?
-  updatedAt         DateTime @updatedAt
+  key                 String   @id
+  chainId             Int
+  contractAddress     String
+  lastBlockNumber     BigInt
+  lastBlockHash       String
+  minimumStakeRaw     String?
+  paused              Boolean?
+  operatorAddress     String?
+  priceUpdaterAddress String?
+  preUsdPriceE18Raw   String?
+  preUsdPriceQuotedAt BigInt?
+  configBlockNumber   BigInt?
+  updatedAt           DateTime @updatedAt
 
   @@index([chainId, contractAddress])
 }
@@ -419,6 +571,7 @@ model CommunitySettings {
   forumMinimumPreRaw          String?
   proposalModerationEnabled   Boolean  @default(true)
   keywordMarketEnabled        Boolean  @default(false)
+  keywordMarketRequireReview  Boolean  @default(true)
   updatedBy                   String?
   createdAt                   DateTime @default(now())
   updatedAt                   DateTime @updatedAt

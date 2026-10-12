@@ -3,6 +3,11 @@ import { chmod, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs, parseEnv } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  encodedOperatorPair,
+  operatorKeystorePair,
+  serializeNativeEnv,
+} from './operator-keystore-env.mjs';
 
 export const REHEARSAL_SCHEMA = 'keyword_rehearsal_20261007';
 
@@ -52,7 +57,15 @@ function secret(previous, excluded) {
     : randomBytes(48).toString('hex');
 }
 
-/** Builds an isolated profile without changing files, connecting to services or copying signing keys. */
+function priceApiKey(main, previous) {
+  const value = previous?.trim() || main?.trim() || '';
+  if (value && !/^[A-Za-z0-9._~-]+$/.test(value)) {
+    throw new Error('COINGECKO_API_KEY contains unsupported characters');
+  }
+  return value;
+}
+
+/** Builds an isolated profile without changing files or connecting to services. */
 export function buildKeywordRehearsalProfile(
   main,
   previous = {},
@@ -121,6 +134,11 @@ export function buildKeywordRehearsalProfile(
     ...mainSecrets,
     sessionSecret,
   ]);
+  const operator =
+    operatorKeystorePair(previous, '_TESTNET') ?? operatorKeystorePair(main, '_TESTNET');
+  const priceUpdater =
+    operatorKeystorePair(previous, '_TESTNET', 'ADS_PRICE_UPDATER') ??
+    operatorKeystorePair(main, '_TESTNET', 'ADS_PRICE_UPDATER');
   const env = {
     NODE_ENV: 'development',
     PRECOMMUNITY_NETWORK: 'base-sepolia',
@@ -148,6 +166,11 @@ export function buildKeywordRehearsalProfile(
     ADS_CONTRACT_DEPLOYMENT_BLOCK_TESTNET: marketBlock,
     KEYWORD_MARKET_DEPLOYMENT_NAME_TESTNET: deploymentName,
     ADS_OPERATOR_PRIVATE_KEY: '',
+    ...encodedOperatorPair(null),
+    ...encodedOperatorPair(operator, '_TESTNET'),
+    ...encodedOperatorPair(null, '', 'ADS_PRICE_UPDATER'),
+    ...encodedOperatorPair(priceUpdater, '_TESTNET', 'ADS_PRICE_UPDATER'),
+    COINGECKO_API_KEY: priceApiKey(main.COINGECKO_API_KEY, previous.COINGECKO_API_KEY),
     HOST: '127.0.0.1',
     PORT: '4012',
     WEB_ORIGIN: 'http://127.0.0.1:3012',
@@ -192,13 +215,7 @@ async function main() {
   );
   const temporary = `${destination}.${randomUUID()}.tmp`;
   try {
-    await writeFile(
-      temporary,
-      Object.entries(profile.env)
-        .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
-        .join('\n') + '\n',
-      { mode: 0o600, flag: 'wx' },
-    );
+    await writeFile(temporary, serializeNativeEnv(profile.env), { mode: 0o600, flag: 'wx' });
     await chmod(temporary, 0o600);
     await rename(temporary, destination);
   } finally {

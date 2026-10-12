@@ -9,6 +9,7 @@ import { BrandMark } from './brand-mark';
 const publicLinks = [
   { href: '/keyword-market', label: 'Search' },
   { href: '/keyword-market/campaigns', label: 'Campaigns' },
+  { href: '/keyword-market/docs', label: 'Docs' },
 ];
 
 export function KeywordMarketSubnavigation() {

@@ -133,33 +133,43 @@ export function ContributionPanel({ goal }: { goal: GoalSummary }) {
       if (!publicClient) throw new Error(`${activeDeployment.networkName} RPC is unavailable.`);
       if (chainId !== activeChain.id) await switchChainAsync({ chainId: activeChain.id });
       setState('checking-balance');
-      const balance = await publicClient.readContract({
-        address: tokenAddress,
-        abi: erc20Abi,
-        functionName: 'balanceOf',
-        args: [address],
-      });
+      const [balance, allowance] = await Promise.all([
+        publicClient.readContract({
+          address: tokenAddress,
+          abi: erc20Abi,
+          functionName: 'balanceOf',
+          args: [address],
+        }),
+        publicClient.readContract({
+          address: tokenAddress,
+          abi: erc20Abi,
+          functionName: 'allowance',
+          args: [address, escrowAddress],
+        }),
+      ]);
       if (balance < rawAmount) {
         setState('idle');
         setError(`Insufficient ${asset} balance for this contribution.`);
         return;
       }
-      setState('approving');
-      const approval = await writeContractAsync({
-        address: tokenAddress,
-        abi: erc20Abi,
-        functionName: 'approve',
-        args: [escrowAddress, rawAmount],
-        chainId: activeChain.id,
-      });
-      setState('confirming-approval');
-      requireSuccessfulReceipt(
-        await publicClient.waitForTransactionReceipt({
-          hash: approval,
-          confirmations: APPROVAL_CONFIRMATIONS,
-        }),
-        'Token approval',
-      );
+      if (allowance < rawAmount) {
+        setState('approving');
+        const approval = await writeContractAsync({
+          address: tokenAddress,
+          abi: erc20Abi,
+          functionName: 'approve',
+          args: [escrowAddress, rawAmount],
+          chainId: activeChain.id,
+        });
+        setState('confirming-approval');
+        requireSuccessfulReceipt(
+          await publicClient.waitForTransactionReceipt({
+            hash: approval,
+            confirmations: APPROVAL_CONFIRMATIONS,
+          }),
+          'Token approval',
+        );
+      }
       setState('contributing');
       const hash = await writeContractAsync({
         address: escrowAddress,
@@ -265,7 +275,7 @@ export function ContributionPanel({ goal }: { goal: GoalSummary }) {
         </div>
         <div className="flex justify-between gap-4 border-b border-line py-[7px]">
           <dt className="text-muted">Flow</dt>
-          <dd className="m-0 font-mono text-right break-all">Approve + contribute</dd>
+          <dd className="m-0 font-mono text-right break-all">Approve if needed + contribute</dd>
         </div>
       </dl>
       <ActionButton

@@ -17,6 +17,8 @@ import { ConfirmationDialog } from './confirmation-dialog';
 import { ForumModerationPanel } from './forum-moderation-panel';
 import { GoalManagerPanel } from './goal-manager-panel';
 import { KeywordMarketFeaturePanel } from './keyword-market-feature-panel';
+import { PreUsdPricePanel } from './pre-usd-price-panel';
+import { KeywordMarketChargesPanel } from './keyword-market-charges-panel';
 import { SafePayoutPanel } from './safe-payout-panel';
 import { SafeLifecyclePanel } from './safe-lifecycle-panel';
 import { SafeManualTransactionDialog } from './safe-manual-transaction-dialog';
@@ -30,7 +32,7 @@ const accessButtonClass = 'mt-4 cursor-pointer border border-navy bg-navy px-3 p
 export function AdminWorkspace({ requestedTab }: { requestedTab?: string }) {
   const router = useRouter();
   const admin = useAdminWorkspace();
-  const { sessionReady, sessionRoles } = useWalletSession();
+  const { sessionAddress, sessionReady, sessionRoles } = useWalletSession();
   const hasWorkspaceAccess = admin.principal ? hasAdminWorkspaceRole(admin.principal) : false;
   const adminRoles = admin.principal?.roles ?? sessionRoles;
   const hasAdminAccess = canAccessAdmin(adminRoles);
@@ -128,6 +130,13 @@ export function AdminWorkspace({ requestedTab }: { requestedTab?: string }) {
           canManage={adminRoles.includes('SUPER_ADMIN')}
           canModerate={canModerateCommunity}
         />
+      ) : null}
+
+      {sessionReady && canAccessAdmin(sessionRoles) && activeTab === 'keyword-marketplace' ? (
+        <div key={sessionAddress}>
+          <PreUsdPricePanel canRefresh={sessionRoles.includes('SUPER_ADMIN')} />
+          <KeywordMarketChargesPanel canManage={sessionRoles.includes('SUPER_ADMIN')} />
+        </div>
       ) : null}
 
       {admin.state === 'idle' ? (

@@ -19,6 +19,9 @@ readonly CHAIN_CONFIRMATIONS="${PUBLIC_CHAIN_CONFIRMATIONS:-}"
 ADS_CONTRACT_ADDRESS_VALUE="${ADS_CONTRACT_ADDRESS:-}"
 ADS_CONTRACT_DEPLOYMENT_BLOCK_VALUE="${ADS_CONTRACT_DEPLOYMENT_BLOCK:-}"
 readonly SAFE_TRANSACTION_SERVICE_API_KEY_STDIN="${PRECOMMUNITY_SAFE_TRANSACTION_SERVICE_API_KEY_STDIN:-0}"
+readonly COINGECKO_API_KEY_STDIN="${PRECOMMUNITY_COINGECKO_API_KEY_STDIN:-0}"
+readonly OPERATOR_KEYSTORE_STDIN="${PRECOMMUNITY_ADS_OPERATOR_KEYSTORE_STDIN:-0}"
+readonly PRICE_UPDATER_KEYSTORE_STDIN="${PRECOMMUNITY_ADS_PRICE_UPDATER_KEYSTORE_STDIN:-0}"
 readonly CONFIG_DIR=/etc/precommunity
 readonly SECRET_FILE="${CONFIG_DIR}/app.secrets"
 readonly ACTIVE_ENV_FILE="${CONFIG_DIR}/app.env"
@@ -52,6 +55,18 @@ if [[ "$SAFE_TRANSACTION_SERVICE_API_KEY_STDIN" != 0 &&
   echo 'PRECOMMUNITY_SAFE_TRANSACTION_SERVICE_API_KEY_STDIN must be 0 or 1.' >&2
   exit 2
 fi
+if [[ "$COINGECKO_API_KEY_STDIN" != 0 && "$COINGECKO_API_KEY_STDIN" != 1 ]]; then
+  echo 'PRECOMMUNITY_COINGECKO_API_KEY_STDIN must be 0 or 1.' >&2
+  exit 2
+fi
+if [[ "$OPERATOR_KEYSTORE_STDIN" != 0 && "$OPERATOR_KEYSTORE_STDIN" != 1 ]]; then
+  echo 'PRECOMMUNITY_ADS_OPERATOR_KEYSTORE_STDIN must be 0 or 1.' >&2
+  exit 2
+fi
+if [[ "$PRICE_UPDATER_KEYSTORE_STDIN" != 0 && "$PRICE_UPDATER_KEYSTORE_STDIN" != 1 ]]; then
+  echo 'PRECOMMUNITY_ADS_PRICE_UPDATER_KEYSTORE_STDIN must be 0 or 1.' >&2
+  exit 2
+fi
 if [[ -n "$SAFE_ADDRESS" && ! "$SAFE_ADDRESS" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
   echo 'PRECOMMUNITY_SAFE_ADDRESS must be a 20-byte hexadecimal address.' >&2
   exit 2
@@ -63,6 +78,27 @@ safe_transaction_service_api_key_input=''
 if [[ "$SAFE_TRANSACTION_SERVICE_API_KEY_STDIN" == 1 ]]; then
   if ! IFS= read -r safe_transaction_service_api_key_input; then
     echo 'Safe Transaction Service API key was not received.' >&2
+    exit 2
+  fi
+fi
+coingecko_api_key_input=''
+if [[ "$COINGECKO_API_KEY_STDIN" == 1 ]]; then
+  if ! IFS= read -r coingecko_api_key_input; then
+    echo 'CoinGecko Demo API key was not received.' >&2
+    exit 2
+  fi
+fi
+operator_keystore_input=''
+if [[ "$OPERATOR_KEYSTORE_STDIN" == 1 ]]; then
+  if ! IFS= read -r operator_keystore_input || [[ -z "$operator_keystore_input" ]]; then
+    echo 'The operator keystore input was not received.' >&2
+    exit 2
+  fi
+fi
+price_updater_keystore_input=''
+if [[ "$PRICE_UPDATER_KEYSTORE_STDIN" == 1 ]]; then
+  if ! IFS= read -r price_updater_keystore_input || [[ -z "$price_updater_keystore_input" ]]; then
+    echo 'The price updater keystore input was not received.' >&2
     exit 2
   fi
 fi
@@ -80,6 +116,15 @@ run_root() {
 }
 
 run_root install -d -o root -g "$APP_GROUP" -m 0750 "$CONFIG_DIR"
+ops_node="$(command -v node || true)"
+if [[ -z "$ops_node" ]]; then ops_node="/home/${APP_USER}/.local/bin/precommunity-node"; fi
+if run_root test -r "$ACTIVE_ENV_FILE"; then
+  operator_env="$(printf '%s' "$operator_keystore_input" | "$ops_node" "$SCRIPT_DIR/operator-keystore-env.mjs" render "$DEPLOYMENT_NETWORK" <(run_root cat "$ACTIVE_ENV_FILE"))"
+  price_updater_env="$(printf '%s' "$price_updater_keystore_input" | "$ops_node" "$SCRIPT_DIR/operator-keystore-env.mjs" price-render "$DEPLOYMENT_NETWORK" <(run_root cat "$ACTIVE_ENV_FILE"))"
+else
+  operator_env="$(printf '%s' "$operator_keystore_input" | "$ops_node" "$SCRIPT_DIR/operator-keystore-env.mjs" render "$DEPLOYMENT_NETWORK")"
+  price_updater_env="$(printf '%s' "$price_updater_keystore_input" | "$ops_node" "$SCRIPT_DIR/operator-keystore-env.mjs" price-render "$DEPLOYMENT_NETWORK")"
+fi
 if ! run_root test -f "$SECRET_FILE"; then
   session_secret="$(openssl rand -hex 48)"
   ads_report_fingerprint_secret="$(openssl rand -hex 48)"
@@ -115,6 +160,7 @@ existing_ads_block=''
 existing_safe_transaction_service_api_key=''
 existing_safe_transaction_service_url=''
 existing_safe_transaction_service_url_testnet=''
+existing_coingecko_api_key=''
 if run_root test -r "$ACTIVE_ENV_FILE"; then
   existing_walletconnect_project_id="$(run_root sed -n 's/^NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=//p' "$ACTIVE_ENV_FILE")"
   existing_network="$(run_root sed -n 's/^PRECOMMUNITY_NETWORK=//p' "$ACTIVE_ENV_FILE")"
@@ -126,9 +172,19 @@ if run_root test -r "$ACTIVE_ENV_FILE"; then
   existing_safe_transaction_service_api_key="$(run_root sed -n 's/^SAFE_TRANSACTION_SERVICE_API_KEY=//p' "$ACTIVE_ENV_FILE")"
   existing_safe_transaction_service_url="$(run_root sed -n 's/^SAFE_TRANSACTION_SERVICE_URL=//p' "$ACTIVE_ENV_FILE")"
   existing_safe_transaction_service_url_testnet="$(run_root sed -n 's/^SAFE_TRANSACTION_SERVICE_URL_TESTNET=//p' "$ACTIVE_ENV_FILE")"
+  existing_coingecko_api_key="$(read_runtime_env_value COINGECKO_API_KEY <(run_root cat "$ACTIVE_ENV_FILE"))"
 fi
+trim_whitespace() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
 walletconnect_project_id="${PRECOMMUNITY_WALLETCONNECT_PROJECT_ID:-$existing_walletconnect_project_id}"
 safe_transaction_service_api_key="${safe_transaction_service_api_key_input:-$existing_safe_transaction_service_api_key}"
+coingecko_api_key_input="$(trim_whitespace "$coingecko_api_key_input")"
+existing_coingecko_api_key="$(trim_whitespace "$existing_coingecko_api_key")"
+coingecko_api_key="${coingecko_api_key_input:-$existing_coingecko_api_key}"
 if [[ -n "$walletconnect_project_id" && ! "$walletconnect_project_id" =~ ^[a-fA-F0-9]{32}$ ]]; then
   echo 'WalletConnect project ID must be a 32-character hexadecimal value.' >&2
   exit 2
@@ -136,6 +192,10 @@ fi
 if [[ -n "$safe_transaction_service_api_key" &&
   ! "$safe_transaction_service_api_key" =~ ^[A-Za-z0-9._~-]+$ ]]; then
   echo 'SAFE_TRANSACTION_SERVICE_API_KEY contains unsupported characters.' >&2
+  exit 2
+fi
+if [[ -n "$coingecko_api_key" && ! "$coingecko_api_key" =~ ^[A-Za-z0-9._~-]+$ ]]; then
+  echo 'COINGECKO_API_KEY contains unsupported characters.' >&2
   exit 2
 fi
 if [[ -n "$BASE_RPC_URL_OVERRIDE" ]]; then
@@ -191,7 +251,10 @@ trap 'rm -f "${secret_tmp:-}" "${env_tmp:-}"' EXIT
   printf '%s\n' \
     "SAFE_TRANSACTION_SERVICE_API_KEY=${safe_transaction_service_api_key}" \
     "SAFE_TRANSACTION_SERVICE_URL=${existing_safe_transaction_service_url}" \
-    "SAFE_TRANSACTION_SERVICE_URL_TESTNET=${existing_safe_transaction_service_url_testnet}"
+    "SAFE_TRANSACTION_SERVICE_URL_TESTNET=${existing_safe_transaction_service_url_testnet}" \
+    "COINGECKO_API_KEY=${coingecko_api_key}"
+  printf '%s\n' "$operator_env"
+  printf '%s\n' "$price_updater_env"
   printf '%s\n' \
     "WEB_ORIGIN=https://${DOMAIN}" \
     'NEXT_PUBLIC_API_URL=/api' \

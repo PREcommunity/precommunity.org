@@ -1,4 +1,5 @@
 import { Prisma, resetAdsProjection, type PrismaClient } from '@precommunity/database';
+import { keywordMarketConfirmations } from '@precommunity/shared';
 
 type AdsPositionDatabase = Pick<Prisma.TransactionClient, 'adStakePosition'>;
 type AdsEventDatabase = Pick<Prisma.TransactionClient, 'adStakePosition' | 'adChainEvent'>;
@@ -31,6 +32,9 @@ export interface AdsContractSnapshot {
   minimumStakeRaw: string;
   paused: boolean;
   operatorAddress: string;
+  priceUpdaterAddress: string;
+  preUsdPriceE18Raw: string;
+  preUsdPriceQuotedAt: bigint;
   configBlockNumber: bigint;
 }
 
@@ -107,6 +111,10 @@ export async function applyAdPositionChange(
     return { applied: false, reason: 'STALE_OR_DUPLICATE' as const };
   }
   const amountChanged = !current || current.stakeRaw !== stake.toString();
+  const positionOpened =
+    !current ||
+    (previousStake === 0n && stake > 0n) ||
+    current.positionVersion !== change.positionVersion;
   const projection = {
     stakeRaw: stake.toString(),
     bidUsdRaw: bidUsd.toString(),
@@ -114,6 +122,8 @@ export async function applyAdPositionChange(
     eligible: change.eligible,
     withdrawAvailableAt: change.withdrawAvailableAt,
     positionVersion: change.positionVersion,
+    stakeSinceBlock: positionOpened ? change.blockNumber : current.stakeSinceBlock,
+    stakeSinceLogIndex: positionOpened ? change.logIndex : current.stakeSinceLogIndex,
     amountSinceBlock: amountChanged ? change.blockNumber : current.amountSinceBlock,
     amountSinceLogIndex: amountChanged ? change.logIndex : current.amountSinceLogIndex,
     positionBlock: change.blockNumber,
@@ -178,10 +188,8 @@ export async function applyFinalizedAdPositionChange(
 }
 
 export function finalizedAdsBlock(headBlock: bigint, confirmations: number) {
-  if (!Number.isInteger(confirmations) || confirmations < 1) {
-    throw new Error('PRE Keyword Market confirmations must be a positive integer');
-  }
-  const distance = BigInt(confirmations);
+  // The transaction's own block counts as its first confirmation, matching receipt waits.
+  const distance = BigInt(keywordMarketConfirmations(confirmations) - 1);
   return headBlock > distance ? headBlock - distance : 0n;
 }
 

@@ -12,7 +12,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { useAccount, useDisconnect, useSignMessage, useSwitchChain } from 'wagmi';
+import { useAccount, useConfig, useDisconnect, useSignMessage, useSwitchChain } from 'wagmi';
 import { AUTH_CHANGED_EVENT, AUTH_SIGN_IN_REQUESTED_EVENT } from '@/lib/auth-events';
 import { activeChain } from '@/lib/deployment';
 import { clientApiJson, clientApiRequest } from '@/lib/http';
@@ -28,7 +28,8 @@ interface SignInChallenge {
 function useWalletSessionState() {
   const { address, chainId, isConnected, status: accountStatus } = useAccount();
   const { openConnectModal, connectModalOpen } = useConnectModal();
-  const { disconnect } = useDisconnect();
+  const config = useConfig();
+  const { connectors, disconnectAsync, isPending: isDisconnecting } = useDisconnect();
   const { signMessageAsync } = useSignMessage();
   const { switchChainAsync } = useSwitchChain();
   const [sessionAddress, setSessionAddress] = useState<`0x${string}`>();
@@ -152,21 +153,38 @@ function useWalletSessionState() {
     return () => window.removeEventListener(AUTH_SIGN_IN_REQUESTED_EVENT, connectAndAuthenticate);
   }, [connectAndAuthenticate]);
 
+  const disconnectWallet = useCallback(async () => {
+    authenticateAfterConnectRef.current = false;
+    setError('');
+    try {
+      await config.storage?.removeItem('recentConnectorId');
+      for (const connector of connectors) {
+        await disconnectAsync({ connector }).catch((reason) => {
+          setError(reason instanceof Error ? reason.message : 'Wallet disconnection failed');
+        });
+      }
+      await config.storage?.removeItem('recentConnectorId');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Wallet disconnection failed');
+    }
+  }, [config, connectors, disconnectAsync]);
+
   const logout = useCallback(async () => {
     setIsLoggingOut(true);
     setError('');
     try {
+      await disconnectWallet();
       await clientApiRequest('/v1/auth/logout', { method: 'POST' }, 'Sign-out API');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Sign-out failed');
     } finally {
-      authenticateAfterConnectRef.current = false;
-      disconnect();
       setSessionAddress(undefined);
       setSessionRoles([]);
       setCanAccessSafeOwnershipAcceptance(false);
       setIsLoggingOut(false);
       window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
     }
-  }, [disconnect]);
+  }, [disconnectWallet]);
 
   return {
     accountStatus,
@@ -175,9 +193,11 @@ function useWalletSessionState() {
     chainId,
     connectAndAuthenticate,
     connectModalOpen,
+    disconnectWallet,
     error,
     isAuthenticating,
     isConnected,
+    isDisconnecting,
     isLoggingOut,
     logout,
     sessionAddress,

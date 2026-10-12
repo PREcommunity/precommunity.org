@@ -3,6 +3,7 @@ import { AUTH_CHANGED_EVENT } from '@/lib/auth-events';
 import { ApiError } from '@/lib/http';
 import { getKeywordMarketStatus, getMyAdCampaigns } from '@/lib/keyword-market-api';
 import { KeywordMarketCampaignDetail } from './keyword-market-campaign-detail';
+import { KeywordMarketCampaignEdit } from './keyword-market-campaign-edit';
 import { KeywordMarketCampaignList } from './keyword-market-campaign-list';
 
 const hooks = vi.hoisted(() => ({
@@ -62,6 +63,32 @@ describe('campaign refresh after authentication changes', () => {
     cleanup?.();
     cleanup = undefined;
     vi.unstubAllGlobals();
+  });
+
+  it('ignores a stale anonymous response on the edit page after sign-in', async () => {
+    let rejectAnonymousRequest!: (reason: unknown) => void;
+    vi.mocked(getMyAdCampaigns)
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            rejectAnonymousRequest = reject;
+          }),
+      )
+      .mockResolvedValueOnce([
+        { id: 'campaign-1' } as Awaited<ReturnType<typeof getMyAdCampaigns>>[number],
+      ]);
+
+    KeywordMarketCampaignEdit({ campaignId: 'campaign-1' });
+    const state = hooks.states.find(({ initial }) => initial === 'loading')!;
+    cleanup = hooks.effects[0]!();
+    window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
+
+    await vi.waitFor(() => expect(state.update).toHaveBeenLastCalledWith('ready'));
+    rejectAnonymousRequest(new ApiError('Not signed in', 401));
+    await Promise.resolve();
+
+    expect(getMyAdCampaigns).toHaveBeenCalledTimes(2);
+    expect(state.update).toHaveBeenLastCalledWith('ready');
   });
 
   it.each(['list', 'detail'] as const)(

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import { useReconnect } from 'wagmi';
+import { disconnect } from 'wagmi/actions';
 import { wagmiConfig } from '@/lib/web3';
 
 const CONNECTOR_DISCOVERY_TIMEOUT_MS = 1_000;
@@ -44,12 +45,22 @@ export function WalletConnectionRestorer() {
         await delay(25);
         connector = wagmiConfig.connectors.find((candidate) => candidate.id === recentConnectorId);
       }
-      if (!active || !connector) return;
+      if (
+        !active ||
+        !connector ||
+        (await wagmiConfig.storage?.getItem('recentConnectorId')) !== recentConnectorId
+      )
+        return;
 
       reconnectTimeout = window.setTimeout(finishTimedOutReconnect, RECONNECT_TIMEOUT_MS);
       try {
         const connections = await reconnectAsync({ connectors: [connector] });
         if (!active || connections.length === 0 || !wagmiConfig.state.current) return;
+        // Explicit disconnection must win even when restoration finishes late.
+        if ((await wagmiConfig.storage?.getItem('recentConnectorId')) !== recentConnectorId) {
+          await disconnect(wagmiConfig, { connector });
+          return;
+        }
         // A connector can resolve after our UI timeout. Make that late success
         // authoritative instead of leaving Wagmi with a connection marked idle.
         wagmiConfig.setState((current) => ({

@@ -2,6 +2,7 @@ import type { PrismaClient } from './generated/prisma/client';
 
 export interface ApplicationFeatures {
   keywordMarketEnabled: boolean;
+  keywordMarketRequireReview: boolean;
 }
 
 type ApplicationFeaturesDatabase = Pick<PrismaClient, 'communitySettings'>;
@@ -11,8 +12,11 @@ export async function readApplicationFeatures(
 ): Promise<ApplicationFeatures> {
   const settings = await database.communitySettings.findFirst({
     where: { project: { slug: 'precommunity' } },
-    select: { keywordMarketEnabled: true },
+    select: { keywordMarketEnabled: true, keywordMarketRequireReview: true },
   });
 
-  return { keywordMarketEnabled: settings?.keywordMarketEnabled ?? false };
+  return {
+    keywordMarketEnabled: settings?.keywordMarketEnabled ?? false,
+    keywordMarketRequireReview: settings?.keywordMarketRequireReview ?? true,
+  };
 }

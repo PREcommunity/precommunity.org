@@ -1,6 +1,5 @@
 import type { Metadata } from 'next';
 import localFont from 'next/font/local';
-import Script from 'next/script';
 import { Providers } from '@/components/providers';
 import '@rainbow-me/rainbowkit/styles.css';
 import './globals.css';
@@ -50,11 +49,11 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="en" data-scroll-behavior="smooth" suppressHydrationWarning>
       <head>
         <meta name="theme-color" content="#2d8eff" />
-        <Script
+        {/* Apply before first paint without waiting for the Next.js runtime. */}
+        <script
           id="precommunity-theme-init"
-          strategy="beforeInteractive"
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var p=localStorage.getItem('precommunity-theme')||'system';var d=p==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):p;document.documentElement.dataset.theme=d;document.documentElement.style.colorScheme=d}catch(e){}})()`,
+            __html: `(function(){var p='system';try{var s=localStorage.getItem('precommunity-theme');if(s==='light'||s==='dark'||s==='system')p=s}catch(e){}var d=p==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):p;document.documentElement.dataset.theme=d;document.documentElement.style.colorScheme=d;document.querySelector('meta[name="theme-color"]').setAttribute('content',d==='dark'?'#07172a':'#2d8eff')})()`,
           }}
         />
       </head>

@@ -10,10 +10,10 @@ interface ActionButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variantClass: Record<ActionButtonVariant, string> = {
-  primary:
-    'border-navy bg-navy text-white hover:border-blue hover:bg-blue hover:text-navy dark:hover:bg-blue-soft dark:hover:text-white',
-  secondary: 'border-navy bg-white hover:border-blue hover:bg-blue-soft',
-  danger: 'border-navy bg-white text-danger hover:border-danger hover:bg-danger hover:text-white',
+  primary: 'border-navy bg-navy text-white hover:border-blue hover:bg-blue hover:text-navy',
+  secondary: 'border-navy bg-surface hover:border-blue hover:bg-blue-soft',
+  danger:
+    'border-navy bg-surface text-danger hover:border-danger hover:bg-danger hover:text-white dark:hover:text-navy',
 };
 
 const sizeClass: Record<ActionButtonSize, string> = {

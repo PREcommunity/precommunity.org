@@ -3,9 +3,26 @@ import {
   AdsTextValidationError,
   adKeywordId,
   adsKeywordCandidates,
+  keywordMarketConfirmations,
   normalizeAdKeyword,
 } from './ads';
 import keywordHashVectors from './ads-keyword-hash-vectors.json';
+
+describe('PRE Keyword Market confirmations', () => {
+  it.each([
+    [1, 1],
+    [2, 2],
+    [4, 4],
+    [6, 4],
+    [12, 4],
+  ])('uses %s configured confirmations as %s for the market', (configured, expected) => {
+    expect(keywordMarketConfirmations(configured)).toBe(expected);
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity])('rejects invalid confirmations: %s', (configured) => {
+    expect(() => keywordMarketConfirmations(configured)).toThrow('positive integer');
+  });
+});
 
 describe('PRE Keyword Market keyword normalization', () => {
   it('normalizes Unicode compatibility forms, case and separators', () => {

@@ -36,10 +36,18 @@ describe('API-only secret validation', () => {
     expect(config.BASE_CHAIN_ID).toBe(config.deployment.chainId);
   });
 
-  it('validates the optional operator signing key format', async () => {
+  it('uses the selected keystore pair and ignores the legacy plaintext signing key', async () => {
     vi.resetModules();
     vi.stubEnv('NODE_ENV', 'test');
     vi.stubEnv('ADS_OPERATOR_PRIVATE_KEY', 'not-a-private-key');
-    await expect(import('./config')).rejects.toThrow('ADS_OPERATOR_PRIVATE_KEY');
+    vi.stubEnv('PRECOMMUNITY_NETWORK', 'base-sepolia');
+    vi.stubEnv('ADS_OPERATOR_KEYSTORE_PATH_TESTNET', '/private/operator-fixture.json');
+    vi.stubEnv('ADS_OPERATOR_KEYSTORE_PASSWORD_TESTNET', ' exact fixture password ');
+    const { config } = await import('./config');
+    expect(config.adsOperator).toEqual({
+      keystorePath: '/private/operator-fixture.json',
+      password: ' exact fixture password ',
+    });
+    expect(config).not.toHaveProperty('ADS_OPERATOR_PRIVATE_KEY');
   });
 });

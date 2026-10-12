@@ -74,8 +74,8 @@ function button(tree: ReactNode, name: string) {
   )!;
 }
 function enterName(value: string) {
-  elements(renderKeys()).find((element) => element.props.placeholder === 'Search engine name')!
-    .props.onChange!({ target: { value } });
+  elements(renderKeys()).find((element) => element.props.placeholder === 'Key name')!.props
+    .onChange!({ target: { value } });
 }
 function submit() {
   return elements(renderKeys()).find((element) => element.props.onSubmit)!.props.onSubmit!({

@@ -8,6 +8,8 @@ node_modules/
 .rehearsal/
 !.env.example
 !**/.env.example
+.keystore*
+**/.keystore*/**
 
 # Framework and build output
 .next/
@@ -37,5 +39,7 @@ packages/database/prisma/dev.db
 /AGENTS.md
 /.agents/
 /.codex/
+
+reports/
 
 packages/shared/scripts/

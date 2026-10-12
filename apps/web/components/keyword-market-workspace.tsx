@@ -2,14 +2,25 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight, LoaderCircle, Pencil, Plus, Search, ShieldAlert } from 'lucide-react';
 import {
+  ArrowRight,
+  ArrowUpRight,
+  LoaderCircle,
+  Pencil,
+  Plus,
+  Search,
+  ShieldAlert,
+} from 'lucide-react';
+import {
+  BASE_MAINNET_DEPLOYMENT,
+  BASE_SEPOLIA_DEPLOYMENT,
   normalizeAdKeyword,
   type AdCampaignView,
   type AdKeywordResponse,
 } from '@precommunity/shared';
 import { useWalletSession } from '@/hooks/use-wallet-session';
 import { AUTH_CHANGED_EVENT } from '@/lib/auth-events';
+import { explorerAddressUrl } from '@/lib/deployment';
 import {
   getAdKeyword,
   getKeywordMarketStatus,
@@ -21,6 +32,7 @@ import { KeywordMarketRanking } from './keyword-market-ranking';
 
 export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: string }) {
   const [query, setQuery] = useState(initialQuery);
+  const [searchedKeyword, setSearchedKeyword] = useState('');
   const [result, setResult] = useState<AdKeywordResponse | null>(null);
   const [status, setStatus] = useState<KeywordMarketChainSnapshot | null>(null);
   const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
@@ -92,6 +104,7 @@ export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: s
 
   const searchKeyword = useCallback(async (keyword: string) => {
     const request = ++searchRequest.current;
+    setSearchedKeyword(keyword);
     setError('');
     setResult(null);
     setState('loading');
@@ -111,6 +124,7 @@ export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: s
 
   useEffect(() => {
     setQuery(initialQuery);
+    setSearchedKeyword('');
     setResult(null);
     setError('');
     setState('idle');
@@ -127,35 +141,56 @@ export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: s
     };
   }, [initialQuery, searchKeyword]);
 
+  const chainId = result?.chainId ?? status?.chainId;
+  const contractAddress = result?.contractAddress ?? status?.contractAddress;
+  const deployment = [BASE_MAINNET_DEPLOYMENT, BASE_SEPOLIA_DEPLOYMENT].find(
+    (network) => network.chainId === chainId,
+  );
   const currentOwnership = ownership?.address === sessionAddress ? ownership : null;
   const ownedCampaign =
     currentOwnership?.state === 'ready'
-      ? currentOwnership.campaigns.find((campaign) => campaign.keyword === normalized.keyword)
+      ? currentOwnership.campaigns.find((campaign) => campaign.keyword === searchedKeyword)
       : undefined;
   const ownershipLoading = !sessionReady || Boolean(sessionAddress && !currentOwnership);
   const ownershipError =
     sessionAddress && currentOwnership?.state === 'error' ? currentOwnership.error : '';
-  const actionLabel = ownedCampaign ? 'Edit' : 'New stake';
-  const actionIcon = ownedCampaign ? (
-    <Pencil size={16} aria-hidden="true" />
-  ) : (
-    <Plus size={16} aria-hidden="true" />
+  const noPositions = state === 'ready' && result?.positions.length === 0;
+  const hasPositions = state === 'ready' && Boolean(result?.positions.length);
+  const ownedPosition = result?.positions.some(
+    (position) => position.stakerAddress.toLowerCase() === sessionAddress?.toLowerCase(),
   );
+  const actionLabel = noPositions ? 'Create stake' : ownedCampaign ? 'Edit' : 'New stake';
+  const actionIcon =
+    ownedCampaign && !noPositions ? (
+      <Pencil size={16} aria-hidden="true" />
+    ) : (
+      <Plus size={16} aria-hidden="true" />
+    );
   const actionHref =
-    normalized.keyword && !ownershipLoading && !ownershipError
+    searchedKeyword && !ownershipLoading && !ownershipError
       ? ownedCampaign
         ? `/keyword-market/campaigns/${encodeURIComponent(ownedCampaign.id)}`
-        : `/keyword-market/campaigns/new?keyword=${encodeURIComponent(normalized.keyword)}`
+        : `/keyword-market/campaigns/new?keyword=${encodeURIComponent(searchedKeyword)}`
       : null;
-  const noPositions = state === 'ready' && result?.positions.length === 0;
-
-  function changeQuery(value: string) {
-    searchRequest.current += 1;
-    setQuery(value);
-    setResult(null);
-    setState('idle');
-    setError('');
-  }
+  const campaignAction = !searchedKeyword ? null : actionHref ? (
+    <Link className="keyword-market-primary-link" href={actionHref}>
+      {actionIcon}
+      {actionLabel}
+    </Link>
+  ) : (
+    <ActionButton
+      disabled
+      icon={
+        ownershipLoading && searchedKeyword ? (
+          <LoaderCircle className="animate-spin" size={16} />
+        ) : (
+          actionIcon
+        )
+      }
+    >
+      {ownershipLoading && searchedKeyword ? 'Checking ownership…' : actionLabel}
+    </ActionButton>
+  );
 
   function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -180,7 +215,7 @@ export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: s
           <input
             id="keyword-market-query"
             value={query}
-            onChange={(event) => changeQuery(event.target.value)}
+            onChange={(event) => setQuery(event.target.value)}
             placeholder="Try: bitcoin"
             maxLength={256}
             autoComplete="off"
@@ -216,29 +251,11 @@ export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: s
               <span className="keyword-market-eyebrow">Public keyword ledger</span>
               <h2>Keyword ranking</h2>
             </div>
-            <div className="keyword-market-result-heading-actions">
-              {actionHref ? (
-                <Link className="keyword-market-primary-link" href={actionHref}>
-                  {actionIcon}
-                  {actionLabel}
-                </Link>
-              ) : (
-                <ActionButton
-                  disabled
-                  icon={
-                    ownershipLoading && normalized.keyword ? (
-                      <LoaderCircle className="animate-spin" size={16} />
-                    ) : (
-                      actionIcon
-                    )
-                  }
-                >
-                  {ownershipLoading && normalized.keyword ? 'Checking ownership…' : actionLabel}
-                </ActionButton>
-              )}
-            </div>
+            {hasPositions && !ownedCampaign ? (
+              <div className="keyword-market-result-heading-actions">{campaignAction}</div>
+            ) : null}
           </header>
-          {ownershipError ? (
+          {searchedKeyword && ownershipError ? (
             <div className="keyword-market-inline-error" role="alert">
               <p>{ownershipError}</p>
               <ActionButton onClick={() => setOwnershipVersion((version) => version + 1)}>
@@ -248,30 +265,18 @@ export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: s
           ) : null}
           {state === 'idle' || noPositions ? (
             <div className="keyword-market-resolver-empty-state">
-              {actionHref ? (
-                <Link
-                  className="keyword-market-resolver-empty-icon"
-                  href={actionHref}
-                  aria-label={`${actionLabel} for ${normalized.keyword}`}
-                >
-                  {actionIcon}
-                </Link>
-              ) : (
-                <span className="keyword-market-resolver-empty-icon" aria-hidden="true">
-                  {actionIcon}
-                </span>
-              )}
-              <div>
+              <div className="col-span-full">
                 <strong>
-                  {noPositions
-                    ? 'No confirmed positions'
-                    : 'Search a keyword to inspect its stake ranking'}
+                  {noPositions ? 'No stakes yet' : 'Search a keyword to inspect its stake ranking'}
                 </strong>
                 <p>
                   {noPositions
-                    ? 'Create a campaign for this phrase, or manage your existing campaign.'
-                    : 'You can create or edit a campaign as soon as you enter a valid phrase.'}
+                    ? ownedCampaign
+                      ? 'Add a stake to your existing campaign for this keyword.'
+                      : 'Be the first to stake on this keyword.'
+                    : 'Enter a keyword, then press Enter or click Search.'}
                 </p>
+                {noPositions ? <div className="mt-4">{campaignAction}</div> : null}
               </div>
             </div>
           ) : null}
@@ -290,43 +295,71 @@ export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: s
               <div>
                 <strong>Ranking unavailable</strong>
                 <p>{error}</p>
-                <ActionButton
-                  disabled={!normalized.keyword}
-                  onClick={() => normalized.keyword && void searchKeyword(normalized.keyword)}
-                >
-                  Try again
-                </ActionButton>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <ActionButton
+                    disabled={!searchedKeyword}
+                    onClick={() => searchedKeyword && void searchKeyword(searchedKeyword)}
+                  >
+                    Try again
+                  </ActionButton>
+                  {campaignAction}
+                </div>
               </div>
             </div>
           ) : null}
           {state === 'ready' && result && result.positions.length > 0 ? (
-            <KeywordMarketRanking data={result} />
+            <>
+              <KeywordMarketRanking
+                key={result.keyword}
+                data={result}
+                editHref={ownedCampaign && actionHref ? actionHref : undefined}
+              />
+              {ownedCampaign && !ownedPosition ? (
+                <div className="mt-4">{campaignAction}</div>
+              ) : null}
+            </>
           ) : null}
         </div>
-        <aside className="keyword-market-context-rail">
-          <div>
-            <span className="keyword-market-eyebrow">Chain status</span>
-            <strong className="keyword-market-rail-value">
-              <span className="keyword-market-chain-dot" aria-hidden="true" />
-              {(result?.chainStatus ?? status?.status)?.replaceAll('_', ' ') ?? 'Checking'}
-            </strong>
-            <p>Stake controls use the finalized blockchain index.</p>
-          </div>
-          <dl>
-            <div>
-              <dt>Network</dt>
-              <dd>{result?.chainId ?? status?.chainId ?? '—'}</dd>
-            </div>
-            <div>
-              <dt>Contract</dt>
-              <dd>{result?.contractAddress ?? status?.contractAddress ?? 'Not configured'}</dd>
-            </div>
-          </dl>
-          <Link className="keyword-market-text-link" href="/keyword-market/campaigns">
-            Manage campaigns <ArrowRight size={15} />
-          </Link>
-        </aside>
       </section>
+      <aside className="keyword-market-context-rail" aria-label="Chain status">
+        <div>
+          <span className="keyword-market-eyebrow">Chain status</span>
+          <strong className="keyword-market-rail-value">
+            <span className="keyword-market-chain-dot" aria-hidden="true" />
+            {(result?.chainStatus ?? status?.status)?.replaceAll('_', ' ') ?? 'Checking'}
+          </strong>
+          <p>Stake controls use the finalized blockchain index.</p>
+        </div>
+        <dl>
+          <div>
+            <dt>Network</dt>
+            <dd>{chainId ?? '—'}</dd>
+          </div>
+          <div>
+            <dt>Contract</dt>
+            <dd>
+              {contractAddress && deployment ? (
+                <a
+                  className="keyword-market-text-link"
+                  href={explorerAddressUrl(contractAddress, deployment)}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={contractAddress}
+                  aria-label={`View contract ${contractAddress} on BaseScan (opens in a new tab)`}
+                >
+                  {contractAddress.slice(0, 12)}…{contractAddress.slice(-6)}
+                  <ArrowUpRight size={12} aria-hidden="true" />
+                </a>
+              ) : (
+                (contractAddress ?? 'Not configured')
+              )}
+            </dd>
+          </div>
+        </dl>
+        <Link className="keyword-market-text-link" href="/keyword-market/campaigns">
+          Manage campaigns <ArrowRight size={15} />
+        </Link>
+      </aside>
     </main>
   );
 }

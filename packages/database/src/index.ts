@@ -26,6 +26,7 @@ export { resetAdsProjection } from './ads-projection';
 export { expireUnconsumedSafePayoutIntents } from './safe-payout-intents';
 export { readApplicationFeatures } from './application-features';
 export type { ApplicationFeatures } from './application-features';
+export { readLatestPreUsdPrice } from './pre-usd-price';
 export {
   desiredGoalManagerSet,
   reconcileSafeOwnerGoalManagerAssignments,

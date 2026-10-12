@@ -3,19 +3,21 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import {
   AdCreativeStatus,
   AdReportStatus,
   Prisma,
+  readApplicationFeatures,
   type AdStakePosition,
 } from '@precommunity/database';
 import {
-  ADS_ALGORITHM_VERSION,
   AdsTextValidationError,
   PROJECT_SLUG,
   adKeywordId,
+  billPreRaw,
   adsKeywordCandidates,
   adsUtcDay,
   normalizeAdKeyword,
@@ -32,7 +34,8 @@ import {
   type AdResolveResponse,
   type AdRevisionView,
 } from '@precommunity/shared';
-import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { formatUnits } from 'viem';
 import type { AuthenticatedPrincipal } from '../common/request-context';
 import { PrismaService } from '../common/prisma.service';
 import { writeAuditEvent } from '../common/audit';
@@ -52,6 +55,7 @@ import {
 } from './ads.dto';
 import { AdsMetricsService } from './ads-metrics.service';
 import { hashAdApiKey } from './ads-api-key.guard';
+import { readAdDelivery, signAdDelivery, type AdDelivery } from './ads-delivery';
 
 const RESOLVER_CACHE_MS = 15_000;
 const RESOLVER_CACHE_MAX = 5_000;
@@ -66,6 +70,11 @@ const API_KEY_METADATA_SELECT = {
   lastUsedAt: true,
   revokedAt: true,
 } as const;
+
+type ResolvedAd = AdResolveCreative & {
+  revisionId: string;
+  delivery: Omit<AdDelivery, 'version' | 'deliveryId'>;
+};
 
 function canSuspendRevision(revision: { status: AdCreativeStatus; moderatedAt: Date | null }) {
   return (
@@ -118,6 +127,12 @@ export function compareAdStakePositions(left: AdStakePosition, right: AdStakePos
   if (left.eligible !== right.eligible) return left.eligible ? -1 : 1;
   const bidDifference = rawStake(right.bidUsdRaw) - rawStake(left.bidUsdRaw);
   if (bidDifference !== 0n) return bidDifference > 0n ? 1 : -1;
+  if (left.stakeSinceBlock !== right.stakeSinceBlock) {
+    return left.stakeSinceBlock < right.stakeSinceBlock ? -1 : 1;
+  }
+  if (left.stakeSinceLogIndex !== right.stakeSinceLogIndex) {
+    return left.stakeSinceLogIndex - right.stakeSinceLogIndex;
+  }
   const leftAddress = left.stakerAddress.toLowerCase();
   const rightAddress = right.stakerAddress.toLowerCase();
   return leftAddress < rightAddress ? -1 : leftAddress > rightAddress ? 1 : 0;
@@ -246,10 +261,8 @@ function revisionView(revision: {
 
 @Injectable()
 export class AdsService {
-  private readonly resolverCache = new Map<
-    string,
-    { expiresAt: number; ad: AdResolveCreative | null }
-  >();
+  private readonly logger = new Logger(AdsService.name);
+  private readonly resolverCache = new Map<string, { expiresAt: number; ad: ResolvedAd | null }>();
 
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
@@ -336,21 +349,26 @@ export class AdsService {
       .digest('hex');
     const now = Date.now();
     const cached = this.resolverCache.get(cacheKey);
-    let ad: AdResolveCreative | null;
+    let ad: ResolvedAd | null;
     if (cached && cached.expiresAt > now) {
       ad = cached.ad;
     } else {
       ad = snapshot.status === 'SYNCED' ? await this.resolveCandidates(candidates, snapshot) : null;
       this.cache(cacheKey, ad, now);
     }
-    if (ad && countMetrics) {
-      void this.metrics.increment(ad.revisionId);
-      void this.metrics.incrementView(ad.revisionId);
+    if (!ad) return { ad: null };
+    const { revisionId, delivery, ...creative } = ad;
+    if (countMetrics) {
+      const clickUrl = new URL(creative.clickUrl);
+      clickUrl.searchParams.set('delivery', signAdDelivery(delivery, config.SESSION_SECRET));
+      creative.clickUrl = clickUrl.toString();
+      void this.metrics.increment(revisionId);
+      void this.metrics.incrementView(revisionId);
     }
-    return { requestId: randomUUID(), algorithmVersion: ADS_ALGORITHM_VERSION, ad };
+    return { ad: creative };
   }
 
-  async click(revisionId: string, countMetrics = true) {
+  async click(revisionId: string, countMetrics = true, deliveryToken?: unknown) {
     const revision = await this.prisma.adCreativeRevision.findFirst({
       where: {
         id: revisionId,
@@ -362,14 +380,87 @@ export class AdsService {
       select: { destinationUrl: true },
     });
     if (!revision) throw new NotFoundException('Ad revision not found');
-    if (countMetrics) await this.metrics.incrementClick(revisionId);
+    if (countMetrics) {
+      await this.metrics.incrementClick(revisionId);
+      const delivery = readAdDelivery(deliveryToken, revisionId, config.SESSION_SECRET);
+      if (delivery) await this.captureBillingClick(delivery);
+    }
     return revision.destinationUrl;
+  }
+
+  private async captureBillingClick(delivery: AdDelivery) {
+    const id = delivery.deliveryId;
+    try {
+      // Claim before RPC: repeated links preserve the first click, including unbilled failures.
+      const claim = await this.prisma.adBillingClick.createMany({
+        data: [
+          {
+            id,
+            revisionId: delivery.revisionId,
+            chainId: delivery.chainId,
+            contractAddress: delivery.contractAddress,
+            keywordId: delivery.keywordId,
+            keyword: delivery.keyword,
+            stakerAddress: delivery.stakerAddress,
+            positionVersion: BigInt(delivery.positionVersion),
+            status: 'CAPTURING',
+          },
+        ],
+        skipDuplicates: true,
+      });
+      if (claim.count !== 1) return;
+      const position = await this.chain.billingPosition(delivery);
+      if (position.status === 'UNAVAILABLE') {
+        await this.prisma.adBillingClick.updateMany({
+          where: { id, status: 'CAPTURING' },
+          data: { status: 'UNBILLED', errorCode: position.errorCode },
+        });
+        this.logger.warn({
+          event: 'AD_BILLING_CAPTURE_UNBILLED',
+          clickId: id,
+          code: position.errorCode,
+        });
+        return;
+      }
+      const priceAvailable =
+        BigInt(position.preUsdPriceE18) > 0n && BigInt(position.preUsdPriceQuotedAt) > 0n;
+      const priceUsd = priceAvailable ? formatUnits(BigInt(position.preUsdPriceE18), 18) : null;
+      const amountPreRaw = priceUsd ? billPreRaw(position.bidUsdRaw, priceUsd) : null;
+      await this.prisma.adBillingClick.updateMany({
+        where: { id, status: 'CAPTURING' },
+        data: {
+          status: priceAvailable ? (amountPreRaw === '0' ? 'SETTLED' : 'PENDING') : 'PRICE_PENDING',
+          bidUsdRaw: position.bidUsdRaw,
+          amountPreRaw,
+          priceQuoteId: null,
+          priceUsd,
+          priceQuotedAt: priceAvailable
+            ? new Date(Number(position.preUsdPriceQuotedAt) * 1000)
+            : null,
+          priceBlockNumber: priceAvailable ? position.blockNumber : null,
+          priceBlockHash: priceAvailable ? position.blockHash : null,
+          captureSource: position.source,
+          bidBlockNumber: position.blockNumber,
+          bidBlockHash: position.blockHash,
+        },
+      });
+    } catch {
+      this.logger.warn({ event: 'AD_BILLING_CAPTURE_FAILED', clickId: id, code: 'CAPTURE_FAILED' });
+      try {
+        await this.prisma.adBillingClick.updateMany({
+          where: { id, status: 'CAPTURING' },
+          data: { status: 'UNBILLED', errorCode: 'CAPTURE_FAILED' },
+        });
+      } catch {
+        // Keep the tombstone; worker recovery closes interrupted captures without repricing.
+      }
+    }
   }
 
   private async resolveCandidates(
     candidates: AdsKeywordCandidate[],
     snapshot: AdsChainSnapshot,
-  ): Promise<AdResolveCreative | null> {
+  ): Promise<ResolvedAd | null> {
     if (!snapshot.contractAddress) return null;
     const keywords = candidates.map((candidate) => candidate.keyword);
     const keywordIds = candidates.map((candidate) => adKeywordId(candidate.keyword));
@@ -394,22 +485,28 @@ export class AdsService {
     });
     const selected = selectEligibleAd(candidates, positions, campaigns);
     if (!selected?.campaign.activeRevision) return null;
-    const indexedThroughBlock = await this.indexedThroughBlock(
-      selected.position.chainId,
-      selected.position.contractAddress,
-    );
     return {
       revisionId: selected.campaign.activeRevision.id,
+      delivery: {
+        revisionId: selected.campaign.activeRevision.id,
+        chainId: snapshot.chainId,
+        contractAddress: snapshot.contractAddress.toLowerCase(),
+        keywordId: selected.position.keywordId.toLowerCase(),
+        keyword: selected.campaign.canonicalKeyword,
+        stakerAddress: selected.position.stakerAddress.toLowerCase(),
+        positionVersion: selected.position.positionVersion.toString(),
+      },
       headline: selected.campaign.activeRevision.headline,
       description: selected.campaign.activeRevision.description,
-      destinationUrl: selected.campaign.activeRevision.destinationUrl,
+      url: selected.campaign.activeRevision.destinationUrl,
       clickUrl: new URL(
         `/api/v1/keyword-market/revisions/${selected.campaign.activeRevision.id}/click`,
         config.WEB_ORIGIN,
       ).toString(),
-      displayDomain: selected.campaign.activeRevision.displayDomain,
-      matchedKeyword: selected.candidate.keyword,
-      proof: this.proof(selected.position, indexedThroughBlock),
+      reportUrl: new URL(
+        `/keyword-market/reports/${selected.campaign.activeRevision.id}`,
+        config.WEB_ORIGIN,
+      ).toString(),
     };
   }
 
@@ -503,9 +600,13 @@ export class AdsService {
       );
       const ownBid = own ? rawStake(own.bidUsdRaw) : 0n;
       const leaderBid = leader ? rawStake(leader.bidUsdRaw) : null;
-      const targetBid = leader
-        ? leaderBid! + (principal.address.toLowerCase() < leader.stakerAddress ? 0n : 1n)
-        : null;
+      const winsEqualBid =
+        own &&
+        own.withdrawAvailableAt === 0n &&
+        leader &&
+        compareAdStakePositions({ ...own, eligible: true, bidUsdRaw: leader.bidUsdRaw }, leader) <
+          0;
+      const targetBid = leader ? leaderBid! + (winsEqualBid ? 0n : 1n) : null;
       return {
         id: campaign.id,
         keyword: campaign.canonicalKeyword,
@@ -575,13 +676,32 @@ export class AdsService {
     const canonicalKeyword = normalizedKeyword(body.keyword);
     const creative = validatedCreative(body);
     try {
-      const campaign = await this.prisma.adCampaign.create({
-        data: {
-          userId: principal.userId,
-          canonicalKeyword,
-          revisions: { create: { version: 1, ...creative } },
-        },
-        include: { revisions: true },
+      const campaign = await this.prisma.$transaction(async (tx) => {
+        const { keywordMarketRequireReview } = await readApplicationFeatures(tx);
+        const created = await tx.adCampaign.create({
+          data: {
+            userId: principal.userId,
+            canonicalKeyword,
+            revisions: {
+              create: {
+                version: 1,
+                ...creative,
+                status: keywordMarketRequireReview
+                  ? AdCreativeStatus.PENDING_REVIEW
+                  : AdCreativeStatus.APPROVED,
+                moderatedAt: keywordMarketRequireReview ? null : new Date(),
+              },
+            },
+          },
+          include: { revisions: true },
+        });
+        if (!keywordMarketRequireReview) {
+          await tx.adCampaign.update({
+            where: { id: created.id },
+            data: { activeRevisionId: created.revisions[0]!.id },
+          });
+        }
+        return created;
       });
       this.clearResolverCache();
       return {
@@ -609,17 +729,38 @@ export class AdsService {
         include: { revisions: { orderBy: { version: 'desc' }, take: 1 } },
       });
       if (!campaign) throw new NotFoundException('Ad campaign not found');
+      const { keywordMarketRequireReview } = await readApplicationFeatures(tx);
+      // Match manual approval's lock order to avoid deadlocks with pending revisions.
+      if (!keywordMarketRequireReview && campaign.activeRevisionId) {
+        const superseded = await tx.adCreativeRevision.updateMany({
+          where: { id: campaign.activeRevisionId, status: AdCreativeStatus.APPROVED },
+          data: { status: AdCreativeStatus.SUPERSEDED },
+        });
+        this.assertModerationStateUnchanged(superseded);
+      }
       await tx.adCreativeRevision.updateMany({
         where: { campaignId, status: AdCreativeStatus.PENDING_REVIEW },
         data: { status: AdCreativeStatus.SUPERSEDED },
       });
-      return tx.adCreativeRevision.create({
+      const created = await tx.adCreativeRevision.create({
         data: {
           campaignId,
           version: (campaign.revisions[0]?.version ?? 0) + 1,
           ...creative,
+          status: keywordMarketRequireReview
+            ? AdCreativeStatus.PENDING_REVIEW
+            : AdCreativeStatus.APPROVED,
+          moderatedAt: keywordMarketRequireReview ? null : new Date(),
         },
       });
+      if (!keywordMarketRequireReview) {
+        const activated = await tx.adCampaign.updateMany({
+          where: { id: campaignId, activeRevisionId: campaign.activeRevisionId },
+          data: { activeRevisionId: created.id },
+        });
+        this.assertModerationStateUnchanged(activated);
+      }
+      return created;
     });
     this.clearResolverCache();
     return { revisionId: revision.id, version: revision.version };
@@ -1072,7 +1213,7 @@ export class AdsService {
     return state?.lastBlockNumber.toString() ?? null;
   }
 
-  private cache(key: string, ad: AdResolveCreative | null, now: number) {
+  private cache(key: string, ad: ResolvedAd | null, now: number) {
     if (this.resolverCache.size >= RESOLVER_CACHE_MAX) {
       for (const [candidate, entry] of this.resolverCache) {
         if (entry.expiresAt <= now) this.resolverCache.delete(candidate);

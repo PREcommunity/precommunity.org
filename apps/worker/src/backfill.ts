@@ -1,6 +1,6 @@
 import './load-env';
 import { prisma } from '@precommunity/database';
-import { deploymentStateKey } from '@precommunity/shared';
+import { deploymentStateKey, keywordMarketConfirmations } from '@precommunity/shared';
 import { config } from './config';
 import { adsIndexerStateKey } from './ads-projection';
 import { indexAds } from './ads-chain-source';
@@ -26,7 +26,7 @@ async function main() {
         deploymentBlock: config.adsContract.deploymentBlock,
         preAddress: config.deployment.preAddress,
         safeAddress: config.SAFE_ADDRESS,
-        confirmations: config.deployment.confirmations,
+        confirmations: keywordMarketConfirmations(config.deployment.confirmations),
         phase,
       },
     );

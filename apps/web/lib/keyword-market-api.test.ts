@@ -3,6 +3,7 @@ import {
   createAdApiKey,
   getAdApiKeys,
   isAdTransactionIndexed,
+  reportAd,
   revokeAdApiKey,
 } from './keyword-market-api';
 
@@ -49,6 +50,26 @@ describe('API key administration requests', () => {
     expect(fetch).toHaveBeenCalledWith(
       expect.stringMatching(/\/v1\/keyword-market\/admin\/api-keys\/key%2F1$/),
       { method: 'DELETE', credentials: 'include' },
+    );
+  });
+});
+
+describe('public ad report requests', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('posts the report to the exact revision without an integration key', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response('{"accepted":true}', { status: 202 }));
+    vi.stubGlobal('fetch', fetch);
+    const input = { reason: 'BROKEN_LINK' as const, comment: 'The page does not load.' };
+    await expect(reportAd('revision/1', input)).resolves.toEqual({ accepted: true });
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringMatching(/\/v1\/keyword-market\/revisions\/revision%2F1\/reports$/),
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(input),
+        credentials: 'include',
+      },
     );
   });
 });
