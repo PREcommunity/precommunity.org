@@ -171,7 +171,7 @@ describe('admin keyword registry and stake totals', () => {
       const query = f.tx.$queryRaw.mock.calls[0]![0];
       const escaped = q.replace(/[\\%_]/g, '\\$&');
       expect(query.values).toEqual([`%${escaped}%`, '\\']);
-    expect(query.sql).not.toContain(q);
+      expect(query.sql).not.toContain(q);
       expect(f.tx.adCampaign.groupBy.mock.calls[0]![0].where).toEqual({
         canonicalKeyword: { contains: escaped, mode: 'insensitive' },
       });
