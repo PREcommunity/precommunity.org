@@ -45,6 +45,6 @@ packages/database/prisma/dev.db
 /.agents/
 /.codex/
 
-reports/
+/reports/
 
 packages/shared/scripts/
