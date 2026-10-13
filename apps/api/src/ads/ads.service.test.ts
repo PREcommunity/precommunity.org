@@ -6,11 +6,15 @@ import {
   type AdStakePosition,
 } from '@precommunity/database';
 import { adKeywordId, adsKeywordCandidates } from '@precommunity/shared';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AdsService, compareAdStakePositions, selectEligibleAd } from './ads.service';
 import { AdModerationAction, AdReportResolutionAction } from './ads.dto';
+import { config } from '../config';
+import { readAdDelivery } from './ads-delivery';
 
 const address = (suffix: string) => `0x${suffix.padStart(40, '0')}`;
+
+afterEach(() => vi.restoreAllMocks());
 
 function position(
   keyword: string,
@@ -175,15 +179,19 @@ describe('PRE Keyword Market public resolve response', () => {
     expect(metrics.increment).not.toHaveBeenCalled();
   });
   it('returns only display fields and keeps view metrics on cache hits', async () => {
+    const issuedAt = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(issuedAt);
     const staker = address('7');
     const winner = position('bitcoin', staker, '900', 88n, 2);
+    const approvedCampaign = campaign('bitcoin', staker);
+    approvedCampaign.activeRevision.id = '00000000-0000-4000-8000-000000000001';
     const metrics = {
       increment: vi.fn().mockResolvedValue(true),
       incrementView: vi.fn().mockResolvedValue(true),
     };
     const prisma = {
       adStakePosition: { findMany: vi.fn().mockResolvedValue([winner]) },
-      adCampaign: { findMany: vi.fn().mockResolvedValue([campaign('bitcoin', staker)]) },
+      adCampaign: { findMany: vi.fn().mockResolvedValue([approvedCampaign]) },
       adIndexerState: { findFirst: vi.fn().mockResolvedValue({ lastBlockNumber: 120n }) },
     };
     const chain = {
@@ -198,7 +206,7 @@ describe('PRE Keyword Market public resolve response', () => {
     const service = new AdsService(prisma as never, metrics as never, chain as never);
 
     const response = await service.resolve('BITCOIN price');
-    const revisionId = campaign('bitcoin', staker).activeRevision.id;
+    const revisionId = approvedCampaign.activeRevision.id;
 
     expect(response).toEqual({
       ad: {
@@ -219,9 +227,22 @@ describe('PRE Keyword Market public resolve response', () => {
     expect(new URL(response.ad!.reportUrl).pathname).toBe(`/keyword-market/reports/${revisionId}`);
     expect(prisma.adIndexerState.findFirst).not.toHaveBeenCalled();
 
+    clock.mockReturnValue(issuedAt + 1_000);
     const cachedResponse = await service.resolve('BITCOIN price');
     expect(cachedResponse.ad).toEqual({ ...response.ad, clickUrl: expect.any(String) });
     expect(cachedResponse.ad!.clickUrl).not.toBe(response.ad!.clickUrl);
+    const token = new URL(response.ad!.clickUrl).searchParams.get('delivery');
+    const cachedToken = new URL(cachedResponse.ad!.clickUrl).searchParams.get('delivery');
+    const delivery = readAdDelivery(token, revisionId, config.ADS_DELIVERY_SECRET);
+    expect(delivery).not.toBeNull();
+    expect(delivery?.issuedAt).toBe(issuedAt);
+    expect(readAdDelivery(cachedToken, revisionId, config.ADS_DELIVERY_SECRET)?.issuedAt).toBe(
+      issuedAt + 1_000,
+    );
+    expect(readAdDelivery(token, revisionId, config.SESSION_SECRET)).toBeNull();
+    expect(
+      readAdDelivery(cachedToken, revisionId, config.ADS_DELIVERY_SECRET)?.deliveryId,
+    ).not.toBe(delivery?.deliveryId);
     expect(prisma.adCampaign.findMany).toHaveBeenCalledOnce();
     expect(metrics.incrementView).toHaveBeenCalledTimes(2);
     await service.resolve('BITCOIN price', false);

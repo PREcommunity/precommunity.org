@@ -84,6 +84,7 @@ function fixture() {
     adChargeSettings: { findUnique: vi.fn(), upsert: vi.fn(), update: vi.fn() },
     adChargeBatch: { findFirst: vi.fn(), findMany: vi.fn() },
     adChargeRun: { findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
+    adBillingClickTotals: { findUnique: vi.fn().mockResolvedValue(null) },
     auditEvent: { create: vi.fn() },
     $queryRaw: vi.fn(),
     $transaction: vi.fn(),
@@ -127,6 +128,7 @@ describe('keyword market charge administration', () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
     mocks.config.adsContract.address = contractAddress;
+    mocks.config.chain.id = scope.chainId;
     mocks.queue.waitUntilReady.mockResolvedValue(undefined);
     mocks.queue.add.mockResolvedValue({ id: runId });
     vi.mocked(readLatestPreUsdPrice).mockResolvedValue(null);
@@ -167,6 +169,57 @@ describe('keyword market charge administration', () => {
     expect(view.readiness.errorCode).toBe('WORKER_UNAVAILABLE');
   });
 
+  it('returns exact capture totals above the safe integer range and their tracking start', async () => {
+    const { db, service } = fixture();
+    db.adBillingClickTotals.findUnique.mockResolvedValue({
+      billableClicks: 9007199254740993n,
+      suppressedClicks: 9007199254740995n,
+      startedAt: now,
+    });
+    const view = await service.latest();
+    expect(view.clickTotals).toEqual({
+      billableClicks: '9007199254740993',
+      suppressedClicks: '9007199254740995',
+      startedAt: now.toISOString(),
+    });
+    expect(db.adBillingClickTotals.findUnique).toHaveBeenCalledWith({
+      where: { chainId_contractAddress: scope },
+      select: { billableClicks: true, suppressedClicks: true, startedAt: true },
+    });
+  });
+
+  it('keeps capture totals separate for each selected chain and contract', async () => {
+    const { db, service } = fixture();
+    const otherContract = '0x3333333333333333333333333333333333333333';
+    const totals = new Map([
+      [`${scope.chainId}:${contractAddress}`, 10n],
+      [`8453:${contractAddress}`, 20n],
+      [`${scope.chainId}:${otherContract}`, 30n],
+    ]);
+    db.adBillingClickTotals.findUnique.mockImplementation(
+      async ({ where: { chainId_contractAddress: selected } }) => ({
+        billableClicks: totals.get(`${selected.chainId}:${selected.contractAddress}`),
+        suppressedClicks: 0n,
+        startedAt: now,
+      }),
+    );
+    expect((await service.latest()).clickTotals.billableClicks).toBe('10');
+    mocks.config.chain.id = 8453;
+    expect((await service.latest()).clickTotals.billableClicks).toBe('20');
+    mocks.config.chain.id = scope.chainId;
+    mocks.config.adsContract.address = otherContract;
+    expect((await service.latest()).clickTotals.billableClicks).toBe('30');
+  });
+
+  it('shows zero capture totals without inventing historical tracking dates', async () => {
+    const { service } = fixture();
+    expect((await service.latest()).clickTotals).toEqual({
+      billableClicks: '0',
+      suppressedClicks: '0',
+      startedAt: null,
+    });
+  });
+
   it('shows defaults when no contract is configured without reading an unrelated ledger', async () => {
     mocks.config.adsContract.address = null;
     const { db, service } = fixture();
@@ -177,6 +230,12 @@ describe('keyword market charge administration', () => {
       clickThreshold: 50,
     });
     expect(view.readiness.errorCode).toBe('AWAITING_CONTRACT');
+    expect(view.clickTotals).toEqual({
+      billableClicks: '0',
+      suppressedClicks: '0',
+      startedAt: null,
+    });
+    expect(db.adBillingClickTotals.findUnique).not.toHaveBeenCalled();
     expect(db.adChargeBatch.findMany).not.toHaveBeenCalled();
     await expect(service.run(actor)).rejects.toBeInstanceOf(ServiceUnavailableException);
   });

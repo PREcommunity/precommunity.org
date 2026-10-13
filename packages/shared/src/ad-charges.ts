@@ -114,6 +114,11 @@ export interface AdChargeAdminView {
     awaitingPriceClicks: number;
     captureErrors: number;
   };
+  clickTotals: {
+    billableClicks: string;
+    suppressedClicks: string;
+    startedAt: string | null;
+  };
   history: AdChargeBatchView[];
   nextCursor: string | null;
   latestRun: AdChargeRunView | null;

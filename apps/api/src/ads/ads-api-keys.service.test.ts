@@ -110,7 +110,7 @@ describe('server-side click redirects', () => {
           { status: AdCreativeStatus.SUPERSEDED, moderatedAt: { not: null } },
         ],
       },
-      select: { destinationUrl: true },
+      select: { destinationUrl: true, campaignId: true },
     });
     expect(incrementClick).toHaveBeenCalledWith('old-revision');
     await expect(service.click('old-revision', false)).resolves.toBe('https://wp.pl/original');

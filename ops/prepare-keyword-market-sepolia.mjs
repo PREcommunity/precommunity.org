@@ -128,11 +128,27 @@ export function buildKeywordRehearsalProfile(
     throw new Error('BASE_RPC_URL_TESTNET is invalid');
   }
   if (rpc.protocol !== 'https:') throw new Error('BASE_RPC_URL_TESTNET must use HTTPS');
-  const mainSecrets = [main.SESSION_SECRET, main.ADS_REPORT_FINGERPRINT_SECRET];
+  const mainSecrets = [
+    main.SESSION_SECRET,
+    main.ADS_REPORT_FINGERPRINT_SECRET,
+    main.ADS_DELIVERY_SECRET,
+    main.ADS_CLICK_FINGERPRINT_SECRET,
+  ];
   const sessionSecret = secret(previous.SESSION_SECRET, mainSecrets);
   const reportSecret = secret(previous.ADS_REPORT_FINGERPRINT_SECRET, [
     ...mainSecrets,
     sessionSecret,
+  ]);
+  const deliverySecret = secret(previous.ADS_DELIVERY_SECRET, [
+    ...mainSecrets,
+    sessionSecret,
+    reportSecret,
+  ]);
+  const clickSecret = secret(previous.ADS_CLICK_FINGERPRINT_SECRET, [
+    ...mainSecrets,
+    sessionSecret,
+    reportSecret,
+    deliverySecret,
   ]);
   const operator =
     operatorKeystorePair(previous, '_TESTNET') ?? operatorKeystorePair(main, '_TESTNET');
@@ -182,6 +198,8 @@ export function buildKeywordRehearsalProfile(
     NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: main.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || '',
     SESSION_SECRET: sessionSecret,
     ADS_REPORT_FINGERPRINT_SECRET: reportSecret,
+    ADS_DELIVERY_SECRET: deliverySecret,
+    ADS_CLICK_FINGERPRINT_SECRET: clickSecret,
     COMMUNITY_MIN_PRE: '1',
     IPFS_GATEWAY_URL: 'https://ipfs.io/ipfs/',
     IPFS_TIMEOUT_MS: '5000',

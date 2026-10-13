@@ -124,6 +124,7 @@ export class KeywordMarketChargesService implements OnModuleDestroy {
       awaitingPriceClicks: 0,
       captureErrors: 0,
     };
+    const emptyClickTotals = { billableClicks: '0', suppressedClicks: '0', startedAt: null };
     if (!contractAddress) {
       return {
         chainId,
@@ -139,6 +140,7 @@ export class KeywordMarketChargesService implements OnModuleDestroy {
           workerHeartbeatAt: null,
         },
         pending: emptyPending,
+        clickTotals: emptyClickTotals,
         history: [],
         nextCursor: null,
         latestRun: null,
@@ -152,7 +154,7 @@ export class KeywordMarketChargesService implements OnModuleDestroy {
       });
       if (!exists) throw new NotFoundException('Charge history cursor was not found');
     }
-    const [settings, history, activeRun, latestRun, pendingRows] = await Promise.all([
+    const [settings, history, activeRun, latestRun, pendingRows, clickTotals] = await Promise.all([
       this.prisma.adChargeSettings.findUnique({ where: { chainId_contractAddress: scope } }),
       this.prisma.adChargeBatch.findMany({
         where: scope,
@@ -191,6 +193,10 @@ export class KeywordMarketChargesService implements OnModuleDestroy {
         FROM "AdBillingClick" WHERE "chainId" = ${chainId} AND "contractAddress" = ${contractAddress}
           AND "status" IN ('PENDING', 'PRICE_PENDING', 'RESERVED', 'UNBILLED')
       `,
+      this.prisma.adBillingClickTotals.findUnique({
+        where: { chainId_contractAddress: scope },
+        select: { billableClicks: true, suppressedClicks: true, startedAt: true },
+      }),
     ]);
     const heartbeat = settings?.workerHeartbeatAt;
     const heartbeatAge = heartbeat ? Date.now() - heartbeat.getTime() : Infinity;
@@ -227,6 +233,13 @@ export class KeywordMarketChargesService implements OnModuleDestroy {
             captureErrors: Number(pending.captureErrors),
           }
         : emptyPending,
+      clickTotals: clickTotals
+        ? {
+            billableClicks: clickTotals.billableClicks.toString(),
+            suppressedClicks: clickTotals.suppressedClicks.toString(),
+            startedAt: clickTotals.startedAt.toISOString(),
+          }
+        : emptyClickTotals,
       history: history.slice(0, 20).map(batchView),
       nextCursor: history.length > 20 ? history[19]!.id : null,
       latestRun: selectedRun ? runView(selectedRun) : null,

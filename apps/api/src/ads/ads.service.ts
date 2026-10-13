@@ -56,6 +56,7 @@ import {
 import { AdsMetricsService } from './ads-metrics.service';
 import { hashAdApiKey } from './ads-api-key.guard';
 import { readAdDelivery, signAdDelivery, type AdDelivery } from './ads-delivery';
+import { claimClickBillingWindow, clickBillingFingerprint } from './ads-click-billing';
 
 const RESOLVER_CACHE_MS = 15_000;
 const RESOLVER_CACHE_MAX = 5_000;
@@ -73,7 +74,7 @@ const API_KEY_METADATA_SELECT = {
 
 type ResolvedAd = AdResolveCreative & {
   revisionId: string;
-  delivery: Omit<AdDelivery, 'version' | 'deliveryId'>;
+  delivery: Omit<AdDelivery, 'version' | 'deliveryId' | 'issuedAt'>;
 };
 
 function canSuspendRevision(revision: { status: AdCreativeStatus; moderatedAt: Date | null }) {
@@ -360,7 +361,7 @@ export class AdsService {
     const { revisionId, delivery, ...creative } = ad;
     if (countMetrics) {
       const clickUrl = new URL(creative.clickUrl);
-      clickUrl.searchParams.set('delivery', signAdDelivery(delivery, config.SESSION_SECRET));
+      clickUrl.searchParams.set('delivery', signAdDelivery(delivery, config.ADS_DELIVERY_SECRET));
       creative.clickUrl = clickUrl.toString();
       void this.metrics.increment(revisionId);
       void this.metrics.incrementView(revisionId);
@@ -368,7 +369,7 @@ export class AdsService {
     return { ad: creative };
   }
 
-  async click(revisionId: string, countMetrics = true, deliveryToken?: unknown) {
+  async click(revisionId: string, countMetrics = true, deliveryToken?: unknown, ip?: string) {
     const revision = await this.prisma.adCreativeRevision.findFirst({
       where: {
         id: revisionId,
@@ -377,18 +378,18 @@ export class AdsService {
           { status: AdCreativeStatus.SUPERSEDED, moderatedAt: { not: null } },
         ],
       },
-      select: { destinationUrl: true },
+      select: { destinationUrl: true, campaignId: true },
     });
     if (!revision) throw new NotFoundException('Ad revision not found');
     if (countMetrics) {
       await this.metrics.incrementClick(revisionId);
-      const delivery = readAdDelivery(deliveryToken, revisionId, config.SESSION_SECRET);
-      if (delivery) await this.captureBillingClick(delivery);
+      const delivery = readAdDelivery(deliveryToken, revisionId, config.ADS_DELIVERY_SECRET);
+      if (delivery) await this.captureBillingClick(delivery, revision.campaignId, ip);
     }
     return revision.destinationUrl;
   }
 
-  private async captureBillingClick(delivery: AdDelivery) {
+  private async captureBillingClick(delivery: AdDelivery, campaignId: string, ip?: string) {
     const id = delivery.deliveryId;
     try {
       // Claim before RPC: repeated links preserve the first click, including unbilled failures.
@@ -409,6 +410,19 @@ export class AdsService {
         skipDuplicates: true,
       });
       if (claim.count !== 1) return;
+      const fingerprint = clickBillingFingerprint(
+        delivery,
+        campaignId,
+        ip,
+        config.ADS_CLICK_FINGERPRINT_SECRET,
+      );
+      if (!fingerprint) {
+        await this.prisma.adBillingClick.updateMany({
+          where: { id, status: 'CAPTURING' },
+          data: { status: 'UNBILLED', errorCode: 'CLIENT_IP_UNAVAILABLE' },
+        });
+        return;
+      }
       const position = await this.chain.billingPosition(delivery);
       if (position.status === 'UNAVAILABLE') {
         await this.prisma.adBillingClick.updateMany({
@@ -426,23 +440,50 @@ export class AdsService {
         BigInt(position.preUsdPriceE18) > 0n && BigInt(position.preUsdPriceQuotedAt) > 0n;
       const priceUsd = priceAvailable ? formatUnits(BigInt(position.preUsdPriceE18), 18) : null;
       const amountPreRaw = priceUsd ? billPreRaw(position.bidUsdRaw, priceUsd) : null;
-      await this.prisma.adBillingClick.updateMany({
-        where: { id, status: 'CAPTURING' },
-        data: {
-          status: priceAvailable ? (amountPreRaw === '0' ? 'SETTLED' : 'PENDING') : 'PRICE_PENDING',
-          bidUsdRaw: position.bidUsdRaw,
-          amountPreRaw,
-          priceQuoteId: null,
-          priceUsd,
-          priceQuotedAt: priceAvailable
-            ? new Date(Number(position.preUsdPriceQuotedAt) * 1000)
-            : null,
-          priceBlockNumber: priceAvailable ? position.blockNumber : null,
-          priceBlockHash: priceAvailable ? position.blockHash : null,
-          captureSource: position.source,
-          bidBlockNumber: position.blockNumber,
-          bidBlockHash: position.blockHash,
-        },
+      const capture = {
+        status: priceAvailable ? (amountPreRaw === '0' ? 'SETTLED' : 'PENDING') : 'PRICE_PENDING',
+        bidUsdRaw: position.bidUsdRaw,
+        amountPreRaw,
+        priceQuoteId: null,
+        priceUsd,
+        priceQuotedAt: priceAvailable
+          ? new Date(Number(position.preUsdPriceQuotedAt) * 1000)
+          : null,
+        priceBlockNumber: priceAvailable ? position.blockNumber : null,
+        priceBlockHash: priceAvailable ? position.blockHash : null,
+        captureSource: position.source,
+        bidBlockNumber: position.blockNumber,
+        bidBlockHash: position.blockHash,
+      };
+      if (amountPreRaw === '0') {
+        await this.prisma.adBillingClick.updateMany({
+          where: { id, status: 'CAPTURING' },
+          data: capture,
+        });
+        return;
+      }
+      await this.prisma.$transaction(async (transaction) => {
+        const allowed = await claimClickBillingWindow(transaction, fingerprint);
+        const recorded = await transaction.adBillingClick.updateMany({
+          where: { id, status: 'CAPTURING' },
+          data: {
+            ...capture,
+            ...(!allowed ? { status: 'SUPPRESSED', errorCode: 'DUPLICATE_CLIENT_WINDOW' } : {}),
+          },
+        });
+        if (recorded.count !== 1) throw new Error('Click capture changed before finalization');
+        const scope = { chainId: delivery.chainId, contractAddress: delivery.contractAddress };
+        await transaction.adBillingClickTotals.upsert({
+          where: { chainId_contractAddress: scope },
+          create: {
+            ...scope,
+            billableClicks: allowed ? 1n : 0n,
+            suppressedClicks: allowed ? 0n : 1n,
+          },
+          update: allowed
+            ? { billableClicks: { increment: 1n } }
+            : { suppressedClicks: { increment: 1n } },
+        });
       });
     } catch {
       this.logger.warn({ event: 'AD_BILLING_CAPTURE_FAILED', clickId: id, code: 'CAPTURE_FAILED' });

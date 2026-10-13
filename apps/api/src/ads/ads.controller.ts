@@ -46,6 +46,19 @@ function countsAdNavigation(request: Request) {
 }
 
 @Controller('keyword-market')
+@UseGuards(AdsApiKeyGuard, KeywordMarketEnabledGuard)
+export class AdsResolveController {
+  constructor(@Inject(AdsService) private readonly service: AdsService) {}
+
+  @Get('resolve')
+  @Header('Cache-Control', 'no-store')
+  @Header('X-Robots-Tag', 'noindex')
+  resolve(@Req() request: Request, @Query('q') query?: string) {
+    return this.service.resolve(query, countsAdNavigation(request));
+  }
+}
+
+@Controller('keyword-market')
 @UseGuards(KeywordMarketEnabledGuard)
 export class AdsController {
   constructor(@Inject(AdsService) private readonly service: AdsService) {}
@@ -54,14 +67,6 @@ export class AdsController {
   @Header('Cache-Control', 'no-store')
   status() {
     return this.service.chainSnapshot();
-  }
-
-  @Get('resolve')
-  @UseGuards(AdsApiKeyGuard)
-  @Header('Cache-Control', 'no-store')
-  @Header('X-Robots-Tag', 'noindex')
-  resolve(@Req() request: Request, @Query('q') query?: string) {
-    return this.service.resolve(query, countsAdNavigation(request));
   }
 
   @Get('revisions/:revisionId/click')
@@ -74,7 +79,7 @@ export class AdsController {
     @Query('delivery') delivery?: unknown,
   ) {
     return {
-      url: await this.service.click(revisionId, countsAdNavigation(request), delivery),
+      url: await this.service.click(revisionId, countsAdNavigation(request), delivery, request.ip),
       statusCode: HttpStatus.FOUND,
     };
   }

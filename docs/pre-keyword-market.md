@@ -23,7 +23,7 @@ Resolver responses, keyword rankings and click redirects are `no-store`. Nginx a
 
 The website's Search shows the exact normalized keyword's public stake ranking. It does not request ads or add Views. New stake opens a prefilled campaign form, and Edit opens the signed-in advertiser's existing campaign, including pending, paused and unstaked campaigns. Stake values are displayed as PRE using 18 decimals; API and blockchain amounts remain raw integer strings.
 
-SUPER_ADMIN manages named integration keys at `/keyword-market/api-keys`. Each search engine receives its own key. The full credential is displayed once after creation; only its SHA-256 digest and a masked display prefix are stored. Keys do not expire automatically. Create a replacement before revoking an old key. Revocation takes effect on the next API request, independently of the other keys.
+SUPER_ADMIN manages named integration keys at `/keyword-market/api-keys`. Each search engine receives its own key. The full credential is displayed once after creation; only its SHA-256 digest and a masked display prefix are stored. Keys do not expire automatically. Create a replacement before revoking an old key. Revocation takes effect on the next authentication check, independently of the other keys. Every request admitted by the resolver limiter checks PostgreSQL; `lastUsedAt` is updated at most once per sixty seconds and is approximate rather than a per-request timestamp.
 
 The management endpoints require an authenticated SUPER_ADMIN wallet session:
 
@@ -31,7 +31,9 @@ The management endpoints require an authenticated SUPER_ADMIN wallet session:
 - `POST /v1/keyword-market/admin/api-keys` with `{ "name": "Key name" }` returns `201` with metadata and the one-time `apiKey`. Names are trimmed and must have 1–80 characters.
 - `DELETE /v1/keyword-market/admin/api-keys/:id` revokes a key and returns `204`; repeating revocation is safe.
 
-`GET /v1/keyword-market/resolve?q=...` requires `X-API-Key`. Make this request from the search engine's server, keeping the key out of browser bundles, URLs and logs. Missing, invalid and revoked keys receive `401` before ad selection. An unavailable key store returns `503`. The response is `{ ad }`, with `ad: null` when there is no eligible result or the market is syncing. A returned ad contains only `headline`, `description`, `clickUrl`, `url` and `reportUrl`. All three addresses are absolute URLs; `url` is the HTTPS destination address, while `clickUrl` and `reportUrl` use the configured Precommunity origin.
+`GET /v1/keyword-market/resolve?q=...` requires `X-API-Key`. Make this request from the search engine's server, keeping the key out of browser bundles, URLs and logs. Missing or malformed keys receive `401`; otherwise the shared limit is checked before authentication. Requests admitted by the limiter with unknown or revoked keys receive `401` before ad selection. An unavailable key store returns `503`. The response is `{ ad }`, with `ad: null` when there is no eligible result or the market is syncing. A returned ad contains only `headline`, `description`, `clickUrl`, `url` and `reportUrl`. All three addresses are absolute URLs; `url` is the HTTPS destination address, while `clickUrl` and `reportUrl` use the configured Precommunity origin.
+
+The application resolver uses `rate-limiter-flexible`'s `RateLimiterRedis` to allow up to sixty requests per integration key in a fixed one-second window, shared across API replicas through the selected network's Redis URL. The window begins with its first request, and the full allowance resets when the window expires. Exhausted allowance returns `429` with a `Retry-After` header. This limit complements Nginx's separate per-IP resolver limit. If Redis is unavailable, the application limiter allows authenticated requests and logs a sanitized warning at most once per minute; key validation and revocation continue to use PostgreSQL.
 
 ```http
 GET /api/v1/keyword-market/resolve?q=bitcoin HTTP/1.1
@@ -40,6 +42,8 @@ X-API-Key: <key copied once from the API keys page>
 ```
 
 Render `ad.headline` and `ad.description`, and use `ad.clickUrl` for the advertisement's link. It records the click and redirects to `ad.url`. A returned click link has the form `https://precommunity.org/api/v1/keyword-market/revisions/<revisionId>/click?delivery=<signed-token>`. Preserve its query parameters and request a distinct resolver response for each ad delivery; reusing one link across viewers shares its one-time billing identity. It stays tied to that version's original destination after a creative replacement. Approved and previously approved superseded revisions redirect; missing, pending, rejected, suspended and unpublished superseded revisions return `404`. Redirect targets cannot be supplied by callers.
+
+V2 click tokens are billable for one hour from issuance, with at most sixty seconds of future clock skew. Expired, invalid and older v1 tokens still redirect without creating new debt. Billing also permits only one click per campaign and client IP in a rolling five-minute window, across deliveries and creative revisions; suppressed clicks retain redirects and the existing analytics. The application persists an HMAC fingerprint, never a raw IP or user agent. The bid and stored contract PRE/USD quote are frozen at the first accepted billable click, rather than when the link is issued; later clicks and settlement cannot reprice that recorded amount. See [click settlement and rollout](keyword-market-charges.md).
 
 Use `ad.reportUrl` for a Report ad link. It has the form `${WEB_ORIGIN}/keyword-market/reports/<revisionId>` and opens a public form without requiring login. Opening the link does not save a report. The user selects a reason and may add a comment of up to 500 characters, then submits through `POST /api/v1/keyword-market/revisions/:revisionId/reports`. Reports appear in Moderation and use the existing anonymous report rate limit.
 
@@ -67,16 +71,20 @@ Required additions:
 
 ```dotenv
 ADS_REPORT_FINGERPRINT_SECRET=<independent random secret of at least 32 characters>
+ADS_DELIVERY_SECRET=<independent random secret of at least 32 characters>
+ADS_CLICK_FINGERPRINT_SECRET=<independent random secret of at least 32 characters>
 ADS_CONTRACT_ADDRESS_TESTNET=<PREKeywordMarketV1 address>
 ADS_CONTRACT_DEPLOYMENT_BLOCK_TESTNET=<deployment block>
 NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=<required for QR/mobile wallets>
 ```
 
-`ops/configure-app-runtime.sh` creates and preserves the report HMAC secret independently from the session secret. Address and deployment block must either both be set or both remain empty. Setting the contract address and block moves the application to `SYNCING`; a successful worker scan is required before new stake preparation; withdrawal requests and claims remain preparable while the worker syncs. Staking does not require a billing operator. The charge worker uses a backend-only operator keystore whose address the Safe registers through `setOperator`; see [operator configuration](keyword-market-charges.md).
+`ops/configure-app-runtime.sh` creates and preserves the three API-only ad secrets independently from each other and `SESSION_SECRET`, including when upgrading an older two-secret file. Production requires all four values to be at least 32 characters, distinct and free of development/example placeholders. Never expose them through `NEXT_PUBLIC_` variables. All API replicas share one deployment's values; rehearsal profiles generate their own stable independent values. Address and deployment block must either both be set or both remain empty. Setting the contract address and block moves the application to `SYNCING`; a successful worker scan is required before new stake preparation; withdrawal requests and claims remain preparable while the worker syncs. Staking does not require a billing operator. The charge worker uses a backend-only operator keystore whose address the Safe registers through `setOperator`; see [operator configuration and coordinated v2 rollout](keyword-market-charges.md).
 
 ## Routing and Nginx
 
 No additional DNS record or TLS certificate is required. Run the existing Nginx configuration step for the canonical domain and verify that its HTTPS virtual host preserves the dedicated `/v1/keyword-market/resolve` and `/api/v1/keyword-market/resolve` locations, `precommunity_keyword_market_resolve` rate-limit zone and `precommunity_keyword_market` privacy-safe log format from the repository template.
+
+Nginx separately limits each client IP to sixty resolver requests per second with a burst of 120. This per-IP limit applies alongside the application's fixed one-second window for each integration key.
 
 If an `ads` DNS record or certificate name was prepared before this migration, remove it manually after the path-based release is verified.
 

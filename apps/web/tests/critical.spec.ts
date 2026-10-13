@@ -3,6 +3,7 @@ import { decodeFunctionData, encodeFunctionData, erc20Abi } from 'viem';
 import {
   deploymentForNetwork,
   PRECOMMUNITY_ESCROW_ABI,
+  type AdChargeAdminView,
   type DeploymentOverrides,
 } from '@precommunity/shared';
 import e2eDeployment from './e2e-deployment.json';
@@ -604,6 +605,48 @@ test('goal manager panel exposes policy sources and prepares direct owner synchr
   const existingManualManager = `0x${'66'.repeat(20)}` as const;
   const updates: Array<{ address: string; enabled: boolean }> = [];
   let refreshes = 0;
+  const chargesView: AdChargeAdminView = {
+    chainId: fixtureDeployment.chainId,
+    contractAddress: `0x${'77'.repeat(20)}`,
+    quoteStatus: 'FRESH',
+    clickTotals: {
+      billableClicks: '9007199254740993',
+      suppressedClicks: '7',
+      startedAt: '2099-08-15T12:00:00.000Z',
+    },
+    settings: {
+      automaticEnabled: false,
+      intervalMinutes: 10,
+      clickThreshold: 50,
+      updatedBy: null,
+      updatedAt: null,
+    },
+    readiness: {
+      status: 'READY',
+      errorCode: null,
+      signerAddress: connectedAddress,
+      operatorAddress: connectedAddress,
+      gasBalanceRaw: '100000000000000000',
+      workerHeartbeatAt: '2099-08-15T12:00:00.000Z',
+    },
+    pending: {
+      clicks: 3,
+      preRaw: '1500000000000000000',
+      usdRaw: '100000',
+      awaitingPriceClicks: 1,
+      captureErrors: 0,
+    },
+    history: [],
+    nextCursor: null,
+    latestRun: null,
+  };
+  await page.route('**/v1/admin/keyword-market/charges', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(chargesView),
+    }),
+  );
   const managerWorkspace = {
     safeConfigured: true,
     safeAddress,
@@ -801,6 +844,23 @@ test('goal manager panel exposes policy sources and prepares direct owner synchr
   await adminSections.getByRole('link', { name: 'Keyword Marketplace' }).click();
   await expect(page).toHaveURL(/\/admin\?tab=keyword-marketplace$/);
   await expect(page.getByRole('heading', { name: 'Keyword Marketplace' })).toBeVisible();
+  const chargesPanel = page.getByRole('region', { name: 'Charges', exact: true });
+  await expect(
+    chargesPanel.getByText('Billable clicks', { exact: true }).locator('..').locator('dd'),
+  ).toHaveText('9,007,199,254,740,993');
+  await expect(
+    chargesPanel
+      .getByText('Non-billable: 5-minute limit', { exact: true })
+      .locator('..')
+      .locator('dd'),
+  ).toHaveText('7');
+  await expect(
+    chargesPanel.getByText(/Each valid ad link counts at most once in these totals/),
+  ).toBeVisible();
+  await expect(chargesPanel.getByText(/awaiting a price or settlement/)).toBeVisible();
+  await expect(chargesPanel.locator('time[datetime="2099-08-15T12:00:00.000Z"]')).toHaveText(
+    'Aug 15, 2099, 12:00 UTC',
+  );
   await expect(page.getByRole('link', { name: 'Open ad moderation' })).toHaveAttribute(
     'href',
     '/keyword-market/admin',
@@ -816,8 +876,29 @@ test('goal manager panel exposes policy sources and prepares direct owner synchr
   await expect.poll(() => refreshes).toBe(1);
   await expect(page.getByText('Safe data refreshed.')).toBeVisible();
 
+  let finishManagerRefresh!: () => void;
+  const managerRefresh = new Promise<void>((resolve) => {
+    finishManagerRefresh = resolve;
+  });
+  await page.route(
+    '**/v1/admin/goal-managers',
+    async (route) => {
+      await managerRefresh;
+      await route.fallback();
+    },
+    { times: 1 },
+  );
+  const managerRefreshStarted = page.waitForRequest('**/v1/admin/goal-managers');
   await page.getByRole('button', { name: 'Keep after Safe removal' }).click();
   await expect.poll(() => updates).toContainEqual({ address: connectedAddress, enabled: true });
+  await managerRefreshStarted;
+  const managerAddressInput = page.getByLabel('Manually pin an address');
+  await expect(managerAddressInput).toBeVisible();
+  await managerAddressInput.fill(newManualManager);
+  await expect(page.getByRole('button', { name: 'Add manager' })).toBeDisabled();
+  finishManagerRefresh();
+  await expect(page.getByRole('button', { name: 'Add manager' })).toBeEnabled();
+  await expect(managerAddressInput).toHaveValue(newManualManager);
 
   const manualManagerRow = page
     .getByText(existingManualManager)
@@ -831,8 +912,9 @@ test('goal manager panel exposes policy sources and prepares direct owner synchr
       address: existingManualManager,
       enabled: false,
     });
+  await expect(page.getByRole('alertdialog')).toBeHidden();
 
-  await page.getByLabel('Manually pin an address').fill(newManualManager);
+  await expect(managerAddressInput).toHaveValue(newManualManager);
   await page.getByRole('button', { name: 'Add manager' }).click();
   await expect.poll(() => updates).toContainEqual({ address: newManualManager, enabled: true });
 

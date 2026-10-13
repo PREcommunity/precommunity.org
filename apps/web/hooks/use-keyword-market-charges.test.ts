@@ -32,6 +32,11 @@ const initial: AdChargeAdminView = {
   chainId: 84532,
   contractAddress: `0x${'11'.repeat(20)}`,
   quoteStatus: 'STALE',
+  clickTotals: {
+    billableClicks: '9007199254740993',
+    suppressedClicks: '9007199254740995',
+    startedAt: '2026-10-11T10:00:00.000Z',
+  },
   settings: {
     automaticEnabled: false,
     intervalMinutes: 10,
@@ -115,6 +120,7 @@ describe('charge panel data', () => {
     });
     const panel = await mount();
     expect(panel.view?.pending.preRaw).toBe('1000000000000000001');
+    expect(panel.view?.clickTotals).toEqual(initial.clickTotals);
     expect(api).toHaveBeenCalledWith(
       endpoint,
       { cache: 'no-store', signal: expect.any(AbortSignal) },

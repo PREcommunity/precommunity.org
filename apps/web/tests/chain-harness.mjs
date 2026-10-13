@@ -70,6 +70,41 @@ const dashboard = {
     },
   ],
 };
+const chargePanel = {
+  chainId: deployment.chainId,
+  contractAddress: `0x${'77'.repeat(20)}`,
+  quoteStatus: 'FRESH',
+  clickTotals: {
+    billableClicks: '9007199254740993',
+    suppressedClicks: '7',
+    startedAt: '2099-08-15T12:00:00.000Z',
+  },
+  settings: {
+    automaticEnabled: false,
+    intervalMinutes: 10,
+    clickThreshold: 50,
+    updatedBy: null,
+    updatedAt: null,
+  },
+  readiness: {
+    status: 'READY',
+    errorCode: null,
+    signerAddress: recipient,
+    operatorAddress: recipient,
+    gasBalanceRaw: '100000000000000000',
+    workerHeartbeatAt: '2099-08-15T12:00:00.000Z',
+  },
+  pending: {
+    clicks: 3,
+    preRaw: '1500000000000000000',
+    usdRaw: '100000',
+    awaitingPriceClicks: 1,
+    captureErrors: 0,
+  },
+  history: [],
+  nextCursor: null,
+  latestRun: null,
+};
 const contributions = {
   items: [
     {
@@ -483,6 +518,11 @@ createServer((request, response) => {
         latestProposal: null,
       }),
     );
+    return;
+  }
+  if (request.url === '/v1/admin/keyword-market/charges' && request.method === 'GET') {
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify(chargePanel));
     return;
   }
   if (request.url === '/v1/auth/me') {

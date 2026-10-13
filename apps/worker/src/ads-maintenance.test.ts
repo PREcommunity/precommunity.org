@@ -139,20 +139,35 @@ describe('PRE Keyword Market metric flushing', () => {
 });
 
 describe('PRE Keyword Market retention', () => {
-  it('removes only resolved report detail and daily data older than twelve months', async () => {
+  it('retains financial history while removing expired click windows and suppressed token tombstones', async () => {
     const reportDelete = vi.fn().mockResolvedValue({ count: 2 });
     const metricDelete = vi.fn().mockResolvedValue({ count: 4 });
     const receiptDelete = vi.fn().mockResolvedValue({ count: 1 });
+    const windowDelete = vi.fn().mockResolvedValue(5);
+    const suppressedDelete = vi.fn().mockResolvedValue({ count: 6 });
     const prisma = {
       adReport: { deleteMany: reportDelete },
       adDailyMetric: { deleteMany: metricDelete },
       adMetricFlush: { deleteMany: receiptDelete },
+      $executeRaw: windowDelete,
+      adBillingClick: { deleteMany: suppressedDelete },
       $transaction: vi.fn(async (operations: Array<Promise<unknown>>) => Promise.all(operations)),
     };
 
     await expect(
       retainAdsData(prisma as never, new Date('2026-08-24T00:00:00.000Z')),
-    ).resolves.toEqual({ reports: 2, dailyMetrics: 4, metricFlushReceipts: 1 });
+    ).resolves.toEqual({
+      reports: 2,
+      dailyMetrics: 4,
+      metricFlushReceipts: 1,
+      billingWindows: 5,
+      suppressedClicks: 6,
+    });
+    expect(windowDelete.mock.calls[0]?.[0].sql).toContain('"expiresAt" <= CURRENT_TIMESTAMP');
+    expect(windowDelete.mock.calls[0]?.[0].values).toEqual([]);
+    expect(suppressedDelete).toHaveBeenCalledWith({
+      where: { status: 'SUPPRESSED', clickedAt: { lt: new Date('2026-08-23T22:00:00.000Z') } },
+    });
     expect(reportDelete).toHaveBeenCalledWith({
       where: {
         status: { not: 'OPEN' },

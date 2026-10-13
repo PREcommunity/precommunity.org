@@ -4,6 +4,8 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
 export const MARKET_TABLES = [
+  'AdBillingClickTotals',
+  'AdBillingClickWindow',
   'AdBillingClick',
   'AdChargeBatch',
   'AdChargeRun',

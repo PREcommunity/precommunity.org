@@ -52,6 +52,25 @@ enum Role {
   FINANCE_ADMIN
 }
 
+/// Short-lived, durable per-campaign client billing windows; no raw IP is stored.
+model AdBillingClickWindow {
+  fingerprint String   @id
+  expiresAt   DateTime @db.Timestamptz(3)
+
+  @@index([expiresAt])
+}
+
+/// Capture totals survive expiry of suppressed delivery records; history starts at first capture.
+model AdBillingClickTotals {
+  chainId          Int
+  contractAddress  String
+  billableClicks   BigInt   @default(0)
+  suppressedClicks BigInt   @default(0)
+  startedAt        DateTime @default(now()) @db.Timestamptz(3)
+
+  @@id([chainId, contractAddress])
+}
+
 /// Billing survives analytics retention and rebuilds of the chain projection.
 model AdBillingClick {
   id               String         @id @db.Uuid

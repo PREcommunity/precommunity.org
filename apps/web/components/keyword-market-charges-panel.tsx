@@ -5,7 +5,7 @@ import { adChargeErrorMessage, type AdChargeBatchView } from '@precommunity/shar
 import { ExternalLink, LoaderCircle, Zap } from 'lucide-react';
 import { formatUnits } from 'viem';
 import { useKeywordMarketCharges } from '@/hooks/use-keyword-market-charges';
-import { formatPreAmount } from '@/lib/format';
+import { formatPreAmount, formatUtcTimestamp } from '@/lib/format';
 import { ActionButton } from './action-button';
 import { StatusNotice } from './status-notice';
 
@@ -15,6 +15,10 @@ function amount(raw: string | null, decimals = 18) {
 
 function preAmount(raw: string | null) {
   return raw === null ? '—' : formatPreAmount(raw);
+}
+
+function clickCount(raw: string | undefined) {
+  return raw === undefined ? '—' : new Intl.NumberFormat('en').format(BigInt(raw));
 }
 
 function ChargeRow({ batch }: { batch: AdChargeBatchView }) {
@@ -68,6 +72,7 @@ function ChargeRow({ batch }: { batch: AdChargeBatchView }) {
 export function KeywordMarketChargesPanel({ canManage }: { canManage: boolean }) {
   const charges = useKeywordMarketCharges(canManage);
   const view = charges.view;
+  const clickTotals = view?.clickTotals;
   const [automaticEnabled, setAutomaticEnabled] = useState(false);
   const [intervalMinutes, setIntervalMinutes] = useState('10');
   const [clickThreshold, setClickThreshold] = useState('50');
@@ -134,6 +139,34 @@ export function KeywordMarketChargesPanel({ canManage }: { canManage: boolean })
           </ActionButton>
         ) : null}
       </header>
+      <dl className="mt-5 mb-0 grid grid-cols-2 gap-5 border-t border-line pt-4">
+        <div>
+          <dt className="text-xs text-muted">Billable clicks</dt>
+          <dd className="m-0 mt-1 break-words font-mono font-bold">
+            {clickCount(clickTotals?.billableClicks)}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs text-muted">Non-billable: 5-minute limit</dt>
+          <dd className="m-0 mt-1 break-words font-mono font-bold">
+            {clickCount(clickTotals?.suppressedClicks)}
+          </dd>
+        </div>
+      </dl>
+      <p className="mt-2 mb-0 text-xs text-muted">
+        Each valid ad link counts at most once in these totals. Billable clicks include those
+        awaiting a price or settlement.
+        {clickTotals?.startedAt ? (
+          <span className="mt-1 block">
+            Since{' '}
+            <time dateTime={clickTotals.startedAt}>
+              {formatUtcTimestamp(clickTotals.startedAt)}
+            </time>
+          </span>
+        ) : clickTotals ? (
+          <span className="mt-1 block">Counting starts with the first recorded click.</span>
+        ) : null}
+      </p>
       <dl className="mt-5 mb-0 grid grid-cols-2 gap-5 border-t border-line pt-4 md:grid-cols-4">
         <div>
           <dt className="text-xs text-muted">Pending clicks</dt>

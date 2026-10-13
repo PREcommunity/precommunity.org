@@ -26,6 +26,48 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+        # Build against the browser-test fixture; production still requires a real deployment.
+        env:
+          ESCROW_ADDRESS_TESTNET: '0x4444444444444444444444444444444444444444'
+          ESCROW_DEPLOYMENT_BLOCK_TESTNET: '101'
+          PRE_ADDRESS_TESTNET: '0x5471386EA2022e724A234A7690E338aA0A6689aD'
+          USDC_ADDRESS_TESTNET: '0xdeBe6c9F496Bb7cca66727E9B8CB5B49f631058D'
+          INITIAL_OWNER_ADDRESS_TESTNET: '0x5555555555555555555555555555555555555555'
+          TREASURY_ADDRESS_TESTNET: '0x5555555555555555555555555555555555555555'
+          CHAIN_CONFIRMATIONS_TESTNET: '12'
+
+  ads-security:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ads_test
+          POSTGRES_PASSWORD: ads_test
+          POSTGRES_DB: ads_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ads_test -d ads_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_ADS_DATABASE_URL: postgresql://ads_test:ads_test@127.0.0.1:5432/ads_test
+      TEST_ADS_REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:packages
+      - run: pnpm --filter @precommunity/api test:security:integration
 
   critical-e2e:
     runs-on: ubuntu-latest
