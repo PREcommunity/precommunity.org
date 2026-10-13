@@ -1,4 +1,4 @@
-import { AdReportStatus, type PrismaClient } from '@precommunity/database';
+import { AdReportStatus, Prisma, type PrismaClient } from '@precommunity/database';
 import { adMetricCounterKey } from '@precommunity/shared';
 import Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
@@ -118,19 +118,31 @@ export async function flushAdResolutionMetrics(prisma: PrismaClient, redis: Redi
 
 export async function retainAdsData(prisma: PrismaClient, now = new Date()) {
   const cutoff = new Date(now.getTime() - RETENTION_MS);
-  const [reports, metrics, flushReceipts] = await prisma.$transaction([
-    prisma.adReport.deleteMany({
-      where: {
-        status: { not: AdReportStatus.OPEN },
-        resolvedAt: { lt: cutoff },
-      },
-    }),
-    prisma.adDailyMetric.deleteMany({ where: { day: { lt: cutoff } } }),
-    prisma.adMetricFlush.deleteMany({ where: { createdAt: { lt: cutoff } } }),
-  ]);
+  const [reports, metrics, flushReceipts, billingWindows, suppressedClicks] =
+    await prisma.$transaction([
+      prisma.adReport.deleteMany({
+        where: {
+          status: { not: AdReportStatus.OPEN },
+          resolvedAt: { lt: cutoff },
+        },
+      }),
+      prisma.adDailyMetric.deleteMany({ where: { day: { lt: cutoff } } }),
+      prisma.adMetricFlush.deleteMany({ where: { createdAt: { lt: cutoff } } }),
+      prisma.$executeRaw(
+        Prisma.sql`DELETE FROM "AdBillingClickWindow" WHERE "expiresAt" <= CURRENT_TIMESTAMP`,
+      ),
+      prisma.adBillingClick.deleteMany({
+        where: {
+          status: 'SUPPRESSED',
+          clickedAt: { lt: new Date(now.getTime() - 2 * 60 * 60_000) },
+        },
+      }),
+    ]);
   return {
     reports: reports.count,
     dailyMetrics: metrics.count,
     metricFlushReceipts: flushReceipts.count,
+    billingWindows,
+    suppressedClicks: suppressedClicks.count,
   };
 }

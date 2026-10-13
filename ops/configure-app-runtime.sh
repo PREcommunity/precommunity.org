@@ -128,28 +128,47 @@ fi
 if ! run_root test -f "$SECRET_FILE"; then
   session_secret="$(openssl rand -hex 48)"
   ads_report_fingerprint_secret="$(openssl rand -hex 48)"
+  ads_delivery_secret="$(openssl rand -hex 48)"
+  ads_click_fingerprint_secret="$(openssl rand -hex 48)"
   secret_tmp="$(mktemp)"
   trap 'rm -f "${secret_tmp:-}" "${env_tmp:-}"' EXIT
-  printf "SESSION_SECRET='%s'\nADS_REPORT_FINGERPRINT_SECRET='%s'\n" \
-    "$session_secret" "$ads_report_fingerprint_secret" >"$secret_tmp"
+  printf "SESSION_SECRET='%s'\nADS_REPORT_FINGERPRINT_SECRET='%s'\nADS_DELIVERY_SECRET='%s'\nADS_CLICK_FINGERPRINT_SECRET='%s'\n" \
+    "$session_secret" "$ads_report_fingerprint_secret" \
+    "$ads_delivery_secret" "$ads_click_fingerprint_secret" >"$secret_tmp"
   run_root install -o root -g root -m 0600 "$secret_tmp" "$SECRET_FILE"
   rm -f "$secret_tmp"
 fi
 
-# The file contains only a shell-safe hexadecimal value generated above.
+# The file contains only shell-safe hexadecimal secrets generated above.
+unset SESSION_SECRET ADS_REPORT_FINGERPRINT_SECRET ADS_DELIVERY_SECRET ADS_CLICK_FINGERPRINT_SECRET
 # shellcheck disable=SC1090
 source <(run_root cat "$SECRET_FILE")
 : "${SESSION_SECRET:?Missing SESSION_SECRET}"
+secret_changed=0
 if [[ -z "${ADS_REPORT_FINGERPRINT_SECRET:-}" ]]; then
   ADS_REPORT_FINGERPRINT_SECRET="$(openssl rand -hex 48)"
+  secret_changed=1
+fi
+if [[ -z "${ADS_DELIVERY_SECRET:-}" ]]; then
+  ADS_DELIVERY_SECRET="$(openssl rand -hex 48)"
+  secret_changed=1
+fi
+if [[ -z "${ADS_CLICK_FINGERPRINT_SECRET:-}" ]]; then
+  ADS_CLICK_FINGERPRINT_SECRET="$(openssl rand -hex 48)"
+  secret_changed=1
+fi
+if [[ "$secret_changed" == 1 ]]; then
   secret_tmp="$(mktemp)"
   trap 'rm -f "${secret_tmp:-}" "${env_tmp:-}"' EXIT
-  printf "SESSION_SECRET='%s'\nADS_REPORT_FINGERPRINT_SECRET='%s'\n" \
-    "$SESSION_SECRET" "$ADS_REPORT_FINGERPRINT_SECRET" >"$secret_tmp"
+  printf "SESSION_SECRET='%s'\nADS_REPORT_FINGERPRINT_SECRET='%s'\nADS_DELIVERY_SECRET='%s'\nADS_CLICK_FINGERPRINT_SECRET='%s'\n" \
+    "$SESSION_SECRET" "$ADS_REPORT_FINGERPRINT_SECRET" \
+    "$ADS_DELIVERY_SECRET" "$ADS_CLICK_FINGERPRINT_SECRET" >"$secret_tmp"
   run_root install -o root -g root -m 0600 "$secret_tmp" "$SECRET_FILE"
   rm -f "$secret_tmp"
 fi
 : "${ADS_REPORT_FINGERPRINT_SECRET:?Missing ADS_REPORT_FINGERPRINT_SECRET}"
+: "${ADS_DELIVERY_SECRET:?Missing ADS_DELIVERY_SECRET}"
+: "${ADS_CLICK_FINGERPRINT_SECRET:?Missing ADS_CLICK_FINGERPRINT_SECRET}"
 
 existing_walletconnect_project_id=''
 existing_network=''
@@ -266,7 +285,9 @@ trap 'rm -f "${secret_tmp:-}" "${env_tmp:-}"' EXIT
     "SIWE_DOMAIN=${DOMAIN}" \
     "SIWE_URI=https://${DOMAIN}" \
     "SESSION_SECRET=${SESSION_SECRET}" \
-    "ADS_REPORT_FINGERPRINT_SECRET=${ADS_REPORT_FINGERPRINT_SECRET}"
+    "ADS_REPORT_FINGERPRINT_SECRET=${ADS_REPORT_FINGERPRINT_SECRET}" \
+    "ADS_DELIVERY_SECRET=${ADS_DELIVERY_SECRET}" \
+    "ADS_CLICK_FINGERPRINT_SECRET=${ADS_CLICK_FINGERPRINT_SECRET}"
 } >"$env_tmp"
 run_root install -o root -g "$APP_GROUP" -m 0640 "$env_tmp" "$ENV_FILE"
 rm -f "$env_tmp"

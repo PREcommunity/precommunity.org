@@ -347,7 +347,7 @@ export function useAdminWorkspace() {
   ) {
     if (request.mode === 'NONE') {
       setNotice({ type: 'success', message: noChainChangeMessage });
-      await load();
+      await load(false);
       return true;
     }
     if (request.mode === 'PENDING') {
@@ -355,7 +355,7 @@ export function useAdminWorkspace() {
         type: 'info',
         message: `A Safe proposal is already waiting for approvals (${request.proposal.confirmations} of ${request.proposal.threshold}).`,
       });
-      await load();
+      await load(false);
       return true;
     }
     if (request.mode === 'MANUAL') {
@@ -364,7 +364,7 @@ export function useAdminWorkspace() {
         type: 'success',
         message: 'Manual Safe JSON is ready. Import it in Safe Transaction Builder.',
       });
-      await load();
+      await load(false);
       return true;
     }
     if (!deploymentReady) {
@@ -414,7 +414,7 @@ export function useAdminWorkspace() {
           type: 'success',
           message: 'Goal manager changes are confirmed. Waiting for indexer confirmation.',
         });
-        await load();
+        await load(false);
         return true;
       }
 
@@ -453,7 +453,7 @@ export function useAdminWorkspace() {
             ? `Sent to Safe. ${proposal.confirmations} of ${proposal.threshold} approvals collected.`
             : 'Sent to Safe. It is ready to execute in Safe Wallet.',
       });
-      await load();
+      await load(false);
       return true;
     } catch (error) {
       setNotice({
@@ -463,7 +463,7 @@ export function useAdminWorkspace() {
             ? error.message.split('\n')[0]!
             : 'Could not synchronize goal managers.',
       });
-      await load().catch(() => undefined);
+      await load(false).catch(() => undefined);
       return false;
     } finally {
       setTransactionPending(false);

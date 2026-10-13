@@ -30,8 +30,16 @@ const main = {
   TREASURY_ADDRESS_TESTNET: wallet('4'),
   SESSION_SECRET: 'a'.repeat(96),
   ADS_REPORT_FINGERPRINT_SECRET: 'b'.repeat(96),
+  ADS_DELIVERY_SECRET: 'c'.repeat(96),
+  ADS_CLICK_FINGERPRINT_SECRET: 'd'.repeat(96),
   BASE_RPC_URL_TESTNET: 'https://rpc.example/rpc?key=private-fixture&network=sepolia',
 };
+const secretNames = [
+  'SESSION_SECRET',
+  'ADS_REPORT_FINGERPRINT_SECRET',
+  'ADS_DELIVERY_SECRET',
+  'ADS_CLICK_FINGERPRINT_SECRET',
+];
 const manifest = {
   schema: 'precommunity.keyword-market-deployment.v1',
   stage: 'confirmed',
@@ -70,14 +78,15 @@ test('rehearsal profile isolates both fallback URLs, secrets and real app origin
   assert.equal(env.ADS_OPERATOR_PRIVATE_KEY, '');
   assert.equal(env.BASE_RPC_URL_TESTNET, main.BASE_RPC_URL_TESTNET);
   assert.equal(env.NEXT_PUBLIC_BASE_RPC_URL_TESTNET, 'https://sepolia.base.org');
-  assert.notEqual(env.SESSION_SECRET, main.SESSION_SECRET);
-  assert.notEqual(env.ADS_REPORT_FINGERPRINT_SECRET, main.ADS_REPORT_FINGERPRINT_SECRET);
-  assert.notEqual(env.SESSION_SECRET, env.ADS_REPORT_FINGERPRINT_SECRET);
+  assert.equal(new Set(secretNames.map((name) => env[name])).size, secretNames.length);
+  for (const name of secretNames) {
+    assert.match(env[name], /^[a-f0-9]{96}$/);
+    for (const excluded of secretNames) assert.notEqual(env[name], main[excluded]);
+  }
   const serialized = serializeNativeEnv(env);
   assert.deepEqual(parseEnv(serialized), env);
   const rerun = buildKeywordRehearsalProfile(main, env, manifest);
-  assert.equal(rerun.env.SESSION_SECRET, env.SESSION_SECRET);
-  assert.equal(rerun.env.ADS_REPORT_FINGERPRINT_SECRET, env.ADS_REPORT_FINGERPRINT_SECRET);
+  for (const name of secretNames) assert.equal(rerun.env[name], env[name]);
   assert.equal(rerun.pendingDeployment, false);
   assert.equal(rerun.env.ADS_CONTRACT_ADDRESS_TESTNET, manifest.contractAddress);
   assert.equal(rerun.env.ADS_CONTRACT_DEPLOYMENT_BLOCK_TESTNET, '101');
@@ -163,13 +172,31 @@ test('copied main secrets and shared rehearsal secrets are replaced independentl
   const previous = {
     SESSION_SECRET: main.ADS_REPORT_FINGERPRINT_SECRET,
     ADS_REPORT_FINGERPRINT_SECRET: main.SESSION_SECRET,
+    ADS_DELIVERY_SECRET: main.ADS_CLICK_FINGERPRINT_SECRET,
+    ADS_CLICK_FINGERPRINT_SECRET: main.ADS_DELIVERY_SECRET,
   };
   const { env } = buildKeywordRehearsalProfile(main, previous);
-  for (const value of [env.SESSION_SECRET, env.ADS_REPORT_FINGERPRINT_SECRET]) {
-    assert.notEqual(value, main.SESSION_SECRET);
-    assert.notEqual(value, main.ADS_REPORT_FINGERPRINT_SECRET);
+  for (const name of secretNames) {
+    for (const excluded of secretNames) assert.notEqual(env[name], main[excluded]);
   }
-  assert.notEqual(env.SESSION_SECRET, env.ADS_REPORT_FINGERPRINT_SECRET);
+  assert.equal(new Set(secretNames.map((name) => env[name])).size, secretNames.length);
+
+  const shared = Object.fromEntries(secretNames.map((name) => [name, 'e'.repeat(96)]));
+  const regenerated = buildKeywordRehearsalProfile(main, shared).env;
+  assert.equal(regenerated.SESSION_SECRET, shared.SESSION_SECRET);
+  assert.equal(new Set(secretNames.map((name) => regenerated[name])).size, secretNames.length);
+});
+
+test('old rehearsal profiles acquire delivery and click secrets while preserving existing secrets', () => {
+  const previous = {
+    SESSION_SECRET: 'e'.repeat(96),
+    ADS_REPORT_FINGERPRINT_SECRET: 'f'.repeat(96),
+  };
+  const { env } = buildKeywordRehearsalProfile(main, previous);
+  assert.equal(env.SESSION_SECRET, previous.SESSION_SECRET);
+  assert.equal(env.ADS_REPORT_FINGERPRINT_SECRET, previous.ADS_REPORT_FINGERPRINT_SECRET);
+  assert.equal(new Set(secretNames.map((name) => env[name])).size, secretNames.length);
+  assert.deepEqual(buildKeywordRehearsalProfile(main, env).env, env);
 });
 
 test('rehearsal preserves its CoinGecko key, falls back to main, and treats whitespace as absent', () => {

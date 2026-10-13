@@ -128,6 +128,7 @@ test('fresh reset clears only the market, preserves keys/community/prices and ta
   );
   assert.equal(result.redisKeysRemoved, 3);
   for (const name of MARKET_TABLES) assert.equal(f.counts()[name], '0');
+  assert.equal(f.counts().AdBillingClickTotals, '0');
   for (const name of [...PRESERVED_TABLES, 'PreUsdPrice']) assert.equal(f.counts()[name], '2');
   assert.deepEqual(f.audit(), ['AD_API_KEY', 'FUNDING_GOAL']);
   assert.deepEqual(f.backups, [env.KEYWORD_MARKET_RESET_BACKUP_DIR]);

@@ -10,7 +10,7 @@ const adResponse = `{
   "ad": {
     "headline": "Explore Bitcoin",
     "description": "Learn more about Bitcoin.",
-    "clickUrl": "https://precommunity.org/api/v1/keyword-market/revisions/00000000-0000-4000-8000-000000000001/click",
+    "clickUrl": "https://precommunity.org/api/v1/keyword-market/revisions/00000000-0000-4000-8000-000000000001/click?delivery=<signed-token>",
     "url": "https://example.com/bitcoin",
     "reportUrl": "https://precommunity.org/keyword-market/reports/00000000-0000-4000-8000-000000000001"
   }
@@ -47,6 +47,11 @@ export default function KeywordMarketDocsPage() {
             keep <code>/api/v1/keyword-market</code>. The <code>q</code> parameter is required: up
             to 256 characters and 32 word tokens.
           </p>
+          <p className="mt-3 text-sm text-muted">
+            Each key allows up to 60 requests in a one-second window. The window starts with its
+            first request, and the allowance resets when it ends. On <code>429</code>, wait for the
+            number of seconds in <code>Retry-After</code> before retrying.
+          </p>
         </section>
 
         <section className="keyword-market-detail-section" aria-labelledby="docs-response">
@@ -64,6 +69,12 @@ export default function KeywordMarketDocsPage() {
             exactly as returned, including its query parameters, as the link. It records the click
             and redirects to <code>url</code>, the full HTTPS destination address. Request a new
             resolver response for each ad delivery so each viewer receives their own click link.
+          </p>
+          <p className="mt-3 leading-relaxed text-muted">
+            Each click link can create a charge for one hour. Expired links still redirect. Only one
+            click per campaign and client IP is billable in a rolling 5-minute window; other clicks
+            still redirect. The USD bid and PRE conversion rate are fixed at the first accepted
+            billable click.
           </p>
           <p className="mt-3 leading-relaxed text-muted">
             Use <code>reportUrl</code> for a Report ad link. It opens a public form on Precommunity;
@@ -129,6 +140,10 @@ export default function KeywordMarketDocsPage() {
             </li>
             <li>
               <code>404</code> — Market disabled or click revision unavailable.
+            </li>
+            <li>
+              <code>429</code> — Request limit reached; retry after the <code>Retry-After</code>{' '}
+              delay.
             </li>
             <li>
               <code>503</code> — Service temporarily unavailable; retry later.

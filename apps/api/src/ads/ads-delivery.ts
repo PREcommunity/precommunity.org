@@ -1,14 +1,17 @@
 import { adKeywordId, normalizeAdKeyword } from '@precommunity/shared';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
-const DOMAIN = 'precommunity:keyword-market:delivery:v1\0';
+const DOMAIN = 'precommunity:keyword-market:delivery:v2\0';
+export const AD_DELIVERY_TTL_MS = 60 * 60_000;
+const CLOCK_SKEW_MS = 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ADDRESS = /^0x[0-9a-f]{40}$/;
 const HASH = /^0x[0-9a-f]{64}$/;
 
 export interface AdDelivery {
-  version: 1;
+  version: 2;
   deliveryId: string;
+  issuedAt: number;
   revisionId: string;
   chainId: number;
   contractAddress: string;
@@ -19,11 +22,11 @@ export interface AdDelivery {
 }
 
 export function signAdDelivery(
-  context: Omit<AdDelivery, 'version' | 'deliveryId'>,
+  context: Omit<AdDelivery, 'version' | 'deliveryId' | 'issuedAt'>,
   secret: string,
 ) {
   const payload = Buffer.from(
-    JSON.stringify({ ...context, version: 1, deliveryId: randomUUID() }),
+    JSON.stringify({ ...context, version: 2, deliveryId: randomUUID(), issuedAt: Date.now() }),
   ).toString('base64url');
   const signature = createHmac('sha256', secret).update(DOMAIN).update(payload).digest('base64url');
   return `${payload}.${signature}`;
@@ -49,9 +52,14 @@ export function readAdDelivery(
   if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return null;
   try {
     const value = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as AdDelivery;
+    const now = Date.now();
     if (
       !value ||
-      value.version !== 1 ||
+      value.version !== 2 ||
+      !Number.isSafeInteger(value.issuedAt) ||
+      value.issuedAt <= 0 ||
+      value.issuedAt > now + CLOCK_SKEW_MS ||
+      now - value.issuedAt >= AD_DELIVERY_TTL_MS ||
       !UUID.test(value.deliveryId) ||
       !UUID.test(value.revisionId) ||
       value.revisionId !== revisionId ||

@@ -37,6 +37,11 @@ function view(): AdChargeAdminView {
     chainId: 84532,
     contractAddress: history.contractAddress,
     quoteStatus: 'FRESH',
+    clickTotals: {
+      billableClicks: '9007199254740993',
+      suppressedClicks: '9007199254740995',
+      startedAt: '2026-10-13T12:00:00.000Z',
+    },
     settings: {
       automaticEnabled: false,
       intervalMinutes: 10,
@@ -157,6 +162,48 @@ describe('stake charge admin panel', () => {
     expect(html).toContain('Only SUPER_ADMIN');
     expect(html).toContain('PARTIAL');
     expect(state.hook).toHaveBeenCalledWith(false);
+  });
+
+  it('shows exact lifetime billable and skipped counts to read-only admins with their scope', () => {
+    const html = renderToStaticMarkup(<KeywordMarketChargesPanel canManage={false} />);
+    expect(html).toContain('Billable clicks</dt>');
+    expect(html).toContain('>9,007,199,254,740,993</dd>');
+    expect(html).toContain('Non-billable: 5-minute limit</dt>');
+    expect(html).toContain('>9,007,199,254,740,995</dd>');
+    expect(html).toContain('Each valid ad link counts at most once in these totals.');
+    expect(html).toContain('awaiting a price or settlement');
+    expect(html).toContain('Since <time dateTime="2026-10-13T12:00:00.000Z">');
+    expect(html).toContain('Oct 13, 2026, 12:00 UTC');
+    expect(html).not.toContain('Save settings');
+    expect(html).toContain('Pending clicks');
+    expect(html).toContain('PARTIAL');
+  });
+
+  it('keeps totals unavailable while loading or reading an older backend, and shows a new zero baseline', () => {
+    state.value.view = null;
+    state.value.loading = true;
+    let html = renderToStaticMarkup(<KeywordMarketChargesPanel canManage />);
+    expect(html).toMatch(/Billable clicks<\/dt><dd[^>]*>—<\/dd>/);
+    expect(html).toMatch(/Non-billable: 5-minute limit<\/dt><dd[^>]*>—<\/dd>/);
+    expect(html).toContain('Loading charge history');
+
+    state.value.view = view();
+    state.value.loading = false;
+    delete state.value.view.clickTotals;
+    html = renderToStaticMarkup(<KeywordMarketChargesPanel canManage />);
+    expect(html).toMatch(/Billable clicks<\/dt><dd[^>]*>—<\/dd>/);
+    expect(html).toContain('PARTIAL');
+    expect(html).not.toContain('Counting starts');
+
+    state.value.view.clickTotals = {
+      billableClicks: '0',
+      suppressedClicks: '0',
+      startedAt: null,
+    };
+    html = renderToStaticMarkup(<KeywordMarketChargesPanel canManage />);
+    expect(html).toMatch(/Billable clicks<\/dt><dd[^>]*>0<\/dd>/);
+    expect(html).toMatch(/Non-billable: 5-minute limit<\/dt><dd[^>]*>0<\/dd>/);
+    expect(html).toContain('Counting starts with the first recorded click.');
   });
 
   it('shows in-progress runs without a successful-charge message', () => {

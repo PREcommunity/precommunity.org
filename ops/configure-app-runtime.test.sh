@@ -80,6 +80,8 @@ run_configuration() {
     PRECOMMUNITY_COINGECKO_API_KEY_STDIN="${7:-0}" \
     PRECOMMUNITY_ADS_OPERATOR_KEYSTORE_STDIN="${8:-0}" \
     PRECOMMUNITY_ADS_PRICE_UPDATER_KEYSTORE_STDIN="${9:-0}" \
+    ADS_DELIVERY_SECRET=ignored-exported-delivery-fixture-1234567890 \
+    ADS_CLICK_FINGERPRINT_SECRET=ignored-exported-click-fixture-1234567890 \
     PRECOMMUNITY_SAFE_ADDRESS=0x3333333333333333333333333333333333333333 \
     PUBLIC_ESCROW_ADDRESS=0x1111111111111111111111111111111111111111 \
     PUBLIC_ESCROW_DEPLOYMENT_BLOCK=100 \
@@ -101,8 +103,32 @@ assert_value() {
   if [[ "$(read_value "$1")" != "$2" ]]; then echo "Unexpected generated value for $1" >&2; exit 1; fi
 }
 
+assert_secrets() {
+  "$NODE_BINARY" - "$STAGED_ENV" "$CONFIG_DIR/app.secrets" "$TEST_ROOT/output.log" <<'NODE'
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const { parseEnv } = require('node:util');
+const env = parseEnv(fs.readFileSync(process.argv[2], 'utf8'));
+const secrets = parseEnv(fs.readFileSync(process.argv[3], 'utf8'));
+const output = fs.readFileSync(process.argv[4], 'utf8');
+const names = ['SESSION_SECRET', 'ADS_REPORT_FINGERPRINT_SECRET', 'ADS_DELIVERY_SECRET', 'ADS_CLICK_FINGERPRINT_SECRET'];
+assert.equal(new Set(names.map(name => secrets[name])).size, names.length);
+for (const name of names) {
+  assert.match(secrets[name], /^[a-f0-9]{32,}$/);
+  assert.equal(env[name], secrets[name]);
+  assert.equal(output.includes(secrets[name]), false, 'A runtime secret was printed');
+}
+NODE
+}
+
 write_active base "$PRIVATE_RPC" "$PUBLIC_RPC"
 run_configuration base
+assert_secrets
+assert_value SESSION_SECRET '1111111111111111111111111111111111111111111111111111111111111111'
+assert_value ADS_REPORT_FINGERPRINT_SECRET '2222222222222222222222222222222222222222222222222222222222222222'
+cp "$CONFIG_DIR/app.secrets" "$TEST_ROOT/secrets-before"
+run_configuration base
+cmp -s "$CONFIG_DIR/app.secrets" "$TEST_ROOT/secrets-before" || { echo 'Runtime regeneration rotated secrets.' >&2; exit 1; }
 assert_value ADS_CONTRACT_ADDRESS "$MARKET"
 assert_value ADS_CONTRACT_DEPLOYMENT_BLOCK 12345
 assert_value BASE_RPC_URL "$PRIVATE_RPC"
@@ -110,6 +136,8 @@ assert_value NEXT_PUBLIC_BASE_RPC_URL "$PUBLIC_RPC"
 
 write_active base "$PRIVATE_RPC" "$PUBLIC_RPC"
 run_configuration base-sepolia
+assert_secrets
+cmp -s "$CONFIG_DIR/app.secrets" "$TEST_ROOT/secrets-before" || { echo 'Network switching rotated secrets.' >&2; exit 1; }
 assert_value ADS_CONTRACT_ADDRESS_TESTNET ''
 assert_value ADS_CONTRACT_DEPLOYMENT_BLOCK_TESTNET ''
 assert_value NEXT_PUBLIC_BASE_RPC_URL_TESTNET https://sepolia.base.org
@@ -270,4 +298,15 @@ if printf '{"network":"base-sepolia","path":"/private price fixture.json","passw
   echo 'Updater provisioning accepted malformed password encoding.' >&2; exit 1
 fi
 cmp -s "$STAGED_ENV" "$TEST_ROOT/staged-before" || { echo 'Invalid updater input modified staged output.' >&2; exit 1; }
+printf "SESSION_SECRET='%s'\n" \
+  '1111111111111111111111111111111111111111111111111111111111111111' >"$CONFIG_DIR/app.secrets"
+run_configuration base
+assert_secrets
+assert_value SESSION_SECRET '1111111111111111111111111111111111111111111111111111111111111111'
+rm "$CONFIG_DIR/app.secrets"
+run_configuration base
+assert_secrets
+cp "$CONFIG_DIR/app.secrets" "$TEST_ROOT/secrets-before"
+run_configuration base
+cmp -s "$CONFIG_DIR/app.secrets" "$TEST_ROOT/secrets-before" || { echo 'New-install secrets were not retained.' >&2; exit 1; }
 printf 'Hermetic runtime configuration tests passed.\n'
