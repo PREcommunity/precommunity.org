@@ -2,6 +2,7 @@ export const AD_CHARGE_QUEUE = 'precommunity-ad-charges';
 export const AD_CHARGE_JOB = 'charge-ad-stakes';
 export const AD_CHARGE_MANUAL_JOB = 'charge-ad-stakes-manual';
 export const AD_CHARGE_POLL_MS = 15_000;
+export const AD_CHARGE_SETTINGS_CHANGED_EVENT = 'precommunity:ad-charge-settings-changed';
 export const AD_CHARGE_DEFAULTS = {
   automaticEnabled: false,
   intervalMinutes: 10,
@@ -10,6 +11,19 @@ export const AD_CHARGE_DEFAULTS = {
 
 export function adChargeQueueName(chainId: number, contractAddress: string) {
   return `${AD_CHARGE_QUEUE}-${chainId}-${contractAddress.toLowerCase()}`;
+}
+
+export function adWalletRefreshIntervalMs(
+  settings?: Pick<AdChargeSettingsInput, 'automaticEnabled' | 'intervalMinutes'> | null,
+) {
+  const minutes = settings?.intervalMinutes;
+  return settings?.automaticEnabled === true &&
+    typeof minutes === 'number' &&
+    Number.isInteger(minutes) &&
+    minutes >= 1 &&
+    minutes <= 2_147_483_647
+    ? minutes * 60_000
+    : AD_CHARGE_DEFAULTS.intervalMinutes * 60_000;
 }
 
 /** The bid uses six USD decimals and PRE uses eighteen; floor avoids overcharging. */

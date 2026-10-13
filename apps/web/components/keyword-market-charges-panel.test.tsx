@@ -82,17 +82,47 @@ describe('stake charge admin panel', () => {
     };
   });
 
-  it('shows exact amounts, partial shortfalls, stake version and chain-specific transaction', () => {
+  it('shows rounded PRE amounts, partial shortfalls, stake version and chain-specific transaction', () => {
     const html = renderToStaticMarkup(<KeywordMarketChargesPanel canManage />);
-    expect(html).toContain('1.000000000000000001');
+    expect(html).not.toContain('1.000000000000000001');
     expect(html).toContain('1.234567');
     expect(html).toContain('stake v9007199254740995');
-    expect(html).toContain('Uncollected: 0.000000000000000001');
+    expect(html).toContain('Uncollected: 0');
     expect(html).toContain('href="https://sepolia.basescan.org/tx/');
     expect(html).toContain('part of the debt could not be collected');
     expect(html).toContain('type="checkbox"');
     expect(html).toContain('value="10"');
     expect(html).toContain('value="50"');
+  });
+
+  it('limits every PRE amount to four decimals while preserving exact USD and ETH', () => {
+    state.value.view.pending.preRaw = '3456789012345678901';
+    state.value.view.readiness.gasBalanceRaw = '123456789012345678';
+    state.value.view.history = [
+      {
+        ...history,
+        requestedPreRaw: '1234567890123456789',
+        duePreRaw: '2234567890123456789',
+        chargedPreRaw: '1234549999999999999',
+        shortfallPreRaw: '876543210987654321',
+      },
+    ];
+    const html = renderToStaticMarkup(<KeywordMarketChargesPanel canManage />);
+    expect(html).toContain('3.4568');
+    expect(html).toContain('1.2346');
+    expect(html).toContain('Due: 2.2346');
+    expect(html).toContain('1.2345');
+    expect(html).toContain('Uncollected: 0.8765');
+    expect(html).toContain('1.234567');
+    expect(html).toContain('0.123456789012345678 ETH available for fees');
+    expect(html).not.toContain('3.456789012345678901');
+  });
+
+  it('preserves the missing charged amount placeholder', () => {
+    state.value.view.history = [{ ...history, chargedPreRaw: null, shortfallPreRaw: null }];
+    const html = renderToStaticMarkup(<KeywordMarketChargesPanel canManage />);
+    expect(html).toContain('>—</td>');
+    expect(html).not.toContain('Uncollected:');
   });
 
   it('keeps stored PRE charges available while USD debt waits for a fresh quote', () => {

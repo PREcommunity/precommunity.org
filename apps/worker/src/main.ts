@@ -1,5 +1,5 @@
 import './load-env';
-import { prisma, readLatestPreUsdPrice } from '@precommunity/database';
+import { prisma } from '@precommunity/database';
 import {
   PRE_USD_PRICE_QUEUE,
   PRE_USD_PRICE_JOB,
@@ -26,7 +26,7 @@ import { syncSafeGoalActionProposals } from './goal-action-sync';
 import { indexAds } from './ads-chain-source';
 import { flushAdResolutionMetrics, retainAdsData } from './ads-maintenance';
 import { runKeywordMarketJob, runKeywordMarketIndexing } from './application-features';
-import { collectPreUsdPrice } from './pre-usd-price';
+import { PreUsdPriceJobError, runPreUsdPriceJob } from './pre-usd-price';
 import { processPreUsdPricePublication } from './pre-usd-price-publication';
 import { processAdChargeJob } from './keyword-market-charges';
 import { attachWorkerLogs, logWorkerError, logWorkerEvent } from './logging';
@@ -93,17 +93,28 @@ const priceWorker = priceApiKey
         if (job.name !== PRE_USD_PRICE_JOB && job.name !== PRE_USD_PRICE_MANUAL_JOB) {
           throw new Error('Unknown PRE/USD price job');
         }
-        const result = await collectPreUsdPrice(prisma, connection, priceApiKey);
-        const quote = await readLatestPreUsdPrice(prisma);
-        logWorkerEvent('price_checked', {
-          job: job.name,
-          jobId: job.id,
-          outcome: result.outcome,
-          quoteAgeSeconds: quote
-            ? Math.floor((Date.now() - Date.parse(quote.quotedAt)) / 1000)
-            : null,
-        });
-        return result;
+        try {
+          return await runPreUsdPriceJob(prisma, connection, priceApiKey, (result, quote) => {
+            logWorkerEvent('price_checked', {
+              job: job.name,
+              jobId: job.id,
+              outcome: result.outcome,
+              quoteAgeSeconds: quote
+                ? Math.floor((Date.now() - Date.parse(quote.quotedAt)) / 1000)
+                : null,
+            });
+          });
+        } catch (error) {
+          if (error instanceof PreUsdPriceJobError) {
+            logWorkerEvent(
+              'price_collection_failed',
+              { job: job.name, jobId: job.id, stage: error.stage, errorCode: error.code },
+              'error',
+            );
+            throw error;
+          }
+          throw new Error('PRE/USD price collection failed');
+        }
       },
       { connection, concurrency: 1 },
     )

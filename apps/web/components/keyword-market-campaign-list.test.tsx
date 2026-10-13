@@ -194,9 +194,9 @@ describe('campaign search, pagination and totals', () => {
     expect(hooks.states[3]!.value).toBe('bitcoin');
   });
 
-  it('shows PRE with full precision and lifetime campaign view/click totals', () => {
+  it('shows PRE with at most four decimals and lifetime campaign view/click totals', () => {
     const data = campaigns(4);
-    const stakes = ['1000000000000000000', '2500000000000000000', '1'];
+    const stakes = ['1000000000000000000', '2500000000000000000', '1', '981903430762631203492'];
     for (const [index, stakeRaw] of stakes.entries()) {
       data[index]!.position = {
         rank: index + 1,
@@ -219,7 +219,10 @@ describe('campaign search, pagination and totals', () => {
     const html = renderToStaticMarkup(ready(data));
     expect(html).toContain('1 PRE');
     expect(html).toContain('2.5 PRE');
-    expect(html).toContain('0.000000000000000001 PRE');
+    expect(html).toContain('981.9034 PRE');
+    expect(html).not.toContain('981.903430762631203492');
+    expect(html).not.toContain('0.000000000000000001 PRE');
+    expect(data[3]!.position!.stakeRaw).toBe('981903430762631203492');
     expect(html).toContain('0 PRE');
     expect(html).toContain('9,007,199,254,740,993,000');
     expect(html).toContain('1,234');

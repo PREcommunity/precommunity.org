@@ -1,6 +1,6 @@
 'use client';
 
-import { PRE_DECIMALS, type AdCampaignView, type AdCreativeStatusCode } from '@precommunity/shared';
+import type { AdCampaignView, AdCreativeStatusCode } from '@precommunity/shared';
 import {
   ArrowRight,
   CircleAlert,
@@ -17,6 +17,7 @@ import { useKeywordMarketRefresh } from '@/hooks/use-keyword-market-refresh';
 import { AUTH_CHANGED_EVENT, AUTH_SIGN_IN_REQUESTED_EVENT } from '@/lib/auth-events';
 import { getMyAdCampaigns } from '@/lib/keyword-market-api';
 import { ApiError } from '@/lib/http';
+import { formatPreAmount } from '@/lib/format';
 import { ActionButton } from './action-button';
 
 const statusLabel: Record<AdCreativeStatusCode, string> = {
@@ -261,9 +262,7 @@ export function KeywordMarketCampaignList() {
                       )}
                     </span>
                     <span>
-                      <strong>
-                        {formatUnits(BigInt(campaign.position?.stakeRaw ?? '0'), PRE_DECIMALS)} PRE
-                      </strong>
+                      <strong>{formatPreAmount(campaign.position?.stakeRaw ?? '0')} PRE</strong>
                     </span>
                     <span>
                       <strong>{metric(campaign.lifetimeViews)}</strong>

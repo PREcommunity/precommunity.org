@@ -6,7 +6,11 @@ import type {
   AdChargeRunView,
   AdChargeSettingsInput,
 } from '@precommunity/shared';
-import { adChargeErrorMessage } from '@precommunity/shared';
+import {
+  AD_CHARGE_SETTINGS_CHANGED_EVENT,
+  adChargeErrorMessage,
+  adWalletRefreshIntervalMs,
+} from '@precommunity/shared';
 import { ApiError, clientApiJson } from '@/lib/http';
 import type { StatusNoticeState } from '@/components/status-notice';
 
@@ -38,6 +42,7 @@ export function useKeywordMarketCharges(canManage: boolean) {
     let requestedAt = 0;
     let expanded = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
     const visible = () => document.visibilityState === 'visible';
 
@@ -46,6 +51,7 @@ export function useKeywordMarketCharges(canManage: boolean) {
       active = false;
       controller.abort();
       clearTimeout(timer);
+      clearTimeout(refreshTimer);
       setView(null);
       setLoading(false);
       setPending(false);
@@ -60,6 +66,18 @@ export function useKeywordMarketCharges(canManage: boolean) {
       timer = setTimeout(
         () => void pollStatus(),
         Date.now() - requestedAt < 30_000 ? 2_000 : 30_000,
+      );
+    }
+
+    function scheduleRefresh(dueAt = Date.now() + adWalletRefreshIntervalMs(current?.settings)) {
+      clearTimeout(refreshTimer);
+      if (!active || !visible()) return;
+      refreshTimer = setTimeout(
+        () => {
+          if (Date.now() < dueAt) scheduleRefresh(dueAt);
+          else void load();
+        },
+        Math.min(Math.max(0, dueAt - Date.now()), 2_147_483_647),
       );
     }
 
@@ -110,6 +128,7 @@ export function useKeywordMarketCharges(canManage: boolean) {
         } finally {
           reading = null;
           if (active) setLoading(false);
+          scheduleRefresh();
         }
       })();
       return reading;
@@ -230,6 +249,7 @@ export function useKeywordMarketCharges(canManage: boolean) {
           setNotice({ type: 'success', message: 'Charge settings saved.' });
           if (reading) await reading;
           await load();
+          if (active) document.dispatchEvent(new Event(AD_CHARGE_SETTINGS_CHANGED_EVENT));
         } catch (error) {
           if (!active) return;
           setNotice({
@@ -280,6 +300,7 @@ export function useKeywordMarketCharges(canManage: boolean) {
     function refreshVisible() {
       if (!visible()) {
         clearTimeout(timer);
+        clearTimeout(refreshTimer);
         return;
       }
       void load();
@@ -294,13 +315,12 @@ export function useKeywordMarketCharges(canManage: boolean) {
     setLoadingMore(false);
     setNotice(null);
     void load();
-    const refreshTimer = setInterval(() => void load(), 15_000);
     document.addEventListener('visibilitychange', refreshVisible);
     return () => {
       active = false;
       controller.abort();
       clearTimeout(timer);
-      clearInterval(refreshTimer);
+      clearTimeout(refreshTimer);
       document.removeEventListener('visibilitychange', refreshVisible);
       actions.current = null;
     };

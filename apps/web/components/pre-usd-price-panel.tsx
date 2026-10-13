@@ -1,6 +1,7 @@
 'use client';
 
 import { ArrowUpRight, LoaderCircle, RefreshCw } from 'lucide-react';
+import { formatUnits } from 'viem';
 import { usePreUsdPrice } from '@/hooks/use-pre-usd-price';
 import { ActionButton } from './action-button';
 import { StatusNotice } from './status-notice';
@@ -145,6 +146,14 @@ export function PreUsdPricePanel({ canRefresh }: { canRefresh: boolean }) {
             </dd>
           </div>
         </dl>
+      ) : null}
+      {contract?.updaterAddress && !/^0x0{40}$/i.test(contract.updaterAddress) ? (
+        <p className="mt-3 mb-0 break-all text-xs text-muted">
+          Price updater wallet: <span className="font-mono">{contract.updaterAddress}</span>
+          {contract.updaterGasBalanceRaw
+            ? ` · ${formatUnits(BigInt(contract.updaterGasBalanceRaw), 18)} ETH available for fees`
+            : ' · ETH balance unavailable'}
+        </p>
       ) : null}
       {publication?.errorCode ? (
         <p className="mt-3 mb-0 text-xs text-danger" role="status">

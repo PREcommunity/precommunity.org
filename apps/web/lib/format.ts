@@ -1,4 +1,13 @@
 import type { AssetCode, ForumTopicSummary, GoalStatus } from '@precommunity/shared';
+import { formatUnits } from 'viem';
+
+export function formatPreAmount(raw: string | bigint) {
+  const value = BigInt(raw);
+  const scale = 10n ** 14n;
+  const magnitude = value < 0n ? -value : value;
+  const rounded = (magnitude + scale / 2n) / scale;
+  return formatUnits(value < 0n ? -rounded : rounded, 4);
+}
 
 export function formatAmount(value: string | number, asset: AssetCode) {
   const normalized = String(value)

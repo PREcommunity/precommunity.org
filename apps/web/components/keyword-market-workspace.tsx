@@ -44,6 +44,7 @@ export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: s
     error: string;
   } | null>(null);
   const [ownershipVersion, setOwnershipVersion] = useState(0);
+  const [searchReady, setSearchReady] = useState(false);
   const searchRequest = useRef(0);
   const ownershipRequest = useRef(0);
   const { sessionAddress, sessionReady } = useWalletSession();
@@ -136,6 +137,7 @@ export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: s
         setState('error');
       }
     }
+    setSearchReady(true);
     return () => {
       searchRequest.current += 1;
     };
@@ -214,6 +216,7 @@ export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: s
           </label>
           <input
             id="keyword-market-query"
+            disabled={!searchReady}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Try: bitcoin"
@@ -225,7 +228,7 @@ export function KeywordMarketWorkspace({ initialQuery = '' }: { initialQuery?: s
           <button
             className="keyword-market-resolve-button"
             type="submit"
-            disabled={state === 'loading' || !normalized.keyword}
+            disabled={!searchReady || state === 'loading' || !normalized.keyword}
           >
             {state === 'loading' ? <LoaderCircle className="animate-spin" size={16} /> : null}
             <span>{state === 'loading' ? 'Searching…' : 'Search'}</span>

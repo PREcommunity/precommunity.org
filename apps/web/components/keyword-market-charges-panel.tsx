@@ -5,11 +5,16 @@ import { adChargeErrorMessage, type AdChargeBatchView } from '@precommunity/shar
 import { ExternalLink, LoaderCircle, Zap } from 'lucide-react';
 import { formatUnits } from 'viem';
 import { useKeywordMarketCharges } from '@/hooks/use-keyword-market-charges';
+import { formatPreAmount } from '@/lib/format';
 import { ActionButton } from './action-button';
 import { StatusNotice } from './status-notice';
 
 function amount(raw: string | null, decimals = 18) {
   return raw === null ? '—' : formatUnits(BigInt(raw), decimals);
+}
+
+function preAmount(raw: string | null) {
+  return raw === null ? '—' : formatPreAmount(raw);
 }
 
 function ChargeRow({ batch }: { batch: AdChargeBatchView }) {
@@ -29,16 +34,16 @@ function ChargeRow({ batch }: { batch: AdChargeBatchView }) {
       </td>
       <td className="py-3 pr-4 font-mono text-xs">{batch.clickCount}</td>
       <td className="py-3 pr-4 font-mono text-xs">
-        {amount(batch.requestedPreRaw)}
+        {preAmount(batch.requestedPreRaw)}
         {batch.duePreRaw !== batch.requestedPreRaw ? (
-          <span className="mt-1 block text-muted">Due: {amount(batch.duePreRaw)}</span>
+          <span className="mt-1 block text-muted">Due: {preAmount(batch.duePreRaw)}</span>
         ) : null}
       </td>
       <td className="py-3 pr-4 font-mono text-xs">
-        {amount(batch.chargedPreRaw)}
+        {preAmount(batch.chargedPreRaw)}
         {batch.shortfallPreRaw && BigInt(batch.shortfallPreRaw) > 0n ? (
           <span className="mt-1 block text-danger">
-            Uncollected: {amount(batch.shortfallPreRaw)}
+            Uncollected: {preAmount(batch.shortfallPreRaw)}
           </span>
         ) : null}
       </td>
@@ -137,7 +142,7 @@ export function KeywordMarketChargesPanel({ canManage }: { canManage: boolean })
         <div>
           <dt className="text-xs text-muted">Pending PRE</dt>
           <dd className="m-0 mt-1 break-words font-mono font-bold">
-            {view ? amount(view.pending.preRaw) : '—'}
+            {view ? preAmount(view.pending.preRaw) : '—'}
           </dd>
         </div>
         <div>

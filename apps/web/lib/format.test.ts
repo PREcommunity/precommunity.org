@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   formatAmount,
+  formatPreAmount,
   formatMonth,
   formatUtcTimestamp,
   forumTopicTitle,
@@ -9,6 +10,17 @@ import {
 } from './format';
 
 describe('public formatting', () => {
+  it('rounds displayed PRE to four decimal places without losing large integer precision', () => {
+    expect(formatPreAmount('981903430762631203492')).toBe('981.9034');
+    expect(formatPreAmount('1234567890123456789')).toBe('1.2346');
+    expect(formatPreAmount('999950000000000000')).toBe('1');
+    expect(formatPreAmount('1000000000000000000')).toBe('1');
+    expect(formatPreAmount('0')).toBe('0');
+    expect(formatPreAmount('1')).toBe('0');
+    expect(formatPreAmount('9007199254740993000050000000000000')).toBe('9007199254740993.0001');
+    expect(formatPreAmount(-1234567890123456789n)).toBe('-1.2346');
+  });
+
   it('formats exact token units without Number coercion', () => {
     expect(formatAmount('9007199254740993.000000000000000001', 'PRE')).toBe(
       '9,007,199,254,740,993.000000000000000001 PRE',

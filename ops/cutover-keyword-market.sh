@@ -30,7 +30,8 @@ if [[ "${PRECOMMUNITY_MAINTENANCE_CONFIRMED:-0}" != 1 ]]; then
   exit 2
 fi
 for unit in "${UNITS[@]}"; do
-  if [[ "$(systemctl show "$unit" --property=ActiveState --value)" != inactive ||
+  unit_state="$(systemctl show "$unit" --property=ActiveState --value)"
+  if [[ ( "$unit_state" != inactive && "$unit_state" != failed ) ||
         "$(systemctl show "$unit" --property=MainPID --value)" != 0 ]]; then
     echo "Operator must stop $unit and wait for its process to exit before migrating." >&2
     exit 1
@@ -119,6 +120,13 @@ if (!['localhost', '127.0.0.1'].includes(database.hostname) ||
 NODE
 cd "$RELEASE_DIR"
 readonly BACKUP_DIR="$BACKUP_ROOT/keyword-market-$(date -u +%Y%m%dT%H%M%SZ)"
+if [[ "$FRESH_START" == 1 ]]; then
+  KEYWORD_MARKET_FRESH_START=1 KEYWORD_MARKET_RESET_BACKUP_DIR="$BACKUP_DIR" \
+    "$NODE_RUNTIME" --input-type=module <<'NODE'
+import { resetConfiguration } from './ops/reset-keyword-market.mjs';
+resetConfiguration(process.env);
+NODE
+fi
 sudo install -d -o root -g postgres -m 0750 "$BACKUP_DIR"
 sudo cp -p "$ACTIVE_ENV" "$BACKUP_DIR/app.env"
 printf '%s\n' "$PREVIOUS_RELEASE" | sudo tee "$BACKUP_DIR/previous-release" >/dev/null

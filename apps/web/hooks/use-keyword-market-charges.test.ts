@@ -1,4 +1,4 @@
-import type { AdChargeAdminView } from '@precommunity/shared';
+import { AD_CHARGE_SETTINGS_CHANGED_EVENT, type AdChargeAdminView } from '@precommunity/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '@/lib/http';
 import { useKeywordMarketCharges } from './use-keyword-market-charges';
@@ -108,7 +108,11 @@ describe('charge panel data', () => {
     return render(canManage);
   }
 
-  it('loads exact amounts with no-store and follows worker readiness every 15 seconds', async () => {
+  it('loads exact amounts with no-store and refreshes every 10 minutes when automatic charging is off', async () => {
+    api.mockResolvedValueOnce({
+      ...initial,
+      settings: { ...initial.settings, automaticEnabled: false, intervalMinutes: 2 },
+    });
     const panel = await mount();
     expect(panel.view?.pending.preRaw).toBe('1000000000000000001');
     expect(api).toHaveBeenCalledWith(
@@ -116,8 +120,107 @@ describe('charge panel data', () => {
       { cache: 'no-store', signal: expect.any(AbortSignal) },
       'Charge panel',
     );
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(10 * 60_000 - 1);
+    expect(api).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
     expect(api).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses the enabled billing interval for wallet and panel refreshes', async () => {
+    api.mockResolvedValueOnce({
+      ...initial,
+      settings: { ...initial.settings, automaticEnabled: true, intervalMinutes: 5 },
+    });
+    await mount();
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
+    expect(api).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api).toHaveBeenCalledTimes(2);
+  });
+
+  it('rearms refresh after a settings save changes the enabled interval to two minutes', async () => {
+    let latest = {
+      ...initial,
+      settings: { ...initial.settings, automaticEnabled: true, intervalMinutes: 5 },
+    };
+    api.mockImplementation(async (_path: string, options: RequestInit) => {
+      if (options.method === 'PATCH') {
+        latest = {
+          ...latest,
+          settings: { ...latest.settings, ...JSON.parse(String(options.body)) },
+        };
+        return latest.settings;
+      }
+      return latest;
+    });
+    const panel = await mount();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await panel.save({ automaticEnabled: true, intervalMinutes: 2, clickThreshold: 50 });
+    expect(api).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(2 * 60_000 - 1);
+    expect(api).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(api).toHaveBeenCalledTimes(5);
+  });
+
+  it('preserves long legal intervals without overflowing the browser timeout limit', async () => {
+    const interval = 36_000 * 60_000;
+    const maximumTimeout = 2_147_483_647;
+    api.mockResolvedValueOnce({
+      ...initial,
+      settings: { ...initial.settings, automaticEnabled: true, intervalMinutes: 36_000 },
+    });
+    await mount();
+    await vi.advanceTimersByTimeAsync(maximumTimeout);
+    expect(api).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(interval - maximumTimeout - 1);
+    expect(api).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps pending-run status polling fast and then backs off independently of wallet refreshes', async () => {
+    const panel = await mount();
+    await panel.run();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(api.mock.calls.filter(([path]) => path === endpoint)).toHaveLength(1);
+    expect(api.mock.calls.filter(([path]) => path.includes('/run/'))).toHaveLength(15);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(api.mock.calls.filter(([path]) => path.includes('/run/'))).toHaveLength(15);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.mock.calls.filter(([path]) => path.includes('/run/'))).toHaveLength(16);
+  });
+
+  it('does not overlap slow panel reads and resumes immediately after returning to the page', async () => {
+    await mount();
+    let finish!: (view: AdChargeAdminView) => void;
+    api.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(api).toHaveBeenCalledTimes(2);
+    Object.assign(document, { visibilityState: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    Object.assign(document, { visibilityState: 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api).toHaveBeenCalledTimes(2);
+    finish(initial);
+    await vi.advanceTimersByTimeAsync(0);
+    Object.assign(document, { visibilityState: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(api).toHaveBeenCalledTimes(2);
+    Object.assign(document, { visibilityState: 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api).toHaveBeenCalledTimes(3);
   });
 
   it('coalesces repeated button clicks and reports queue/running states without success', async () => {
@@ -244,6 +347,39 @@ describe('charge panel data', () => {
       'Charge settings',
     );
     expect(render().notice?.message).toBe('Charge settings saved.');
+  });
+
+  it('notifies the price panel only after a successful settings save and authoritative reload', async () => {
+    const panel = await mount();
+    const listener = vi.fn();
+    document.addEventListener(AD_CHARGE_SETTINGS_CHANGED_EVENT, listener);
+    const input = { automaticEnabled: true, intervalMinutes: 2, clickThreshold: 50 };
+    let finish!: (view: AdChargeAdminView) => void;
+    api.mockResolvedValueOnce(input).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const save = panel.save(input);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listener).not.toHaveBeenCalled();
+    finish({ ...initial, settings: { ...initial.settings, ...input } });
+    await save;
+    expect(listener).toHaveBeenCalledOnce();
+    expect(render().view?.settings.intervalMinutes).toBe(2);
+    document.removeEventListener(AD_CHARGE_SETTINGS_CHANGED_EVENT, listener);
+  });
+
+  it('does not notify another panel when saving charge settings fails', async () => {
+    const panel = await mount();
+    const listener = vi.fn();
+    document.addEventListener(AD_CHARGE_SETTINGS_CHANGED_EVENT, listener);
+    api.mockRejectedValueOnce(new ApiError('Settings could not be saved', 500));
+    await panel.save({ automaticEnabled: true, intervalMinutes: 2, clickThreshold: 50 });
+    expect(listener).not.toHaveBeenCalled();
+    expect(render().notice?.type).toBe('error');
+    document.removeEventListener(AD_CHARGE_SETTINGS_CHANGED_EVENT, listener);
   });
 
   it('pauses polling when hidden and clears sensitive views after access is revoked', async () => {

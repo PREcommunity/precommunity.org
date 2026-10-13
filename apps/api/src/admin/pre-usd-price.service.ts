@@ -10,6 +10,7 @@ import { readLatestPreUsdPrice } from '@precommunity/database';
 import {
   PRE_USD_PRICE_MANUAL_JOB,
   PRE_USD_PRICE_QUEUE,
+  adWalletRefreshIntervalMs,
   preUsdPriceSnapshot,
   type PreUsdPriceAdminView,
   type PreUsdPriceRefreshResult,
@@ -17,7 +18,7 @@ import {
 } from '@precommunity/shared';
 import { Queue } from 'bullmq';
 import IORedis from 'ioredis';
-import { formatUnits } from 'viem';
+import { createPublicClient, formatUnits, http, isAddress, zeroAddress } from 'viem';
 import { PrismaService } from '../common/prisma.service';
 import { config } from '../config';
 
@@ -48,7 +49,7 @@ export class PreUsdPriceService implements OnModuleDestroy {
     const quote = await readLatestPreUsdPrice(this.prisma);
     const address = config.adsContract.address;
     const identity = { chainId: config.deployment.chainId, contractAddress: address ?? '' };
-    const [state, publication] = address
+    const [state, publication, chargeSettings] = address
       ? await Promise.all([
           this.prisma.adIndexerState.findUnique({
             where: { key: `${identity.chainId}:${address}` },
@@ -57,8 +58,12 @@ export class PreUsdPriceService implements OnModuleDestroy {
             where: identity,
             orderBy: { createdAt: 'desc' },
           }),
+          this.prisma.adChargeSettings.findUnique({
+            where: { chainId_contractAddress: identity },
+            select: { automaticEnabled: true, intervalMinutes: true },
+          }),
         ])
-      : [null, null];
+      : [null, null, null];
     const priceUsd =
       state?.preUsdPriceE18Raw && BigInt(state.preUsdPriceE18Raw) > 0n
         ? formatUnits(BigInt(state.preUsdPriceE18Raw), 18)
@@ -87,6 +92,7 @@ export class PreUsdPriceService implements OnModuleDestroy {
     return {
       ...preUsdPriceSnapshot(quote),
       collectorEnabled: Boolean(config.COINGECKO_API_KEY),
+      walletRefreshIntervalMs: adWalletRefreshIntervalMs(chargeSettings),
       contract: {
         chainId: identity.chainId,
         address,
@@ -94,6 +100,7 @@ export class PreUsdPriceService implements OnModuleDestroy {
         quotedAt,
         status,
         updaterAddress: state?.priceUpdaterAddress ?? null,
+        updaterGasBalanceRaw: await this.updaterGasBalance(state?.priceUpdaterAddress ?? null),
         publication: publication
           ? {
               status: publication.status,
@@ -149,6 +156,21 @@ export class PreUsdPriceService implements OnModuleDestroy {
   async onModuleDestroy() {
     this.connection?.disconnect();
     if (this.queue) await Promise.allSettled([this.queue.close()]);
+  }
+
+  private async updaterGasBalance(address: string | null): Promise<string | null> {
+    if (!address || !isAddress(address, { strict: false }) || address.toLowerCase() === zeroAddress)
+      return null;
+    try {
+      const client = createPublicClient({
+        chain: config.chain,
+        transport: http(config.BASE_RPC_URL, { timeout: 2_000, retryCount: 0 }),
+      });
+      if ((await client.getChainId()) !== config.deployment.chainId) return null;
+      return (await client.getBalance({ address, blockTag: 'latest' })).toString();
+    } catch {
+      return null;
+    }
   }
 
   private getQueue() {

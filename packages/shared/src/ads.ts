@@ -184,6 +184,16 @@ export interface AdKeywordResponse {
   positions: AdKeywordPositionView[];
 }
 
+export interface AdAdminKeywordPage {
+  chainId: number;
+  contractAddress: string | null;
+  chainStatus: AdsChainStatus;
+  page: number;
+  pageSize: number;
+  total: number;
+  items: { keyword: string; stakeRaw: string }[];
+}
+
 export interface AdRevisionView {
   id: string;
   version: number;

@@ -1,0 +1,120 @@
+[[tests]]
+name = "web message keeps only application metadata"
+[[tests.inputs]]
+insert_at = "precommunity_logs"
+type = "log"
+[tests.inputs.log_fields]
+message = "Ready in 127ms"
+_SYSTEMD_UNIT = "precommunity-web.service"
+host = "precommunity-vps"
+timestamp = 2026-10-13T10:00:00Z
+_CMDLINE = "must-not-export"
+[[tests.outputs]]
+extract_from = "precommunity_logs"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = '''
+assert_eq!(.message, "Ready in 127ms")
+assert_eq!(.service, "precommunity-web")
+assert_eq!(.host, "precommunity-vps")
+assert!(is_timestamp(._time))
+assert!(!exists(._CMDLINE))
+'''
+
+[[tests]]
+name = "plain API errors redact URLs credentials and signing bytes"
+[[tests.inputs]]
+insert_at = "precommunity_logs"
+type = "log"
+[tests.inputs.log_fields]
+_SYSTEMD_UNIT = "precommunity-api.service"
+message = '''Failed https://example.invalid/rpc?key=synthetic-url-token Bearer synthetic-bearer password="synthetic-password" api_key=synthetic-api-key privateKey: 'synthetic-private-key' data=0x1234 signedTransaction=synthetic-signed-bytes 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'''
+[[tests.outputs]]
+extract_from = "precommunity_logs"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = '''
+assert_eq!(.service, "precommunity-api")
+assert!(contains(string!(.message), "Failed"))
+assert!(!contains(encode_json(.), "synthetic-"))
+assert!(!contains(encode_json(.), "aaaaaaaa"))
+assert!(!contains(encode_json(.), "0x1234"))
+assert!(contains(string!(.message), "[REDACTED]"))
+'''
+
+[[tests]]
+name = "worker JSON only exports scalar allowlisted fields"
+[[tests.inputs]]
+insert_at = "precommunity_logs"
+type = "log"
+[tests.inputs.log_fields]
+_SYSTEMD_UNIT = "precommunity-worker.service"
+message = '''{"event":"job_completed","level":"info","service":"forged-service","job":"charge","durationMs":23,"stage":"QUOTE_SAVE","quoteAgeSeconds":61,"privateKey":"synthetic-private-key","env":{"TOKEN":"synthetic-env-token"},"signedTransaction":"synthetic-signed-bytes","message":"password=synthetic-password","result":{"batches":2,"status":"APPLIED","privateKey":"synthetic-result-secret","signedTx":"synthetic-tx","reports":{"token":"synthetic-nested-token"}}}'''
+[[tests.outputs]]
+extract_from = "precommunity_logs"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = '''
+assert_eq!(.service, "precommunity-worker")
+assert_eq!(.event, "job_completed")
+assert_eq!(.job, "charge")
+assert_eq!(.durationMs, 23)
+assert_eq!(.stage, "QUOTE_SAVE")
+assert_eq!(.quoteAgeSeconds, 61)
+assert_eq!(.result.batches, 2)
+assert_eq!(.result.status, "APPLIED")
+assert!(!exists(.result.reports))
+assert!(!exists(.env))
+assert!(!exists(.privateKey))
+assert!(!exists(.signedTransaction))
+assert!(!contains(encode_json(.), "synthetic-"))
+'''
+
+[[tests]]
+name = "malformed worker JSON is sanitized as a plain message"
+[[tests.inputs]]
+insert_at = "precommunity_logs"
+type = "log"
+[tests.inputs.log_fields]
+_SYSTEMD_UNIT = "precommunity-worker.service"
+message = "{broken token=synthetic-token"
+[[tests.outputs]]
+extract_from = "precommunity_logs"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = '''
+assert!(contains(string!(.message), "broken"))
+assert!(!contains(string!(.message), "synthetic-token"))
+'''
+
+[[tests]]
+name = "unrelated system units are dropped"
+no_outputs_from = ["precommunity_logs"]
+[[tests.inputs]]
+insert_at = "precommunity_logs"
+type = "log"
+[tests.inputs.log_fields]
+_SYSTEMD_UNIT = "sshd.service"
+message = "do not collect"
+
+[[tests]]
+name = "environment dumps are dropped"
+no_outputs_from = ["precommunity_logs"]
+[[tests.inputs]]
+insert_at = "precommunity_logs"
+type = "log"
+[tests.inputs.log_fields]
+_SYSTEMD_UNIT = "precommunity-api.service"
+message = "NODE_ENV=production TOKEN=synthetic-token"
+
+[[tests]]
+name = "overly large messages are dropped before JSON parsing"
+no_outputs_from = ["precommunity_logs"]
+[[tests.inputs]]
+insert_at = "precommunity_logs"
+type = "vrl"
+source = '''
+payload = "xxxxxxxx"
+for_each([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]) -> |_index, _value| { payload = payload + payload }
+. = {"_SYSTEMD_UNIT": "precommunity-worker.service", "message": payload}
+'''

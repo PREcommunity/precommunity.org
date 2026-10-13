@@ -70,8 +70,10 @@ pnpm build
 
 # Next.js standalone output does not copy static assets automatically.
 readonly STATIC_DEST="$RELEASE_DIR/apps/web/.next/standalone/apps/web/.next/static"
-install -d -m 0755 "$STATIC_DEST"
+readonly PUBLIC_DEST="$RELEASE_DIR/apps/web/.next/standalone/apps/web/public"
+install -d -m 0755 "$STATIC_DEST" "$PUBLIC_DEST"
 rsync -a --delete "$RELEASE_DIR/apps/web/.next/static/" "$STATIC_DEST/"
+rsync -a --delete "$RELEASE_DIR/apps/web/public/" "$PUBLIC_DEST/"
 
 if [[ "$SKIP_DATABASE_DEPLOY" == 1 ]]; then
   printf 'Database migrations are deferred to the controlled cutover.\n'

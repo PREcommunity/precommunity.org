@@ -2,14 +2,19 @@
 node_modules/
 .pnpm-store/
 
-# Local environment files
+# Local environment files and secrets
 .env
 .env.*
+*.env
+*.env.*
+*.token
+*.token.*
+*.secrets
+*.secrets.*
 .rehearsal/
-!.env.example
-!**/.env.example
 .keystore*
 **/.keystore*/**
+!*.example
 
 # Framework and build output
 .next/

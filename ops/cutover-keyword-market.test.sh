@@ -123,17 +123,24 @@ prepare_case() {
     "$CASE_ROOT/home/ubuntu/.nvm" "$CASE_ROOT/home/ubuntu/.local/bin" "$CASE_ROOT/tmp"
   : >"$LOG"
   cp "$SCRIPT_DIR/runtime-deployment-env.sh" "$RELEASE_DIR/ops/"
-  "$NODE_BINARY" - "$SCRIPT_DIR/cutover-keyword-market.sh" "$RELEASE_DIR/ops/cutover-keyword-market.sh" "$CASE_ROOT" <<'NODE'
+  "$NODE_BINARY" - "$SCRIPT_DIR/cutover-keyword-market.sh" "$RELEASE_DIR/ops/cutover-keyword-market.sh" "$CASE_ROOT" "$SCRIPT_DIR/reset-keyword-market.mjs" <<'NODE'
 const fs = require('node:fs');
 let script = fs.readFileSync(process.argv[2], 'utf8');
 for (const root of ['/srv/precommunity', '/etc/precommunity', '/home/ubuntu', '/var/backups/precommunity']) {
   script = script.replaceAll(root, `${process.argv[4]}${root}`);
 }
 fs.writeFileSync(process.argv[3], script);
+// Strip only the fixture root for the real helper's backup-directory validation.
+const helper = fs.readFileSync(process.argv[5], 'utf8').replace(
+  'const backupDir = env.KEYWORD_MARKET_RESET_BACKUP_DIR;',
+  'const backupDir = env.KEYWORD_MARKET_RESET_BACKUP_DIR?.replace(process.env.CUTOVER_TEST_CASE, "");',
+);
+fs.writeFileSync(`${process.argv[4]}/srv/precommunity/releases/new/ops/reset-keyword-market.mjs`, helper);
 NODE
   cp "$TEST_ROOT/bin/node-runtime" "$CASE_ROOT/home/ubuntu/.local/bin/precommunity-node"
   printf 'nvm() { printf "NVM %%s\\n" "$*" >>"$CUTOVER_TEST_LOG"; }\n' >"$CASE_ROOT/home/ubuntu/.nvm/nvm.sh"
-  printf '%s\n' 'DATABASE_URL=postgresql://fixture:fixture@127.0.0.1:5432/precommunity' >"$CASE_ROOT/etc/precommunity/data-services.env"
+  printf '%s\n' 'DATABASE_URL="postgresql://precommunity:fixture@127.0.0.1:5432/precommunity?schema=public&sslmode=disable"' \
+    'REDIS_URL=redis://127.0.0.1:6379/0' >"$CASE_ROOT/etc/precommunity/data-services.env"
   cat >"$CASE_ROOT/common.env" <<'ENV'
 PRECOMMUNITY_NETWORK=base
 WEB_ORIGIN=https://precommunity.org
@@ -153,7 +160,6 @@ ENV
   printf 'ADS_CONTRACT_ADDRESS=0x7777777777777777777777777777777777777777\nADS_CONTRACT_DEPLOYMENT_BLOCK=200\n' >>"$CASE_ROOT/etc/precommunity/app.env.next"
   printf '{"keywordMarket":{"abiSha256":"abi-fixture","artifactSha256":"artifact-fixture","buildInfoId":"build-fixture"}}\n' >"$RELEASE_DIR/release-manifest.json"
   : >"$RELEASE_DIR/apps/worker/dist/check-keyword-market.js"
-  : >"$RELEASE_DIR/ops/reset-keyword-market.mjs"
   cat >"$RELEASE_DIR/ops/activate-release.sh" <<'MOCK'
 #!/usr/bin/env bash
 printf 'ACTIVATE %s\n' "$1" >>"$CUTOVER_TEST_LOG"
@@ -182,6 +188,15 @@ prepare_case exiting-worker
 if run_case CUTOVER_TEST_WORKER_PID=123; then echo 'A worker process still exiting was accepted.' >&2; exit 1; fi
 assert_not_promoted
 if grep -Eq '^(PG_DUMP|PNPM) ' "$LOG"; then echo 'Exiting worker refusal occurred after database work.' >&2; exit 1; fi
+
+prepare_case failed-stopped-worker
+run_case CUTOVER_TEST_ACTIVE_STATE=failed
+grep -Fq 'ACTIVATE ' "$LOG"
+
+prepare_case failed-exiting-worker
+if run_case CUTOVER_TEST_ACTIVE_STATE=failed CUTOVER_TEST_WORKER_PID=123; then echo 'A failed worker with a live process was accepted.' >&2; exit 1; fi
+assert_not_promoted
+if grep -Eq '^(PG_DUMP|PNPM) ' "$LOG"; then echo 'Failed worker refusal occurred after database work.' >&2; exit 1; fi
 
 prepare_case failed-restore
 if run_case CUTOVER_TEST_FAIL_RESTORE=1; then echo 'An unrestorable backup was accepted.' >&2; exit 1; fi
@@ -303,6 +318,18 @@ for previous_market in '' 0x0000000000000000000000000000000000000000 0x777777777
   if run_case KEYWORD_MARKET_FRESH_START=1 "KEYWORD_MARKET_REPLACE_ADDRESS=$previous_market"; then echo 'Fresh start without a nonzero changed market was accepted.' >&2; exit 1; fi
   assert_not_promoted
   if grep -Eq '^(PG_DUMP|PNPM|NODE ops/reset-keyword-market)' "$LOG"; then echo 'Fresh refusal occurred after database work.' >&2; exit 1; fi
+done
+
+for invalid_target in \
+  'DATABASE_URL="postgresql://precommunity:fixture@127.0.0.1:5432/precommunity?schema=public&host=remote"' \
+  'REDIS_URL=redis://127.0.0.1:6379/1'; do
+  prepare_case "fresh-invalid-target-${invalid_target%%=*}"
+  printf 'ADS_CONTRACT_ADDRESS=0x6666666666666666666666666666666666666666\nADS_CONTRACT_DEPLOYMENT_BLOCK=150\n' >>"$CASE_ROOT/etc/precommunity/app.env"
+  cp "$CASE_ROOT/etc/precommunity/app.env" "$CASE_ROOT/active-before"
+  printf '%s\n' "$invalid_target" >>"$CASE_ROOT/etc/precommunity/data-services.env"
+  if run_case KEYWORD_MARKET_FRESH_START=1 KEYWORD_MARKET_REPLACE_ADDRESS=0x6666666666666666666666666666666666666666; then echo 'Fresh start accepted an invalid reset target.' >&2; exit 1; fi
+  assert_not_promoted
+  if grep -Eq '^(PG_DUMP|PNPM|PSQL|NODE ops/reset-keyword-market)' "$LOG"; then echo 'Reset configuration refusal occurred after database work.' >&2; exit 1; fi
 done
 
 prepare_case fresh-success

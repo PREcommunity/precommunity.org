@@ -159,6 +159,11 @@ test('environment guards reject any other network, target, backup or missing exp
     { DATABASE_URL: 'postgresql://precommunity@localhost/other' },
     { DATABASE_URL: 'postgresql://precommunity@localhost/precommunity?schema=other' },
     { DATABASE_URL: 'postgresql://precommunity@localhost/precommunity?host=remote' },
+    { DATABASE_URL: 'postgresql://precommunity@localhost/precommunity?sslmode=require' },
+    {
+      DATABASE_URL:
+        'postgresql://precommunity@localhost/precommunity?sslmode=disable&sslmode=disable',
+    },
     { REDIS_URL: 'redis://localhost:6382/0' },
     { REDIS_URL: 'redis://localhost:6379/1' },
     { REDIS_URL: 'redis://localhost:6379/0?db=1' },
@@ -177,6 +182,14 @@ test('environment guards reject any other network, target, backup or missing exp
       .previousAddress,
     oldAddress,
   );
+});
+
+test('fresh reset accepts the native production URL with local SSL disabled', async () => {
+  const f = fixture();
+  await f.run({ env: { ...env, DATABASE_URL: `${env.DATABASE_URL}&sslmode=disable` } });
+  assert.equal(f.calls.at(-1).sql, 'COMMIT');
+  for (const name of MARKET_TABLES) assert.equal(f.counts()[name], '0');
+  for (const name of PRESERVED_TABLES) assert.equal(f.counts()[name], '2');
 });
 
 test('missing verified backup aborts before database and Redis cleanup', async () => {

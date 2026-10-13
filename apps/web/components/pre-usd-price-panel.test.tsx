@@ -128,6 +128,7 @@ describe('PRE price panel', () => {
         quotedAt: '2026-10-09T10:00:00.000Z',
         status: 'STALE',
         updaterAddress: '0xupdater',
+        updaterGasBalanceRaw: null,
         publication: {
           status: 'SUBMITTED',
           txHash: `0x${'a'.repeat(64)}`,
@@ -142,6 +143,68 @@ describe('PRE price panel', () => {
       expect(html).toContain('SUBMITTED');
       expect(html).toContain(`href="https://${chainId === 8453 ? '' : 'sepolia.'}basescan.org/tx/`);
       expect(html).toContain('waiting for confirmations');
+    },
+  );
+
+  it.each([8453, 84532])(
+    'shows the updater wallet and exact ETH balance on chain %s',
+    (chainId) => {
+      const address = `0x${'12'.repeat(20)}`;
+      state.value.view.contract = {
+        chainId,
+        address: '0xmarket',
+        priceUsd: '0.001',
+        quotedAt: '2026-10-09T10:00:00.000Z',
+        status: 'FRESH',
+        updaterAddress: address,
+        updaterGasBalanceRaw: '123456789012345678',
+        publication: null,
+      };
+      const html = renderToStaticMarkup(<PreUsdPricePanel canRefresh />);
+      expect(html).toContain('Price updater wallet:');
+      expect(html).toContain(`<span class="font-mono">${address}</span>`);
+      expect(html).toContain('0.123456789012345678 ETH available for fees');
+      expect(html).toContain('break-all');
+      expect(html).not.toContain('ETH balance unavailable');
+    },
+  );
+
+  it.each([
+    ['0', '0 ETH available for fees'],
+    [null, 'ETH balance unavailable'],
+    [undefined, 'ETH balance unavailable'],
+  ])('distinguishes zero ETH from an unavailable updater balance (%s)', (raw, expected) => {
+    state.value.view.contract = {
+      chainId: 8453,
+      address: '0xmarket',
+      priceUsd: '0.001',
+      quotedAt: null,
+      status: 'FRESH',
+      updaterAddress: `0x${'12'.repeat(20)}`,
+      updaterGasBalanceRaw: raw as string | null,
+      publication: null,
+    };
+    const html = renderToStaticMarkup(<PreUsdPricePanel canRefresh />);
+    expect(html).toContain(expected);
+    if (raw === null || raw === undefined) expect(html).not.toContain('0 ETH available for fees');
+  });
+
+  it.each([null, '', `0x${'0'.repeat(40)}`])(
+    'omits the wallet line when no updater role is configured (%s)',
+    (address) => {
+      state.value.view.contract = {
+        chainId: 8453,
+        address: '0xmarket',
+        priceUsd: '0.001',
+        quotedAt: null,
+        status: 'FRESH',
+        updaterAddress: address,
+        updaterGasBalanceRaw: '1000000000000000000',
+        publication: null,
+      };
+      expect(renderToStaticMarkup(<PreUsdPricePanel canRefresh />)).not.toContain(
+        'Price updater wallet:',
+      );
     },
   );
 });

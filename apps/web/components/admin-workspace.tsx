@@ -19,6 +19,7 @@ import { GoalManagerPanel } from './goal-manager-panel';
 import { KeywordMarketFeaturePanel } from './keyword-market-feature-panel';
 import { PreUsdPricePanel } from './pre-usd-price-panel';
 import { KeywordMarketChargesPanel } from './keyword-market-charges-panel';
+import { KeywordMarketKeywordsPanel } from './keyword-market-keywords-panel';
 import { SafePayoutPanel } from './safe-payout-panel';
 import { SafeLifecyclePanel } from './safe-lifecycle-panel';
 import { SafeManualTransactionDialog } from './safe-manual-transaction-dialog';
@@ -135,6 +136,7 @@ export function AdminWorkspace({ requestedTab }: { requestedTab?: string }) {
       {sessionReady && canAccessAdmin(sessionRoles) && activeTab === 'keyword-marketplace' ? (
         <div key={sessionAddress}>
           <PreUsdPricePanel canRefresh={sessionRoles.includes('SUPER_ADMIN')} />
+          <KeywordMarketKeywordsPanel />
           <KeywordMarketChargesPanel canManage={sessionRoles.includes('SUPER_ADMIN')} />
         </div>
       ) : null}

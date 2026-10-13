@@ -1,7 +1,12 @@
 import { Prisma, readLatestPreUsdPrice } from '@precommunity/database';
 import { preUsdPriceSnapshot } from '@precommunity/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { collectPreUsdPrice, parsePreUsdQuote } from './pre-usd-price';
+import {
+  collectPreUsdPrice,
+  parsePreUsdQuote,
+  PreUsdPriceJobError,
+  runPreUsdPriceJob,
+} from './pre-usd-price';
 
 const now = new Date('2026-10-09T10:00:00.000Z');
 const timestamp = Math.floor(now.getTime() / 1000);
@@ -35,7 +40,27 @@ function fixture() {
   const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(body()));
   const collect = (at = now) =>
     collectPreUsdPrice(database as never, redis as never, 'private-api-key', request, at);
-  return { database, redis, request, rows, collect };
+  const onChecked = vi.fn();
+  const run = () =>
+    runPreUsdPriceJob(
+      database as never,
+      redis as never,
+      'private-api-key',
+      onChecked,
+      request,
+      now,
+    );
+  return { database, redis, request, rows, collect, onChecked, run };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 }
 
 afterEach(() => {
@@ -194,4 +219,197 @@ describe('PRE/USD collector', () => {
     await expect(f.collect()).rejects.toThrow('Redis unavailable');
     expect(f.request).not.toHaveBeenCalled();
   });
+});
+
+describe('PRE/USD collector job deadline', () => {
+  it.each(['UPDATED', 'UNCHANGED', 'COOLDOWN'] as const)(
+    'logs the final quote once and clears the deadline on %s',
+    async (outcome) => {
+      vi.useFakeTimers();
+      const f = fixture();
+      if (outcome === 'UNCHANGED') {
+        await f.collect();
+        f.request.mockResolvedValue(new Response(body()));
+      }
+      if (outcome === 'COOLDOWN') f.redis.set.mockResolvedValue(null);
+      await expect(f.run()).resolves.toMatchObject({ outcome });
+      expect(f.onChecked).toHaveBeenCalledOnce();
+      expect(f.onChecked.mock.calls[0]![0]).toMatchObject({ outcome });
+      if (outcome === 'COOLDOWN') expect(f.onChecked.mock.calls[0]![1]).toBeNull();
+      else
+        expect(f.onChecked.mock.calls[0]![1]).toMatchObject({
+          priceUsd: '0.123456789012345678',
+        });
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each([
+    'REDIS_GATE',
+    'REDIS_COOLDOWN',
+    'PROVIDER_FETCH',
+    'PROVIDER_BODY',
+    'QUOTE_READ',
+    'QUOTE_SAVE',
+    'LOG_READ',
+  ] as const)('fails within 30 seconds when %s never settles', async (stage) => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const pending = deferred<never>();
+    switch (stage) {
+      case 'REDIS_GATE':
+        f.redis.set.mockReturnValueOnce(pending.promise);
+        break;
+      case 'REDIS_COOLDOWN':
+        f.redis.set.mockResolvedValue(null);
+        f.redis.get.mockReturnValueOnce(pending.promise);
+        break;
+      case 'PROVIDER_FETCH':
+        f.request.mockReturnValueOnce(pending.promise);
+        break;
+      case 'PROVIDER_BODY': {
+        const response = new Response(body());
+        vi.spyOn(response, 'text').mockReturnValueOnce(pending.promise);
+        f.request.mockResolvedValueOnce(response);
+        break;
+      }
+      case 'QUOTE_READ':
+        f.database.preUsdPrice.findFirst.mockReturnValueOnce(pending.promise);
+        break;
+      case 'QUOTE_SAVE':
+        f.database.preUsdPrice.createMany.mockReturnValueOnce(pending.promise);
+        break;
+      case 'LOG_READ':
+        f.database.preUsdPrice.findFirst
+          .mockResolvedValueOnce(null)
+          .mockReturnValueOnce(pending.promise);
+        break;
+    }
+    const completed = vi.fn();
+    const running = f.run().then(completed, (error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(completed).not.toHaveBeenCalled();
+    expect(f.onChecked).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await running;
+    expect(error).toBeInstanceOf(PreUsdPriceJobError);
+    expect(error).toMatchObject({ code: 'TIMEOUT', stage });
+    expect(vi.getTimerCount()).toBe(0);
+    if (stage === 'PROVIDER_FETCH' || stage === 'PROVIDER_BODY') {
+      expect(f.request.mock.calls[0]![1]?.signal?.aborted).toBe(true);
+    }
+    // A late dependency rejection remains observed after the race has settled.
+    pending.reject(new Error('private-api-key late failure'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.onChecked).not.toHaveBeenCalled();
+  });
+
+  it('does not fetch after a timed-out Redis command eventually acquires the gate', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const pending = deferred<string>();
+    f.redis.set.mockReturnValueOnce(pending.promise);
+    const running = f.run().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await running).toMatchObject({ code: 'TIMEOUT', stage: 'REDIS_GATE' });
+    pending.resolve('OK');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.request).not.toHaveBeenCalled();
+    expect(f.database.preUsdPrice.createMany).not.toHaveBeenCalled();
+    expect(f.onChecked).not.toHaveBeenCalled();
+    await expect(f.run()).resolves.toEqual({ outcome: 'UPDATED' });
+    expect(f.onChecked).toHaveBeenCalledOnce();
+  });
+
+  it('retains the five-second provider abort and clears the job deadline', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), ms);
+      return controller.signal;
+    });
+    const f = fixture();
+    f.request.mockImplementation(
+      async (_url, options) =>
+        new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () =>
+            reject(new Error('private-api-key abort')),
+          );
+        }),
+    );
+    const running = f.run().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await running).toMatchObject({ code: 'FAILED', stage: 'PROVIDER_FETCH' });
+    expect(AbortSignal.timeout).toHaveBeenCalledWith(5_000);
+    expect(f.request).toHaveBeenCalledOnce();
+    expect(f.onChecked).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not insert after a timed-out quote read eventually completes', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const pending = deferred<null>();
+    f.database.preUsdPrice.findFirst.mockReturnValueOnce(pending.promise);
+    const running = f.run().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await running).toMatchObject({ code: 'TIMEOUT', stage: 'QUOTE_READ' });
+    pending.resolve(null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.database.preUsdPrice.createMany).not.toHaveBeenCalled();
+    expect(f.onChecked).not.toHaveBeenCalled();
+  });
+
+  it('does not read for logging after a timed-out insert eventually completes', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const pending = deferred<{ count: number }>();
+    f.database.preUsdPrice.createMany.mockReturnValueOnce(pending.promise);
+    const running = f.run().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await running).toMatchObject({ code: 'TIMEOUT', stage: 'QUOTE_SAVE' });
+    pending.resolve({ count: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.database.preUsdPrice.findFirst).toHaveBeenCalledOnce();
+    expect(f.onChecked).not.toHaveBeenCalled();
+  });
+
+  it('never logs success after a timed-out logging read eventually completes', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const pending = deferred<(typeof f.rows)[number] | null>();
+    f.database.preUsdPrice.findFirst
+      .mockResolvedValueOnce(null)
+      .mockReturnValueOnce(pending.promise);
+    const running = f.run().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await running).toMatchObject({ code: 'TIMEOUT', stage: 'LOG_READ' });
+    pending.resolve(f.rows[0]!);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.onChecked).not.toHaveBeenCalled();
+  });
+
+  it.each(['REDIS_GATE', 'PROVIDER_FETCH', 'QUOTE_READ', 'LOG_READ', 'LOG'] as const)(
+    'reports only a safe stage on failure at %s and clears its deadline',
+    async (stage) => {
+      vi.useFakeTimers();
+      const f = fixture();
+      const secret = new Error('private-api-key https://user:password@provider.test');
+      if (stage === 'REDIS_GATE') f.redis.set.mockRejectedValueOnce(secret);
+      if (stage === 'PROVIDER_FETCH') f.request.mockRejectedValueOnce(secret);
+      if (stage === 'QUOTE_READ') f.database.preUsdPrice.findFirst.mockRejectedValueOnce(secret);
+      if (stage === 'LOG_READ')
+        f.database.preUsdPrice.findFirst.mockResolvedValueOnce(null).mockRejectedValueOnce(secret);
+      if (stage === 'LOG')
+        f.onChecked.mockImplementationOnce(() => {
+          throw secret;
+        });
+      const error = await f.run().catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(PreUsdPriceJobError);
+      expect(error).toMatchObject({ code: 'FAILED', stage });
+      expect((error as Error).message).not.toContain('private-api-key');
+      expect((error as Error).message).not.toContain('provider.test');
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 });

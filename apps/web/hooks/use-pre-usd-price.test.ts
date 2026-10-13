@@ -1,4 +1,5 @@
 import type { PreUsdPriceAdminView } from '@precommunity/shared';
+import { AD_CHARGE_SETTINGS_CHANGED_EVENT } from '@precommunity/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '@/lib/http';
 import { usePreUsdPrice } from './use-pre-usd-price';
@@ -34,6 +35,7 @@ vi.mock('@/lib/http', async (importOriginal) => ({
 const quote: PreUsdPriceAdminView = {
   status: 'FRESH',
   collectorEnabled: true,
+  walletRefreshIntervalMs: 600_000,
   quote: {
     id: 'quote-1',
     source: 'COINGECKO',
@@ -109,13 +111,15 @@ describe('PRE price panel data', () => {
     );
   });
 
-  it('refreshes visible prices every minute and resumes after a hidden tab', async () => {
+  it('defaults to refreshing visible price and wallet data every 10 minutes and resumes after a hidden tab', async () => {
     await mount();
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(599_999);
+    expect(api).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
     expect(api).toHaveBeenCalledTimes(2);
     Object.assign(document, { visibilityState: 'hidden' });
     document.dispatchEvent(new Event('visibilitychange'));
-    await vi.advanceTimersByTimeAsync(120_000);
+    await vi.advanceTimersByTimeAsync(1_200_000);
     expect(api).toHaveBeenCalledTimes(2);
     Object.assign(document, { visibilityState: 'visible' });
     document.dispatchEvent(new Event('visibilitychange'));
@@ -127,12 +131,106 @@ describe('PRE price panel data', () => {
     await mount();
     const reading = deferred<PreUsdPriceAdminView>();
     api.mockReturnValueOnce(reading.promise);
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(600_000);
     document.dispatchEvent(new Event('visibilitychange'));
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(600_000);
     expect(api).toHaveBeenCalledTimes(2);
     reading.resolve(quote);
     await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('updates the updater balance without submitting a price refresh', async () => {
+    const first: PreUsdPriceAdminView = {
+      ...quote,
+      walletRefreshIntervalMs: 300_000,
+      contract: {
+        chainId: 8453,
+        address: `0x${'a'.repeat(40)}`,
+        priceUsd: '0.004567890123456789',
+        quotedAt: quote.quote!.quotedAt,
+        status: 'FRESH',
+        updaterAddress: `0x${'b'.repeat(40)}`,
+        updaterGasBalanceRaw: '1000000000000000',
+        publication: null,
+      },
+    };
+    api.mockResolvedValueOnce(first);
+    await mount();
+    api.mockResolvedValueOnce({
+      ...first,
+      contract: { ...first.contract!, updaterGasBalanceRaw: '900000000000000' },
+    });
+    await vi.advanceTimersByTimeAsync(299_999);
+    expect(api).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(renderPriceState().view?.contract?.updaterGasBalanceRaw).toBe('900000000000000');
+    expect(renderPriceState().view?.quote).toEqual(quote.quote);
+    expect(api.mock.calls.some(([, options]) => options.method === 'POST')).toBe(false);
+  });
+
+  it('falls back to 10 minutes when an older API omits the wallet cadence', async () => {
+    const { walletRefreshIntervalMs: ignored, ...legacy } = quote;
+    void ignored;
+    api.mockResolvedValueOnce(legacy);
+    await mount();
+    await vi.advanceTimersByTimeAsync(599_999);
+    expect(api).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses a changed automatic interval on the next periodic read', async () => {
+    api.mockResolvedValueOnce({ ...quote, walletRefreshIntervalMs: 300_000 });
+    await mount();
+    api.mockResolvedValueOnce({ ...quote, walletRefreshIntervalMs: 120_000 });
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(api).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(api).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api).toHaveBeenCalledTimes(3);
+  });
+
+  it('reloads the automatic cadence immediately when billing settings are saved', async () => {
+    await mount();
+    api.mockResolvedValueOnce({ ...quote, walletRefreshIntervalMs: 120_000 });
+    document.dispatchEvent(new Event(AD_CHARGE_SETTINGS_CHANGED_EVENT));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(api).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api).toHaveBeenCalledTimes(3);
+  });
+
+  it('reloads saved settings after an in-flight read returns the old cadence', async () => {
+    await mount();
+    const reading = deferred<PreUsdPriceAdminView>();
+    api.mockReturnValueOnce(reading.promise);
+    await vi.advanceTimersByTimeAsync(600_000);
+    api.mockResolvedValueOnce({ ...quote, walletRefreshIntervalMs: 120_000 });
+
+    document.dispatchEvent(new Event(AD_CHARGE_SETTINGS_CHANGED_EVENT));
+    expect(api).toHaveBeenCalledTimes(2);
+    reading.resolve(quote);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(api).toHaveBeenCalledTimes(3);
+    expect(renderPriceState().view?.walletRefreshIntervalMs).toBe(120_000);
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(api).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api).toHaveBeenCalledTimes(4);
+  });
+
+  it('chunks long intervals without overflowing the browser timer', async () => {
+    const interval = 2_147_483_648;
+    api.mockResolvedValueOnce({ ...quote, walletRefreshIntervalMs: interval });
+    await mount();
+    await vi.advanceTimersByTimeAsync(interval - 1);
+    expect(api).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api).toHaveBeenCalledTimes(2);
   });
 
   it('queues only once during repeated clicks and never claims a queued task succeeded', async () => {
@@ -318,9 +416,9 @@ describe('PRE price panel data', () => {
   it('clears private price data and stops requests after authorization expires', async () => {
     await mount();
     api.mockRejectedValueOnce(new ApiError('Sign in again.', 401));
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(600_000);
     expect(renderPriceState().view).toBeNull();
-    await vi.advanceTimersByTimeAsync(120_000);
+    await vi.advanceTimersByTimeAsync(1_200_000);
     expect(api).toHaveBeenCalledTimes(2);
   });
 });

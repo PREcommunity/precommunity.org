@@ -1,7 +1,5 @@
 'use client';
 
-import { PRE_DECIMALS } from '@precommunity/shared';
-import { formatUnits } from 'viem';
 import type {
   AdAdminAuditView,
   AdAdminReportGroup,
@@ -26,6 +24,7 @@ import {
   resolveAdReports,
 } from '@/lib/keyword-market-api';
 import { ApiError } from '@/lib/http';
+import { formatPreAmount } from '@/lib/format';
 import { ActionButton } from './action-button';
 import { KeywordMarketCreativePreview } from './keyword-market-creative-preview';
 
@@ -91,7 +90,7 @@ function AdReviewEvidence({ revision }: { revision: AdAdminRevisionView }) {
             </div>
             <div>
               <dt>Stake</dt>
-              <dd>{formatUnits(BigInt(revision.proof.stakeRaw), PRE_DECIMALS)} PRE</dd>
+              <dd>{formatPreAmount(revision.proof.stakeRaw)} PRE</dd>
             </div>
             <div>
               <dt>Bid USD (6 decimals)</dt>

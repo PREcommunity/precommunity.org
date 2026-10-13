@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { PreUsdPriceAdminView, PreUsdPriceRefreshStatus } from '@precommunity/shared';
+import { AD_CHARGE_SETTINGS_CHANGED_EVENT, adWalletRefreshIntervalMs } from '@precommunity/shared';
 import { ApiError, clientApiJson } from '@/lib/http';
 import type { StatusNoticeState } from '@/components/status-notice';
 
@@ -25,6 +26,7 @@ export function usePreUsdPrice(canRefresh: boolean) {
     let retryAt = 0;
     let statusTimer: ReturnType<typeof setTimeout> | undefined;
     let cooldownTimer: ReturnType<typeof setTimeout> | undefined;
+    let priceTimer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
     const visible = () => document.visibilityState === 'visible';
 
@@ -33,10 +35,28 @@ export function usePreUsdPrice(canRefresh: boolean) {
       active = false;
       controller.abort();
       clearTimeout(statusTimer);
+      clearTimeout(priceTimer);
       setView(null);
       setLoading(false);
       setPending(false);
       setRefreshState(null);
+    }
+
+    function schedulePrice() {
+      clearTimeout(priceTimer);
+      if (!active || !visible()) return;
+      const interval = currentView?.walletRefreshIntervalMs;
+      const delay =
+        interval && Number.isSafeInteger(interval) && interval > 0
+          ? interval
+          : adWalletRefreshIntervalMs();
+      const dueAt = Date.now() + delay;
+      function tick() {
+        const remaining = dueAt - Date.now();
+        if (remaining > 0) priceTimer = setTimeout(tick, Math.min(remaining, 2_147_483_647));
+        else void loadPrice();
+      }
+      priceTimer = setTimeout(tick, Math.min(delay, 2_147_483_647));
     }
 
     function loadPrice(): Promise<boolean> {
@@ -63,7 +83,10 @@ export function usePreUsdPrice(canRefresh: boolean) {
           return false;
         } finally {
           priceRequest = null;
-          if (active) setLoading(false);
+          if (active) {
+            setLoading(false);
+            schedulePrice();
+          }
         }
       })();
       return priceRequest;
@@ -199,26 +222,32 @@ export function usePreUsdPrice(canRefresh: boolean) {
     function refreshVisible() {
       if (!visible()) {
         clearTimeout(statusTimer);
+        clearTimeout(priceTimer);
         return;
       }
       void loadPrice();
       if (jobId) void pollStatus();
     }
+    const refreshSettings = async () => {
+      if (priceRequest) await priceRequest;
+      await loadPrice();
+    };
 
     setLoading(true);
     setPending(false);
     setRefreshState(null);
     setCooldown(false);
     void loadPrice();
-    const priceTimer = setInterval(() => void loadPrice(), 60_000);
     document.addEventListener('visibilitychange', refreshVisible);
+    document.addEventListener(AD_CHARGE_SETTINGS_CHANGED_EVENT, refreshSettings);
     return () => {
       active = false;
       controller.abort();
-      clearInterval(priceTimer);
+      clearTimeout(priceTimer);
       clearTimeout(statusTimer);
       clearTimeout(cooldownTimer);
       document.removeEventListener('visibilitychange', refreshVisible);
+      document.removeEventListener(AD_CHARGE_SETTINGS_CHANGED_EVENT, refreshSettings);
       requestRefresh.current = null;
     };
   }, [canRefresh]);

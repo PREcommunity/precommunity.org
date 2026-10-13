@@ -346,6 +346,132 @@ function fixture() {
   };
 }
 
+describe('operator wallet refresh cadence', () => {
+  it('reads the balance every ten minutes with automation off while keeping fifteen-second heartbeats', async () => {
+    const f = fixture();
+    f.settings.intervalMinutes = 1;
+    await f.execute();
+    f.chain.balance.mockResolvedValue(2n * 10n ** 18n);
+    f.deps.now = new Date(now.getTime() + 15_000);
+    await f.execute();
+    expect(f.settings).toMatchObject({
+      workerHeartbeatAt: f.deps.now,
+      gasBalanceRaw: (10n ** 18n).toString(),
+      readiness: 'READY',
+    });
+    expect(f.chain.head).toHaveBeenCalledTimes(2);
+    expect(f.chain.verify).toHaveBeenCalledTimes(2);
+    expect(f.chain.balance).toHaveBeenCalledOnce();
+    f.deps.now = new Date(now.getTime() + 10 * 60_000 - 1);
+    await f.execute();
+    expect(f.chain.balance).toHaveBeenCalledOnce();
+    f.deps.now = new Date(now.getTime() + 10 * 60_000);
+    await f.execute();
+    expect(f.chain.balance).toHaveBeenCalledTimes(2);
+    expect(f.settings.gasBalanceRaw).toBe((2n * 10n ** 18n).toString());
+    expect(f.chain.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('applies the current automatic interval to the last balance read when settings change', async () => {
+    const f = fixture();
+    f.settings.automaticEnabled = true;
+    f.settings.intervalMinutes = 5;
+    await f.execute();
+    f.deps.now = new Date(now.getTime() + 4 * 60_000);
+    await f.execute();
+    expect(f.chain.balance).toHaveBeenCalledOnce();
+    f.settings.intervalMinutes = 2;
+    await f.execute();
+    expect(f.chain.balance).toHaveBeenCalledTimes(2);
+    f.deps.now = new Date(now.getTime() + 6 * 60_000 - 1);
+    await f.execute();
+    expect(f.chain.balance).toHaveBeenCalledTimes(2);
+    f.deps.now = new Date(now.getTime() + 6 * 60_000);
+    await f.execute();
+    expect(f.chain.balance).toHaveBeenCalledTimes(3);
+    f.settings.intervalMinutes = 10;
+    f.deps.now = new Date(now.getTime() + 8 * 60_000);
+    await f.execute();
+    expect(f.chain.balance).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps independent chains and different signing wallets from sharing a balance', async () => {
+    const first = fixture();
+    const second = fixture();
+    second.chain.balance.mockResolvedValue(2n * 10n ** 18n);
+    await first.execute();
+    await second.execute();
+    expect(first.chain.balance).toHaveBeenCalledOnce();
+    expect(second.chain.balance).toHaveBeenCalledOnce();
+    expect(second.settings.gasBalanceRaw).toBe((2n * 10n ** 18n).toString());
+    const newSigner = privateKeyToAccount(`0x${'22'.repeat(32)}`);
+    first.deps.unlock = vi.fn(async () => newSigner);
+    first.chain.operator.mockResolvedValue(newSigner.address);
+    first.chain.balance.mockResolvedValue(3n * 10n ** 18n);
+    first.deps.now = new Date(now.getTime() + 15_000);
+    await first.execute();
+    expect(first.chain.balance).toHaveBeenLastCalledWith(newSigner.address);
+    expect(first.chain.balance).toHaveBeenCalledTimes(2);
+    expect(first.settings).toMatchObject({
+      signerAddress: newSigner.address.toLowerCase(),
+      gasBalanceRaw: (3n * 10n ** 18n).toString(),
+    });
+  });
+
+  it('recovers a funded wallet on the next automatic pass before the daily balance refresh', async () => {
+    const f = fixture();
+    f.settings.automaticEnabled = true;
+    f.settings.intervalMinutes = 1440;
+    f.chain.balance.mockResolvedValue(0n);
+    await expect(f.execute()).resolves.toMatchObject({
+      outcome: 'BLOCKED',
+      errorCode: 'INSUFFICIENT_GAS',
+    });
+    f.chain.balance.mockResolvedValue(10n ** 18n);
+    f.deps.now = new Date(now.getTime() + 15_000);
+    f.clicks.push(
+      ...Array.from({ length: 50 }, (_, index) => click(index + 1, { clickedAt: f.deps.now })),
+    );
+    await expect(f.execute()).resolves.toMatchObject({ outcome: 'WAITING_CONFIRMATION' });
+    expect(f.chain.balance).toHaveBeenCalledTimes(2);
+    expect(f.settings.gasBalanceRaw).toBe((10n ** 18n).toString());
+    expect(f.runs).toHaveLength(1);
+    expect(f.runs[0]!.trigger).toBe('AUTO');
+    expect(f.chain.sign).toHaveBeenCalledOnce();
+    expect(f.chain.broadcast).toHaveBeenCalledOnce();
+    expect(f.batches[0]).toMatchObject({ status: 'SUBMITTED', clickCount: 50 });
+  });
+
+  it('refreshes a cached positive balance for an explicit manual job', async () => {
+    const f = fixture();
+    await f.execute();
+    f.chain.balance.mockResolvedValue(2n * 10n ** 18n);
+    f.deps.now = new Date(now.getTime() + 15_000);
+    f.clicks.push(click(1, { clickedAt: f.deps.now }));
+    f.runs.push(run());
+    await f.execute('run-1');
+    expect(f.chain.balance).toHaveBeenCalledTimes(2);
+    expect(f.settings.gasBalanceRaw).toBe((2n * 10n ** 18n).toString());
+    expect(f.chain.sign).toHaveBeenCalledOnce();
+    expect(f.batches[0]!.status).toBe('SUBMITTED');
+  });
+
+  it('keeps checking transaction fee sufficiency even when the display balance is cached', async () => {
+    const f = fixture();
+    f.settings.automaticEnabled = true;
+    f.settings.clickThreshold = 1;
+    await f.execute();
+    f.deps.now = new Date(now.getTime() + 15_000);
+    f.clicks.push(click(1, { clickedAt: f.deps.now }));
+    f.chain.sign.mockRejectedValue(new ChargeBlocked('INSUFFICIENT_GAS'));
+    await f.execute();
+    expect(f.chain.balance).toHaveBeenCalledOnce();
+    expect(f.chain.sign).toHaveBeenCalledOnce();
+    expect(f.settings.errorCode).toBe('INSUFFICIENT_GAS');
+    expect(f.chain.broadcast).not.toHaveBeenCalled();
+  });
+});
+
 describe('charge debt and scheduling', () => {
   it('keeps automatic charging disabled by default while updating readiness and interrupted captures', async () => {
     const f = fixture();

@@ -6,7 +6,11 @@ import {
   type AdChargeSettings,
   type PrismaClient,
 } from '@precommunity/database';
-import { billPreRaw, keywordMarketConfirmations } from '@precommunity/shared';
+import {
+  adWalletRefreshIntervalMs,
+  billPreRaw,
+  keywordMarketConfirmations,
+} from '@precommunity/shared';
 import { randomBytes } from 'node:crypto';
 import { formatUnits, type PrivateKeyAccount } from 'viem';
 import { config } from './config';
@@ -34,6 +38,12 @@ export interface ChargeDependencies {
 }
 
 let account: Promise<PrivateKeyAccount> | undefined;
+// Keep per-pass chains fresh for canonical hash checks; only the display balance is cached.
+const defaultWalletBalanceCacheKey = {};
+const walletBalanceCache = new WeakMap<
+  object,
+  { address: string; balance: string; checkedAt: number }
+>();
 function defaultDependencies(): ChargeDependencies | null {
   if (!config.adsContract.address) return null;
   return {
@@ -759,7 +769,25 @@ export async function processAdChargeJob(
       signer = await deps.unlock();
       operator = (await deps.chain.operator()).toLowerCase();
       if (signer.address.toLowerCase() !== operator) throw new ChargeBlocked('OPERATOR_MISMATCH');
-      balance = (await deps.chain.balance(signer.address)).toString();
+      const cacheKey = dependencies?.chain ?? defaultWalletBalanceCacheKey;
+      const cached = walletBalanceCache.get(cacheKey);
+      const age = cached ? deps.now.getTime() - cached.checkedAt : Infinity;
+      if (
+        !job.runId &&
+        cached?.address === signer.address.toLowerCase() &&
+        cached.balance !== '0' &&
+        age >= 0 &&
+        age < adWalletRefreshIntervalMs(settings)
+      ) {
+        balance = cached.balance;
+      } else {
+        balance = (await deps.chain.balance(signer.address)).toString();
+        walletBalanceCache.set(cacheKey, {
+          address: signer.address.toLowerCase(),
+          balance,
+          checkedAt: deps.now.getTime(),
+        });
+      }
       if (balance === '0') throw new ChargeBlocked('INSUFFICIENT_GAS');
     } catch (error) {
       blocked = code(error);

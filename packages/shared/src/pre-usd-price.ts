@@ -27,6 +27,7 @@ export interface PreUsdPriceSnapshot {
 
 export interface PreUsdPriceAdminView extends PreUsdPriceSnapshot {
   collectorEnabled: boolean;
+  walletRefreshIntervalMs: number;
   contract?: {
     chainId: number;
     address: string | null;
@@ -34,6 +35,7 @@ export interface PreUsdPriceAdminView extends PreUsdPriceSnapshot {
     quotedAt: string | null;
     status: 'FRESH' | 'STALE' | 'MISSING' | 'SYNCING' | 'AWAITING_CONTRACT';
     updaterAddress: string | null;
+    updaterGasBalanceRaw: string | null;
     publication: {
       status: string;
       txHash: string | null;

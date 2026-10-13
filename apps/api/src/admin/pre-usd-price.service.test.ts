@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
     REDIS_URL: 'redis://localhost:6379',
     COINGECKO_API_KEY: 'test-key' as string | undefined,
     deployment: { chainId: 84532 },
+    chain: { id: 84532 },
+    BASE_RPC_URL: 'https://private-rpc.example/?key=private-fixture',
     adsContract: { address: null as string | null },
   },
   queue: { add: vi.fn(), getJob: vi.fn(), on: vi.fn(), close: vi.fn(), waitUntilReady: vi.fn() },
@@ -23,10 +25,25 @@ const mocks = vi.hoisted(() => ({
   redisConstructor: vi.fn(),
   indexedPrice: vi.fn(),
   publication: vi.fn(),
+  chargeSettings: vi.fn(),
+  rpc: { getChainId: vi.fn(), getBalance: vi.fn() },
+  client: vi.fn(),
+  transport: vi.fn(),
 }));
 vi.mock('../config', () => ({ config: mocks.config }));
 vi.mock('../common/prisma.service', () => ({ PrismaService: class {} }));
 vi.mock('@precommunity/database', () => ({ readLatestPreUsdPrice: vi.fn() }));
+vi.mock('viem', async (original) => ({
+  ...(await original<typeof import('viem')>()),
+  createPublicClient: (...args: unknown[]) => {
+    mocks.client(...args);
+    return mocks.rpc;
+  },
+  http: (...args: unknown[]) => {
+    mocks.transport(...args);
+    return 'fixture-transport';
+  },
+}));
 vi.mock('bullmq', () => ({
   Queue: class {
     constructor(...args: unknown[]) {
@@ -58,6 +75,7 @@ function fixture() {
   const prisma = {
     adIndexerState: { findUnique: mocks.indexedPrice },
     adPricePublication: { findFirst: mocks.publication },
+    adChargeSettings: { findUnique: mocks.chargeSettings },
   } as unknown as PrismaService;
   return { prisma, service: new PreUsdPriceService(prisma) };
 }
@@ -67,8 +85,13 @@ describe('admin PRE/USD price service', () => {
     vi.resetAllMocks();
     mocks.config.COINGECKO_API_KEY = 'test-key';
     mocks.config.adsContract.address = null;
+    mocks.config.deployment.chainId = 84532;
+    mocks.config.chain.id = 84532;
+    mocks.rpc.getChainId.mockResolvedValue(84532);
+    mocks.rpc.getBalance.mockResolvedValue(0n);
     mocks.indexedPrice.mockResolvedValue(null);
     mocks.publication.mockResolvedValue(null);
+    mocks.chargeSettings.mockResolvedValue(null);
     mocks.queue.add.mockResolvedValue({ id: jobId });
     mocks.queue.close.mockResolvedValue(undefined);
     mocks.queue.waitUntilReady.mockResolvedValue(undefined);
@@ -322,5 +345,140 @@ describe('admin PRE/USD price service', () => {
       updatedAt: new Date('2026-10-09T10:18:00.000Z'),
     });
     expect((await fixture().service.latest()).contract?.status).toBe('SYNCING');
+  });
+
+  it('reads the selected deployment AUTO interval once and exposes its wallet refresh cadence', async () => {
+    mocks.config.adsContract.address = '0x1111111111111111111111111111111111111111';
+    mocks.chargeSettings.mockResolvedValue({ automaticEnabled: true, intervalMinutes: 30 });
+    const view = await fixture().service.latest();
+    expect(view.walletRefreshIntervalMs).toBe(1_800_000);
+    expect(mocks.chargeSettings).toHaveBeenCalledOnce();
+    expect(mocks.chargeSettings).toHaveBeenCalledWith({
+      where: {
+        chainId_contractAddress: {
+          chainId: 84532,
+          contractAddress: mocks.config.adsContract.address,
+        },
+      },
+      select: { automaticEnabled: true, intervalMinutes: true },
+    });
+  });
+
+  it.each([
+    null,
+    { automaticEnabled: false, intervalMinutes: 30 },
+    { automaticEnabled: true, intervalMinutes: 0 },
+  ])('uses ten minute wallet refresh without valid enabled AUTO settings: %j', async (settings) => {
+    mocks.config.adsContract.address = '0x1111111111111111111111111111111111111111';
+    mocks.chargeSettings.mockResolvedValue(settings);
+    expect((await fixture().service.latest()).walletRefreshIntervalMs).toBe(600_000);
+  });
+
+  it('always exposes the fallback cadence without querying settings when the contract is absent', async () => {
+    expect((await fixture().service.latest()).walletRefreshIntervalMs).toBe(600_000);
+    expect(mocks.chargeSettings).not.toHaveBeenCalled();
+  });
+
+  describe('price updater ETH balance', () => {
+    const updater = '0x2222222222222222222222222222222222222222';
+
+    function configured(updaterAddress: string | null = updater) {
+      mocks.config.adsContract.address = '0x1111111111111111111111111111111111111111';
+      vi.mocked(readLatestPreUsdPrice).mockResolvedValue(quote);
+      mocks.indexedPrice.mockResolvedValue({
+        preUsdPriceE18Raw: '1000000000000000',
+        preUsdPriceQuotedAt: BigInt(Date.parse(quote.quotedAt) / 1000),
+        priceUpdaterAddress: updaterAddress,
+        configBlockNumber: 100n,
+        lastBlockNumber: 100n,
+        updatedAt: new Date(),
+      });
+      return fixture().service;
+    }
+
+    it('returns the exact raw ETH balance for the authoritative indexed updater', async () => {
+      const service = configured();
+      mocks.rpc.getBalance.mockResolvedValue(123456789012345678901n);
+      expect((await service.latest()).contract).toMatchObject({
+        updaterAddress: updater,
+        updaterGasBalanceRaw: '123456789012345678901',
+      });
+      expect(mocks.rpc.getBalance).toHaveBeenCalledWith({ address: updater, blockTag: 'latest' });
+      expect(mocks.transport).toHaveBeenCalledWith(mocks.config.BASE_RPC_URL, {
+        timeout: 2_000,
+        retryCount: 0,
+      });
+    });
+
+    it('keeps a successful zero balance distinct from an unavailable reading', async () => {
+      expect((await configured().latest()).contract?.updaterGasBalanceRaw).toBe('0');
+    });
+
+    it.each([8453, 84532])(
+      'accepts balances only from the configured chain %s',
+      async (chainId) => {
+        const service = configured();
+        mocks.config.deployment.chainId = chainId;
+        mocks.config.chain.id = chainId;
+        mocks.rpc.getChainId.mockResolvedValue(chainId);
+        mocks.rpc.getBalance.mockResolvedValue(42n);
+        expect((await service.latest()).contract?.updaterGasBalanceRaw).toBe('42');
+        expect(mocks.client).toHaveBeenCalledWith({
+          chain: mocks.config.chain,
+          transport: 'fixture-transport',
+        });
+      },
+    );
+
+    it('rejects a response from another chain before reading a balance', async () => {
+      const service = configured();
+      mocks.rpc.getChainId.mockResolvedValue(8453);
+      expect((await service.latest()).contract?.updaterGasBalanceRaw).toBeNull();
+      expect(mocks.rpc.getBalance).not.toHaveBeenCalled();
+    });
+
+    it.each(['getChainId', 'getBalance'] as const)(
+      'keeps quote and publication available when %s fails without exposing provider details',
+      async (method) => {
+        const service = configured();
+        mocks.publication.mockResolvedValue({
+          status: 'CONFIRMED',
+          txHash: '0xtransaction',
+          errorCode: null,
+          quotedAt: BigInt(Date.parse(quote.quotedAt) / 1000),
+        });
+        mocks.rpc[method].mockRejectedValue(
+          new Error('https://private-rpc.example/?key=private-fixture'),
+        );
+        const view = await service.latest();
+        expect(view.quote).toEqual(quote);
+        expect(view.contract).toMatchObject({
+          priceUsd: '0.001',
+          updaterAddress: updater,
+          updaterGasBalanceRaw: null,
+          publication: { status: 'CONFIRMED', txHash: '0xtransaction', errorCode: null },
+        });
+        expect(JSON.stringify(view)).not.toContain('private-fixture');
+      },
+    );
+
+    it.each([null, '0x0000000000000000000000000000000000000000', 'invalid-address'])(
+      'skips an absent, revoked or invalid updater: %s',
+      async (address) => {
+        expect((await configured(address).latest()).contract?.updaterGasBalanceRaw).toBeNull();
+        expect(mocks.client).not.toHaveBeenCalled();
+        expect(mocks.rpc.getBalance).not.toHaveBeenCalled();
+      },
+    );
+
+    it('includes the unavailable balance field when no contract is configured', async () => {
+      vi.mocked(readLatestPreUsdPrice).mockResolvedValue(null);
+      expect((await fixture().service.latest()).contract).toMatchObject({
+        status: 'AWAITING_CONTRACT',
+        updaterAddress: null,
+        updaterGasBalanceRaw: null,
+      });
+      expect(mocks.client).not.toHaveBeenCalled();
+    });
   });
 });

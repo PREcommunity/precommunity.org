@@ -40,6 +40,7 @@ import {
   setAdCampaignPaused,
 } from '@/lib/keyword-market-api';
 import { ApiError } from '@/lib/http';
+import { formatPreAmount } from '@/lib/format';
 import { requireSuccessfulReceipt } from '@/lib/transactions';
 import { ActionButton } from './action-button';
 import { KeywordMarketCreativePreview } from './keyword-market-creative-preview';
@@ -62,7 +63,7 @@ function count(value: string) {
 function formatPre(raw: string | null | undefined) {
   if (raw === null || raw === undefined) return '—';
   try {
-    return `${formatUnits(BigInt(raw), PRE_DECIMALS)} PRE`;
+    return `${formatPreAmount(raw)} PRE`;
   } catch {
     return '—';
   }

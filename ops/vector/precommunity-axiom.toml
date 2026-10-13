@@ -1,0 +1,73 @@
+# Vector 0.56.0. Only AXIOM_TOKEN is secret; systemd reads it from a root-only env file.
+data_dir = "/var/lib/precommunity-vector"
+
+[sources.precommunity_journal]
+type = "journald"
+include_units = ["precommunity-web.service", "precommunity-api.service", "precommunity-worker.service"]
+# VPS systemd 259 supports cross-boot recovery (Vector rejects 250-257).
+current_boot_only = false
+since_now = true
+
+[transforms.precommunity_logs]
+type = "remap"
+inputs = ["precommunity_journal"]
+drop_on_abort = true
+drop_on_error = true
+source = '''
+unit = string(._SYSTEMD_UNIT) ?? ""
+if !includes(["precommunity-web.service", "precommunity-api.service", "precommunity-worker.service"], unit) { abort }
+raw = string(.message) ?? ""
+if length(raw) > 32768 { abort }
+# Environment dumps are not application diagnostics.
+if match(raw, r'\b[A-Z][A-Z0-9_]{2,}\s*=|\bprocess\.env\b') { abort }
+event = {
+  "_time": timestamp(.timestamp) ?? now(),
+  "host": string(.host) ?? "",
+  "service": replace(unit, ".service", ""),
+  "environment": "production",
+  "message": raw,
+  "priority": string(.PRIORITY) ?? ""
+}
+parsed, err = parse_json(raw)
+if unit == "precommunity-worker.service" && err == null && is_object(parsed) {
+  event.message = string(parsed.message) ?? string(parsed.event) ?? "worker_log"
+  # Do not retain the original JSON, arbitrary details, job.data, env or signing data.
+  for_each(["event", "level", "errorType", "queue", "job", "jobId", "durationMs", "pid", "network", "chainId", "contractAddress", "deploymentBlock", "status", "outcome", "stage", "errorCode", "feature", "quoteAgeSeconds"]) -> |_index, key| {
+    value = get(parsed, [key]) ?? null
+    if is_string(value) || is_integer(value) || is_float(value) || is_boolean(value) {
+      event = set!(event, [key], value)
+    }
+  }
+  result = object(parsed.result) ?? {}
+  safe_result = {}
+  for_each(["status", "outcome", "errorCode", "feature", "chainId", "contractAddress", "deploymentBlock", "processed", "indexedThroughBlock", "head", "checked", "updated", "reconciled", "expired", "attempted", "recovered", "batches", "applied", "resolutions", "views", "clicks", "reports", "dailyMetrics", "metricFlushReceipts", "safeOwners", "preservedLegacyManagers"]) -> |_index, key| {
+    value = get(result, [key]) ?? null
+    if is_string(value) || is_integer(value) || is_float(value) || is_boolean(value) {
+      safe_result = set!(safe_result, [key], value)
+    }
+  }
+  if length(safe_result) > 0 { event.result = safe_result }
+}
+# Apply the same conservative masking to plain messages and every allowed JSON string.
+. = redact(event, filters: [
+  r'(?i)[a-z][a-z0-9+.-]*://[^\s"\x27<>]+',
+  r'(?i)\b(?:0x)?[a-f0-9]{64,}\b',
+  r'(?i)\bBearer\s+[^\s,;"\x27]+',
+  r'(?i)\b(?:[\w-]*[-_])?(?:api[-_]?key|access[-_]?token|authorization|cookie|set[-_]?cookie|password|passwd|secret|private[-_]?key|token|signed[-_]?transaction|signed[-_]?tx|raw[-_]?transaction|data)["\x27]?\s*[:=]\s*(?:"[^"]*"|\x27[^\x27]*\x27|(?:Bearer\s+)?[^\s,;]+)'
+])
+'''
+
+[sinks.precommunity_axiom]
+type = "axiom"
+inputs = ["precommunity_logs"]
+dataset = "precommunity.org"
+region = "us-east-1.aws.edge.axiom.co"
+token = "${AXIOM_TOKEN}"
+
+[sinks.precommunity_axiom.acknowledgements]
+enabled = true
+
+[sinks.precommunity_axiom.buffer]
+type = "disk"
+max_size = 536870912
+when_full = "block"

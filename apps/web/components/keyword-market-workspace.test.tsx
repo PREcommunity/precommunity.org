@@ -156,9 +156,30 @@ describe('keyword Search and campaign actions', () => {
     vi.unstubAllGlobals();
   });
 
+  it.each([false, true])(
+    'accepts input only after hydration with session ready %s',
+    async (ready) => {
+      hooks.session.sessionReady = ready;
+      const initial = render('');
+      expect(host(initial.tree, 'input')!.disabled).toBe(true);
+      expect(host(initial.tree, 'button')!.disabled).toBe(true);
+      await settle();
+      const hydrated = render('');
+      expect(host(hydrated.tree, 'input')!.disabled).toBe(false);
+      host(hydrated.tree, 'input')!.onChange({ target: { value: '  TESLA  ' } });
+      const draft = render('');
+      expect(host(draft.tree, 'button')!.disabled).toBe(false);
+      host(draft.tree, 'form')!.onSubmit({ preventDefault: vi.fn() });
+      await settle();
+      expect(getAdKeyword).toHaveBeenCalledExactlyOnceWith('tesla');
+    },
+  );
+
   it('searches a normalized URL phrase without offering idle campaign actions', async () => {
     const query = '  TESLA—Motors xyz  ';
     const first = render(query);
+    expect(host(first.tree, 'input')!.disabled).toBe(true);
+    expect(host(first.tree, 'button')!.disabled).toBe(true);
     expect(first.html).not.toContain('/keyword-market/campaigns/new');
     expect(first.html).not.toContain('New stake');
     expect(first.html).not.toContain('keyword-market-resolver-empty-icon');
@@ -488,9 +509,9 @@ describe('keyword Search and campaign actions', () => {
     ['0', '0'],
     ['1000000000000000000', '1'],
     ['2500000000000000000', '2.5'],
-    ['1', '0.000000000000000001'],
-    ['100000000000000001', '0.100000000000000001'],
-  ])('renders stake %s in exact PRE units', (raw, expected) => {
+    ['1', '0'],
+    ['100000000000000001', '0.1'],
+  ])('renders stake %s with at most four PRE decimal places', (raw, expected) => {
     const html = renderToStaticMarkup(
       <KeywordMarketRanking
         data={{

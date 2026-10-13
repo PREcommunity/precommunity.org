@@ -58,9 +58,11 @@ export function resetConfiguration(env) {
     database.pathname !== '/precommunity' ||
     database.username !== 'precommunity' ||
     database.hash ||
-    [...database.searchParams.keys()].some((key) => key !== 'schema') ||
+    [...database.searchParams.keys()].some((key) => !['schema', 'sslmode'].includes(key)) ||
     database.searchParams.getAll('schema').length > 1 ||
-    ![null, 'public'].includes(database.searchParams.get('schema'))
+    ![null, 'public'].includes(database.searchParams.get('schema')) ||
+    database.searchParams.getAll('sslmode').length > 1 ||
+    ![null, 'disable'].includes(database.searchParams.get('sslmode'))
   ) {
     throw new ResetRefused(
       'Reset database must be the local precommunity/public production target.',

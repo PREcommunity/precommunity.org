@@ -183,4 +183,13 @@ describe('keyword ranking pagination', () => {
     tree = renderRanking(data);
     expect(renderToStaticMarkup(tree)).toContain('Page 1 of 3');
   });
+
+  it('limits PRE stake display to four decimals while retaining its raw amount', () => {
+    const data = ranking(1);
+    data.positions[0]!.stakeRaw = '981903430762631203492';
+    const html = renderToStaticMarkup(renderRanking(data));
+    expect(html).toContain('<strong>981.9034</strong>');
+    expect(html).not.toContain('981.903430762631203492');
+    expect(data.positions[0]!.stakeRaw).toBe('981903430762631203492');
+  });
 });

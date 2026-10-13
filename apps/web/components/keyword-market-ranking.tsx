@@ -3,7 +3,6 @@
 import {
   BASE_MAINNET_DEPLOYMENT,
   BASE_SEPOLIA_DEPLOYMENT,
-  PRE_DECIMALS,
   explorerTransactionUrl,
   type AdKeywordResponse,
 } from '@precommunity/shared';
@@ -12,6 +11,7 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { formatUnits } from 'viem';
 import { useWalletSession } from '@/hooks/use-wallet-session';
+import { formatPreAmount } from '@/lib/format';
 import { ActionButton } from './action-button';
 
 const PAGE_SIZE = 20;
@@ -76,7 +76,7 @@ export function KeywordMarketRanking({
                 <small>USD / click</small>
               </span>
               <span>
-                <strong>{formatUnits(BigInt(position.stakeRaw), PRE_DECIMALS)}</strong>
+                <strong>{formatPreAmount(position.stakeRaw)}</strong>
                 <small>PRE</small>
               </span>
               <span>
